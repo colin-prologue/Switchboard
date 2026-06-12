@@ -10,7 +10,7 @@
   "required": ["schema_version", "id", "tier", "status", "goal", "done", "created_at"],
 
   "properties": {
-    "schema_version": { "const": "0.1.0" },
+    "schema_version": { "const": "0.2.0" },
     "id": {
       "type": "string",
       "description": "Globally unique. Convention: the plan-path composite, e.g. 'PLAN-031/PH-2/T-2'. Unique across plans, and human-traceable."
@@ -20,7 +20,7 @@
       "description": "Which worker pool picks this up. Immutable once queued — this is the cost lever, set by the plan's routing."
     },
     "status": {
-      "enum": ["queued", "claimed", "in_progress", "paused_for_research", "paused_for_human", "blocked", "done", "failed"],
+      "enum": ["queued", "claimed", "in_progress", "paused_for_research", "paused_for_human", "blocked", "awaiting_verification", "done", "failed"],
       "description": "Mirrors the directory lane. `paused_for_research` = a halt decision point is open; `paused_for_human` = escalated."
     },
     "source": {
@@ -30,7 +30,7 @@
       "properties": {
         "plan_id": { "type": "string", "pattern": "^PLAN-[0-9]{3,}$" },
         "phase_id": { "type": "string", "pattern": "^PH-[0-9]{1,}$" },
-        "task_id": { "type": "string", "pattern": "^T-[0-9]{1,}$" }
+        "task_id": { "type": "string", "pattern": "^(T-[0-9]{1,}|GATE)$" }
       }
     },
 
@@ -52,7 +52,11 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Other queue task IDs that must reach `done` before this one is claimable."
-        }
+        },
+        "branch": { "type": "string", "description": "Phase branch the task's worktree is cut from, e.g. 'sb/plan-001/ph-2'." },
+        "chain_depth": { "type": "integer", "minimum": 0, "description": "Research-handoff recursion depth. sb spawn increments; max enforced from config (default 3)." },
+        "verifies": { "type": "string", "description": "Set on verification tasks: the task id whose result this task judges. Tasks with this set are never themselves re-verified." },
+        "prior_attempts": { "type": "array", "items": { "type": "object" }, "description": "Results of earlier attempts/continuations, carried into the retry prompt so retries are never blind." }
       }
     },
 
@@ -106,7 +110,7 @@
     "claim": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Set atomically when a worker claims the task (move queued -> active + commit + push).",
+      "description": "Set atomically when a worker claims the task (atomic rename queued -> active + lease file).",
       "properties": {
         "worker_id": { "type": "string" },
         "claimed_at": { "type": "string", "format": "date-time" }
@@ -115,27 +119,8 @@
 
     "result": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["outcome"],
-      "properties": {
-        "outcome": { "enum": ["success", "partial", "blocked"] },
-        "summary": { "type": "string", "description": "2-3 sentences. A handoff digest, never a transcript." },
-        "evidence": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["kind", "ref"],
-            "properties": {
-              "kind": { "type": "string", "examples": ["commit", "test", "metric", "diff", "pr"], "$comment": "EXPANSION JOINT" },
-              "ref": { "type": "string" }
-            }
-          }
-        },
-        "decisions_emitted": { "type": "array", "items": { "type": "string", "pattern": "^(ADR|HDR|SDR)-[0-9]{3,}$" } },
-        "unblocks": { "type": "array", "items": { "type": "string" }, "description": "Queue task IDs whose dependencies this satisfies." },
-        "completed_at": { "type": "string", "format": "date-time" }
-      }
+      "$comment": "Validated against schemas/result.schema.json at the sb file-result boundary — the only entry door. Kept loose here so the two schemas cannot drift.",
+      "description": "The embedded copy of the result file, attached when filed."
     },
 
     "failure": {

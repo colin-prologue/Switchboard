@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://colin-prologue/schemas/result/v0.1.0.json",
+  "title": "Task Result",
+  "description": "The structured file a task subagent writes to .switchboard/results/<id>.json. The ONLY door a result enters the system through; sb file-result validates here, then embeds it in the task file. Verification results additionally carry a verdict.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "outcome", "summary"],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "outcome": { "enum": ["success", "partial", "blocked", "failed"] },
+    "summary": { "type": "string", "description": "2-3 sentences. A handoff digest, never a transcript." },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "ref"],
+        "properties": {
+          "kind": { "type": "string", "examples": ["commit", "test", "metric", "diff", "pr"] },
+          "ref": { "type": "string" },
+          "result": { "type": "string" }
+        }
+      }
+    },
+    "decisions_emitted": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^(ADR|HDR|SDR)-[0-9]{3,}$" }
+    },
+    "unblocks": { "type": "array", "items": { "type": "string" } },
+    "verdict": { "enum": ["pass", "fail"], "description": "Verification tasks only." },
+    "verdict_notes": { "type": "string" },
+    "completed_at": { "type": "string", "format": "date-time" }
+  }
+}
