@@ -86,8 +86,26 @@ def test_requeue_stale_handles_missing_lease(lay):
     assert claims.requeue_stale(lay, {}) == [got["id"]]
 
 
+def test_requeue_stale_leaves_exactly_one_file(lay):
+    t = make_task()
+    seed(lay, t)
+    claims.claim_one(lay, "w1")
+    leases.clear_lease(lay, t["id"])
+    claims.requeue_stale(lay, {})
+    from sb.paths import LANES
+    hits = [lane for lane in LANES
+            if os.path.exists(store.task_path(lay, lane, t["id"]))]
+    assert hits == ["queued"]
+
+
 def test_heartbeat_touches_file(lay):
     claims.heartbeat(lay, "w1")
     p = os.path.join(lay.heartbeats, "w1.json")
     assert os.path.exists(p)
     assert store.read_json(p)["worker_id"] == "w1"
+
+
+def test_heartbeat_escapes_worker_id(lay):
+    claims.heartbeat(lay, "host/pid-7")
+    p = os.path.join(lay.heartbeats, "host_pid-7.json")
+    assert store.read_json(p)["worker_id"] == "host/pid-7"

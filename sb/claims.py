@@ -53,22 +53,25 @@ def claim_wait(lay, worker_id, tier=None, cfg=None, wait_s=0, poll_s=0.5):
 
 def requeue_stale(lay, cfg):
     """Expired or missing lease => the claimer is gone. Infra failure:
-    requeue with attempts UNCHANGED."""
+    requeue with attempts UNCHANGED.
+
+    Body is cleaned BEFORE the rename: once the file lands in queued/ it is
+    instantly claimable, so no write may follow the move (ghost-task race)."""
     requeued = []
     for t in store.list_tasks(lay, "active"):
         lease = leases.read_lease(lay, t["id"])
         if lease is not None and not leases.is_expired(lease):
             continue
-        if not store.move_task(lay, "active", "queued", t["id"]):
-            continue
         t["status"] = "queued"
         t.pop("claim", None)
-        store.write_task(lay, "queued", t)
+        store.write_task(lay, "active", t)
+        if not store.move_task(lay, "active", "queued", t["id"]):
+            continue  # someone else swept or filed it first
         leases.clear_lease(lay, t["id"])
         requeued.append(t["id"])
     return requeued
 
 
 def heartbeat(lay, worker_id):
-    store.write_json(os.path.join(lay.heartbeats, f"{worker_id}.json"),
+    store.write_json(os.path.join(lay.heartbeats, store.fname(worker_id)),
                      {"worker_id": worker_id, "at": time.time()})
