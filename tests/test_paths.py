@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 from sb import paths
 
 
@@ -28,3 +30,15 @@ def test_load_config_merges_defaults(lay):
     assert cfg["lease_ttl_s"] == 5400
     assert cfg["max_chain_depth"] == 3
     assert cfg["max_attempts"] == 3
+
+
+def test_load_config_raises_on_corrupt_json(lay):
+    with open(lay.config_path, "w", encoding="utf-8") as f:
+        f.write("{not json")
+    with pytest.raises(ValueError, match="corrupt config"):
+        paths.load_config(lay)
+
+
+def test_lane_rejects_unknown_name(lay):
+    with pytest.raises(ValueError, match="unknown lane"):
+        lay.lane("archived")

@@ -32,6 +32,8 @@ class Layout:
         self.plans = os.path.join(self.repo, "plans")
 
     def lane(self, name):
+        if name not in LANES:
+            raise ValueError(f"unknown lane {name!r}; valid: {LANES}")
         return os.path.join(self.tasks, name)
 
 
@@ -39,7 +41,10 @@ def init(repo):
     lay = Layout(repo)
     for lane in LANES:
         os.makedirs(lay.lane(lane), exist_ok=True)
-    for d in [lay.leases, lay.heartbeats, lay.results, lay.decisions, lay.plans]:
+    for d in [lay.leases, lay.heartbeats, lay.results]:
+        os.makedirs(d, exist_ok=True)
+    # durable; tracked in git, never wiped
+    for d in [lay.decisions, lay.plans]:
         os.makedirs(d, exist_ok=True)
     if not os.path.exists(lay.config_path):
         with open(lay.config_path, "w", encoding="utf-8") as f:
@@ -49,4 +54,7 @@ def init(repo):
 
 def load_config(lay):
     with open(lay.config_path, encoding="utf-8") as f:
-        return {**DEFAULT_CONFIG, **json.load(f)}
+        try:
+            return {**DEFAULT_CONFIG, **json.load(f)}
+        except json.JSONDecodeError as e:
+            raise ValueError(f"corrupt config at {lay.config_path}: {e}") from e
