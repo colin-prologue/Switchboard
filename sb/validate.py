@@ -6,6 +6,9 @@ import os
 
 from jsonschema import Draft202012Validator
 
+# Resolves to the repo root: valid for editable installs (pip install -e),
+# which is the only supported mode until the M1 packaging milestone moves
+# schemas into the package (see docs/specs/2026-06-12-switchboard-v2-design.md §10).
 _SCHEMA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "schemas")
 
@@ -20,6 +23,8 @@ _cache = {}
 
 
 def schema(name):
+    if name not in NAMES:
+        raise ValueError(f"unknown schema name {name!r}; valid: {list(NAMES)}")
     if name not in _cache:
         with open(os.path.join(_SCHEMA_DIR, NAMES[name]), encoding="utf-8") as f:
             _cache[name] = Draft202012Validator(json.load(f))

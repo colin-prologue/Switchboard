@@ -21,6 +21,10 @@ def make_task(task_id="PLAN-001/PH-1/T-1", tier="haiku", **over):
     }
     ctx = over.pop("context", None)
     task.update(over)
+    if "id" in over and "source" not in over:
+        plan_id, phase_id, leaf = task["id"].split("/")[:3]
+        task["source"] = {"plan_id": plan_id, "phase_id": phase_id,
+                          "task_id": leaf.split(".")[0]}
     if ctx:
         task["context"] = {**task["context"], **ctx}
     return task

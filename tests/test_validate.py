@@ -19,5 +19,10 @@ def test_result_validation():
     validate.check("result", {
         "schema_version": "0.1.0", "outcome": "success", "summary": "ok",
     })
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="summary"):
         validate.check("result", {"schema_version": "0.1.0", "outcome": "success"})
+
+
+def test_unknown_schema_name_raises():
+    with pytest.raises(ValueError, match="unknown schema name"):
+        validate.check("typo", {})
