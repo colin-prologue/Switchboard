@@ -56,7 +56,9 @@ def requeue_stale(lay, cfg):
     requeue with attempts UNCHANGED.
 
     Body is cleaned BEFORE the rename: once the file lands in queued/ it is
-    instantly claimable, so no write may follow the move (ghost-task race)."""
+    instantly claimable, so no write may follow the move (ghost-task race).
+    Lease cleared before the rename so a fresh claimer's lease is never
+    clobbered."""
     requeued = []
     for t in store.list_tasks(lay, "active"):
         lease = leases.read_lease(lay, t["id"])
@@ -65,9 +67,9 @@ def requeue_stale(lay, cfg):
         t["status"] = "queued"
         t.pop("claim", None)
         store.write_task(lay, "active", t)
+        leases.clear_lease(lay, t["id"])
         if not store.move_task(lay, "active", "queued", t["id"]):
             continue  # someone else swept or filed it first
-        leases.clear_lease(lay, t["id"])
         requeued.append(t["id"])
     return requeued
 
