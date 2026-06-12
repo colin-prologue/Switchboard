@@ -1,0 +1,33 @@
+{
+  "id": "HDR-003",
+  "title": "Durable decision log at top-level; transient coordination in .switchboard/",
+  "tags": [
+    "decision-log",
+    "layout"
+  ],
+  "context": "Where the per-project state lives within a repo.",
+  "options": [
+    {
+      "name": "all-in-dotfolder",
+      "rationale": "One place for everything.",
+      "tradeoff": "Buries durable memory in machinery; not browsable as docs."
+    },
+    {
+      "name": "split",
+      "rationale": "Durable decisions visible at top-level; queue/results in .switchboard/.",
+      "tradeoff": "Two locations to understand."
+    }
+  ],
+  "chosen": "split",
+  "reasoning": "Decisions are documentation of the code and must be browsable by anyone in the repo; the queue and results are operational scheduling and can be gitignored.",
+  "schema_version": "0.2.0",
+  "type": "human",
+  "status": "approved",
+  "timestamp": "2026-06-12T20:10:00Z",
+  "level": "feature",
+  "author": {
+    "kind": "human",
+    "id": "colin",
+    "role": "architect"
+  }
+}

@@ -1,0 +1,129 @@
+{
+  "schema_version": "0.1.0",
+  "plan_id": "PLAN-031",
+  "goal": "Add a session cache that holds up under concurrent load.",
+  "created": "2026-06-12T13:50:00Z",
+  "author": { "kind": "model", "id": "claude-fable-5", "role": "orchestrator" },
+
+  "constraints": [
+    "Must sustain the production concurrency SLA without corrupted reads.",
+    "Memory overhead must stay within the service budget."
+  ],
+  "grounding": [],
+  "decision_ref": "SDR-012",
+
+  "open_questions": [
+    {
+      "question": "Confirm the target concurrency SLA — 10k concurrent users is assumed.",
+      "blocking": true,
+      "resolve_by": "human"
+    },
+    {
+      "question": "Is the expected memory delta of immutable snapshots acceptable in budget?",
+      "blocking": false,
+      "resolve_by": "research",
+      "phase": "PH-1"
+    }
+  ],
+
+  "phases": [
+    {
+      "phase_id": "PH-1",
+      "name": "Design the concurrency model",
+      "level": "feature",
+      "intent": "Decide HOW the cache stays correct under concurrency before any code is written. This is the only compounding decision in the feature, so it gets the most capable tier and a human sign-off.",
+      "default_model": "opus",
+      "gate": {
+        "type": "human",
+        "condition": "design ADR exists AND status in {approved, feedback-incorporated}",
+        "reviewer": "colin/EM",
+        "on_fail": "re-open phase with reviewer feedback attached"
+      },
+      "escalation": { "trigger": "options tie on evidence OR cross-cutting impact", "to": "fable" },
+      "tasks": [
+        {
+          "task_id": "T-1",
+          "title": "Choose concurrency model for the session cache",
+          "level": "component",
+          "model": "opus",
+          "decision_expected": {
+            "about": "concurrency model for the cache (immutable snapshots vs mutable-with-locks)",
+            "tags": ["concurrency", "caching", "performance"],
+            "auto_approve_if": "confidence=high AND no shared-architecture impact"
+          },
+          "done": {
+            "statement": "A design decision is recorded with options, research, and evidence, and has passed the phase gate.",
+            "verify": { "kind": "review", "ref": "decision:ADR-047", "expect": "status=feedback-incorporated" }
+          },
+          "tags": ["concurrency", "caching"]
+        }
+      ]
+    },
+    {
+      "phase_id": "PH-2",
+      "name": "Implement the cache",
+      "level": "component",
+      "intent": "Build the chosen design and prove it under load. Load-bearing implementation, so it stays on the strong tier; the gate is automated verification plus a human PR review where decisions are surfaced.",
+      "default_model": "opus",
+      "gate": {
+        "type": "human",
+        "condition": "all tasks done AND no pending-review ADRs above medium confidence",
+        "reviewer": "colin/EM",
+        "on_fail": "return to implementation with review brief"
+      },
+      "escalation": { "trigger": "stuck >2 attempts OR spec ambiguous", "to": "fable" },
+      "budget": { "tool_calls": 80 },
+      "tasks": [
+        {
+          "task_id": "T-2",
+          "title": "Implement the immutable-snapshot cache",
+          "level": "component",
+          "depends_on": [],
+          "done": {
+            "statement": "Cache passes the concurrent stress test with zero race conditions.",
+            "verify": { "kind": "test", "ref": "tests/test_concurrent_cache_stress.rs", "expect": "pass" }
+          },
+          "tags": ["concurrency", "caching"]
+        },
+        {
+          "task_id": "T-3",
+          "title": "Wire the cache into the request handlers",
+          "level": "function",
+          "depends_on": ["T-2"],
+          "done": {
+            "statement": "All handlers read through the new cache; integration tests green.",
+            "verify": { "kind": "command", "ref": "cargo test --test integration", "expect": "0 failures" }
+          },
+          "tags": ["caching"]
+        }
+      ]
+    },
+    {
+      "phase_id": "PH-3",
+      "name": "Migrate existing call sites",
+      "level": "component",
+      "intent": "Mechanically move every legacy call site onto the new cache. No design judgment here — cheap tier, tight budget, automated gate.",
+      "default_model": "haiku",
+      "gate": {
+        "type": "auto",
+        "condition": "no references to the legacy cache remain AND build is green",
+        "on_fail": "list remaining call sites and continue"
+      },
+      "escalation": { "trigger": "a call site needs non-mechanical judgment", "to": "sonnet" },
+      "budget": { "tool_calls": 40 },
+      "tasks": [
+        {
+          "task_id": "T-4",
+          "title": "Replace all legacy cache call sites",
+          "level": "task",
+          "depends_on": ["T-3"],
+          "done": {
+            "statement": "Zero legacy-cache references; full build and lint pass.",
+            "verify": { "kind": "command", "ref": "rg 'LegacyCache' && cargo build", "expect": "no matches, build ok" }
+          },
+          "tags": ["migration", "caching"]
+        }
+      ]
+    }
+  ]
+}

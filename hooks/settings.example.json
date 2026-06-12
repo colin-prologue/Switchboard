@@ -1,0 +1,30 @@
+{
+  "comment": "Merge the hooks block into your .claude/settings.json. Same script handles both events.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "python3 /ABS/PATH/TO/rabbit_guard.py", "timeout": 50 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "python3 /ABS/PATH/TO/rabbit_guard.py", "timeout": 50 }
+        ]
+      }
+    ]
+  },
+  "env_you_can_set": {
+    "ANTHROPIC_API_KEY": "required for the fresh-reviewer call",
+    "RG_MODEL": "claude-fable-5 (default) — or a cheaper model for the reviewer",
+    "RG_EFFORT": "optional; high|medium|low — Fable/Mythos only; auto-dropped if unsupported",
+    "RG_GOAL_FILE": "GOAL.md — restate the task here so the reviewer has an anchor",
+    "RG_LEDGER_FILE": "PROGRESS.md — the append-only progress ledger the no-progress trip watches",
+    "RG_MAX_REVIEWS": "6 — hard per-session cap on paid Fable calls",
+    "RG_REVIEW_COOLDOWN": "5 — min tool calls between paid reviews"
+  }
+}

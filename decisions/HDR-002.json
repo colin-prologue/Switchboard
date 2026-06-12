@@ -1,0 +1,34 @@
+{
+  "id": "HDR-002",
+  "title": "Decentralized per-project state with a shared engine, not a monolithic hub",
+  "tags": [
+    "topology",
+    "deployment",
+    "security"
+  ],
+  "context": "Deciding how to deploy the framework across many projects.",
+  "options": [
+    {
+      "name": "monolithic-hub",
+      "rationale": "One place holds all queues and decisions; central observability.",
+      "tradeoff": "Centralizes memory away from the code it documents; concentrates secrets and blast radius; forces broad cross-repo access."
+    },
+    {
+      "name": "decentralized-plugin",
+      "rationale": "Shared engine installed once; each project owns its state and decision log.",
+      "tradeoff": "A small per-project scaffold to init."
+    }
+  ],
+  "chosen": "decentralized-plugin",
+  "reasoning": "The decision log must travel with the code it documents; per-project isolation and scoped repo access suit a regulated L&W context and shrink blast radius. The worker fleet can still be centralized while state stays per-project.",
+  "schema_version": "0.2.0",
+  "type": "human",
+  "status": "approved",
+  "timestamp": "2026-06-12T20:10:00Z",
+  "level": "feature",
+  "author": {
+    "kind": "human",
+    "id": "colin",
+    "role": "architect"
+  }
+}

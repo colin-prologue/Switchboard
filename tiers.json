@@ -1,0 +1,9 @@
+{
+  "_comment": "The ONE place tiers map to model ids. Change a version here, nothing downstream rots. The harness and worker read this to know which model to invoke for a given tier.",
+  "tiers": {
+    "fable":  "claude-fable-5",
+    "opus":   "claude-opus-4-8",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku":  "claude-haiku-4-5"
+  }
+}

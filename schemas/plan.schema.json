@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://colin-prologue/schemas/plan/v0.1.0.json",
+  "title": "Plan",
+  "description": "The structured object the orchestrator (Fable, or Opus for lighter goals) emits when handed a goal. It is consumed by the orchestrator to spawn and route workers, and is itself recorded as a synthesis decision (see `decision_ref`). Deliberately knows NOTHING about how workers talk to each other — that is the separate comm-protocol contract. This is pure data: goal in, routed phase/task tree out.",
+  "$comment": "EXPANSION JOINTS — `phase.level` / `task.level`, `tags`, `verify.kind`, and the gate `condition` expression language are loose strings so the decomposition model can evolve without a breaking bump. `model_tier` is an ABSTRACT tier, not a versioned model string: the orchestrator maps tier -> current model id in ONE place, so plans don't rot when model versions change. Structural fields and additionalProperties:false enforce the 'version the contract' discipline.",
+
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "plan_id", "goal", "created", "author", "phases"],
+
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "plan_id": { "type": "string", "pattern": "^PLAN-[0-9]{3,}$" },
+    "goal": { "type": "string", "description": "The original ask, verbatim. Preserved so intent survives even as the plan is revised." },
+    "created": { "type": "string", "format": "date-time" },
+    "author": { "$ref": "#/$defs/author", "description": "The model that produced the decomposition." },
+
+    "constraints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Hard requirements the plan must honor — regulatory, performance SLAs, deadlines. At L&W these are audit-relevant."
+    },
+    "grounding": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^(ADR|HDR|SDR)-[0-9]{3,}$" },
+      "description": "Prior decision IDs this plan was grounded in. Populated by querying the decision log by tag/level before planning — precedent, not first principles."
+    },
+    "decision_ref": {
+      "type": "string",
+      "pattern": "^SDR-[0-9]{3,}$",
+      "description": "The synthesis decision that records WHY this decomposition/routing was chosen. The plan and its rationale are auditable together."
+    },
+
+    "open_questions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/open_question" },
+      "description": "Ambiguities Fable surfaced during planning. PRE-EXECUTION pause mechanism: a blocking question stops the loop for a human; a non-blocking one is resolved by passive research inside a named phase."
+    },
+
+    "phases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/phase" }
+    }
+  },
+
+  "$defs": {
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "enum": ["model", "human"] },
+        "id": { "type": "string" },
+        "role": { "type": "string" }
+      }
+    },
+
+    "model_tier": {
+      "enum": ["fable", "opus", "sonnet", "haiku"],
+      "$comment": "EXPANSION JOINT — abstract capability tier. Centrally mapped to a current model id (e.g. opus -> claude-opus-4-8). Add tiers here without touching any plan."
+    },
+
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional ceilings consumed by the rabbit-guard tripwires and the orchestrator. The same numbers the PostToolUse guard enforces.",
+      "properties": {
+        "tool_calls": { "type": "integer", "minimum": 1 },
+        "wallclock_s": { "type": "integer", "minimum": 1 },
+        "tokens": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "open_question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question", "blocking", "resolve_by"],
+      "properties": {
+        "question": { "type": "string" },
+        "blocking": { "type": "boolean", "description": "true = halt before execution for a human answer." },
+        "resolve_by": { "enum": ["human", "research"] },
+        "phase": { "type": "string", "description": "If resolve_by=research, the phase where an agent investigates it." }
+      }
+    },
+
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "condition"],
+      "description": "The phase-transition forcing function. Human gates are where meaningful oversight lives (and the PR review/feedback loop attaches).",
+      "properties": {
+        "type": { "enum": ["human", "auto"] },
+        "condition": {
+          "type": "string",
+          "$comment": "EXPANSION JOINT — loose expression string, e.g. 'all tasks done AND no pending-review ADRs above medium confidence'. The evaluator's grammar can grow independently."
+        },
+        "reviewer": { "type": "string", "description": "Who/what stamps it, e.g. 'colin/EM' or 'fable/arbiter'." },
+        "on_fail": { "type": "string", "description": "What happens if the gate condition is not met — e.g. 're-open phase', 'escalate to human'." }
+      }
+    },
+
+    "escalation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trigger", "to"],
+      "description": "When a worker should stop guessing and hand up. Mirrors the rabbit-guard escalation contract.",
+      "properties": {
+        "trigger": { "type": "string", "description": "e.g. 'stuck >2 attempts OR spec ambiguous OR cross-cutting decision'." },
+        "to": { "$ref": "#/$defs/model_tier" }
+      }
+    },
+
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase_id", "name", "default_model", "gate", "tasks"],
+      "properties": {
+        "phase_id": { "type": "string", "pattern": "^PH-[0-9]{1,}$" },
+        "name": { "type": "string" },
+        "level": { "type": "string", "examples": ["feature", "component"], "$comment": "EXPANSION JOINT" },
+        "intent": { "type": "string", "description": "What this phase achieves and WHY — the durable intent a future developer reads." },
+        "default_model": { "$ref": "#/$defs/model_tier", "description": "Tier for work in this phase unless a task overrides. This is the cost lever." },
+        "gate": { "$ref": "#/$defs/gate" },
+        "escalation": { "$ref": "#/$defs/escalation" },
+        "budget": { "$ref": "#/$defs/budget" },
+        "tasks": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/task" } }
+      }
+    },
+
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "title", "done"],
+      "properties": {
+        "task_id": { "type": "string", "pattern": "^T-[0-9]{1,}$" },
+        "title": { "type": "string" },
+        "level": { "type": "string", "examples": ["component", "function", "task"], "$comment": "EXPANSION JOINT" },
+        "model": { "$ref": "#/$defs/model_tier", "description": "Overrides the phase default_model when this task is harder/cheaper than its phase." },
+        "model_rationale": { "type": "string", "description": "Optional, only where the routing choice is non-obvious. The full why lives in decision_ref." },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^T-[0-9]{1,}$" },
+          "description": "Intra-plan task DAG."
+        },
+        "decision_expected": {
+          "$ref": "#/$defs/decision_expected",
+          "description": "IN-FLIGHT pause mechanism: marks a known choice point where the worker should pause, research, and emit an ADR before committing."
+        },
+        "done": { "$ref": "#/$defs/done" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Inherited by any decision logged during this task, so the decision log links back to plan context.",
+          "$comment": "EXPANSION JOINT"
+        },
+        "budget": { "$ref": "#/$defs/budget" }
+      }
+    },
+
+    "decision_expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["about"],
+      "properties": {
+        "about": { "type": "string", "description": "The choice to be made, e.g. 'concurrency model for the cache'." },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "auto_approve_if": { "type": "string", "description": "Condition under which the ADR can self-approve without human review, e.g. 'confidence=high AND level=function'." }
+      }
+    },
+
+    "done": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statement"],
+      "description": "Definition of done. `verify` is the MACHINE exit condition — the same ref the rabbit-guard checks to confirm the task isn't rabbit-trailing, and the same ref the decision record cites as evidence. One source of truth across all three systems.",
+      "properties": {
+        "statement": { "type": "string" },
+        "verify": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ref"],
+          "properties": {
+            "kind": { "type": "string", "examples": ["test", "command", "review", "metric"], "$comment": "EXPANSION JOINT" },
+            "ref": { "type": "string" },
+            "expect": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

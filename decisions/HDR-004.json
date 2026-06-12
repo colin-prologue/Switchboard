@@ -1,0 +1,42 @@
+{
+  "id": "HDR-004",
+  "title": "Name the framework Switchboard",
+  "tags": [
+    "naming"
+  ],
+  "context": "The front door routes a goal to the right tier-pinned workers, like an operator connecting a call.",
+  "options": [
+    {
+      "name": "AgentTeam",
+      "rationale": "Familiar.",
+      "tradeoff": "Collides with Claude Code's Agent Teams feature and names the peer model we rejected."
+    },
+    {
+      "name": "AgentHarness",
+      "rationale": "Descriptive.",
+      "tradeoff": "Generic; names only the execution wrapper, misses the decision spine."
+    },
+    {
+      "name": "Relay",
+      "rationale": "Nice handoff imagery.",
+      "tradeoff": "Already used by an internal L&W project."
+    },
+    {
+      "name": "Switchboard",
+      "rationale": "Maps to the actual routing mechanism.",
+      "tradeoff": "Common word."
+    }
+  ],
+  "chosen": "Switchboard",
+  "reasoning": "Best fit to the mechanism (route a goal to the right line), avoids the Agent Teams collision, and the operator/console metaphor extends cleanly to the future nexus tier.",
+  "schema_version": "0.2.0",
+  "type": "human",
+  "status": "approved",
+  "timestamp": "2026-06-12T20:10:00Z",
+  "level": "feature",
+  "author": {
+    "kind": "human",
+    "id": "colin",
+    "role": "architect"
+  }
+}
