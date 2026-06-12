@@ -1,0 +1,40 @@
+{
+  "id": "HDR-008",
+  "title": "Oversight model: AgDR-after-research instead of prompts, PR as the hard gate, optional Spec→Plan gate, planner-chosen process weight",
+  "tags": [
+    "gates",
+    "oversight",
+    "decision-log",
+    "agdr"
+  ],
+  "context": "v1 hard-gated every human phase, idling the fleet on one reviewer's latency — contradicting Colin's prior rejection of pause gates in favor of async review (AgDR system, June 10-11 2026; PHI-028).",
+  "options": [
+    {
+      "name": "hard-gates-everywhere",
+      "rationale": "Every human-gated phase blocks until stamped; zero unreviewed compounding.",
+      "tradeoff": "Fleet idles on human latency; one person becomes the bottleneck the mission says to avoid."
+    },
+    {
+      "name": "async-everywhere",
+      "rationale": "Nothing waits; all review is post-hoc ratification.",
+      "tradeoff": "Wrong architecture calls execute downstream phases before any human sees them."
+    },
+    {
+      "name": "pr-gate-plus-optional-spec-gate",
+      "rationale": "In-flight, agents research then write AgDRs (steelman + blast radius, per PHI-028) instead of prompting; hard-escalation domains (security, prod deploys, secrets, frozen contracts) still halt. Every plan ends at a PR whose body is the rich review profile; merge is binding ratification. An optional Spec→Plan gate blocks pre-seeding where decisions compound. The planner picks process weight (full/standard/patch) and justifies it in the SDR.",
+      "tradeoff": "Unratified-but-executed work can compound within a phase before review; revert cost bounded by phase branches but not zero. Planner may under-weight process to dodge overhead."
+    }
+  ],
+  "chosen": "pr-gate-plus-optional-spec-gate",
+  "reasoning": "Aligns Switchboard with the proven cross-project AgDR model: decide-and-proceed with steelman records, async-but-binding review at the PR boundary (PHI-028's first validation overturned 2 of 15 AgDRs and surfaced a 3.3x cost defect before lock-in). Two invariants are not plannable: every plan ends at a PR gate, and every task passes independent verification (PHI-030). AgDR verdict history at merge gates accumulates the earned-autonomy track record for free.",
+  "schema_version": "0.2.0",
+  "type": "human",
+  "status": "approved",
+  "timestamp": "2026-06-12T22:55:00Z",
+  "level": "feature",
+  "author": {
+    "kind": "human",
+    "id": "colin",
+    "role": "architect"
+  }
+}

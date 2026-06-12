@@ -1,0 +1,35 @@
+{
+  "id": "HDR-007",
+  "title": "Filesystem coordination substrate; git keeps history only, never locking",
+  "tags": [
+    "coordination",
+    "substrate",
+    "layout"
+  ],
+  "context": "v1 used git commit+push races as the task-claim lock, while ARCHITECTURE.md declared .switchboard/ state gitignore-able — a contradiction (gitignored state cannot coordinate through git). Deployment target is a single dedicated machine.",
+  "options": [
+    {
+      "name": "git-as-lock",
+      "rationale": "Claims are commit+push races; preserves a multi-machine/cloud-worker story immediately.",
+      "tradeoff": "Seconds of latency per transition, a commit per claim polluting history, remote as SPOF, and orchestration state must stay git-tracked forever."
+    },
+    {
+      "name": "filesystem-lanes-with-git-history",
+      "rationale": "Claims are atomic renames between lane directories plus a lease file; .switchboard/ is gitignored. Git keeps exactly two jobs: project source (branches/PRs) and the tracked decision spine.",
+      "tradeoff": "Single-machine coordination only; a second machine needs a sync layer designed when it actually exists."
+    }
+  ],
+  "chosen": "filesystem-lanes-with-git-history",
+  "reasoning": "Git-as-lock solved a distribution problem the deployment doesn't have, at real cost. Atomic renames + leases give instant claims and a structural infra-vs-task failure split (stale lease requeues, never fails). Explicit tracked/transient boundary: decisions/ (all ADR/AgDR/HDR/SDR records) and plans/ are committed and travel with the code; queue lanes, leases, in-flight results are transient. Invariant: a decision record may only cite evidence that survives .switchboard/ cleanup. Colin accepted single-machine scope at this stage. Amends HDR-003 (its gitignore instinct was correct once locking moved off git).",
+  "supersedes": "README 'git is the lock' seam; amends HDR-003",
+  "schema_version": "0.2.0",
+  "type": "human",
+  "status": "approved",
+  "timestamp": "2026-06-12T22:55:00Z",
+  "level": "feature",
+  "author": {
+    "kind": "human",
+    "id": "colin",
+    "role": "architect"
+  }
+}
