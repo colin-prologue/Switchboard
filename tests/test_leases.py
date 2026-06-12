@@ -19,6 +19,13 @@ def test_expiry(lay):
     assert leases.is_expired(lease, now=lease["claimed_at"] + 101)
 
 
+def test_corrupt_lease_reads_as_stale(lay):
+    leases.write_lease(lay, "PLAN-001/PH-1/T-1", "worker-a", ttl_s=100)
+    with open(leases.lease_path(lay, "PLAN-001/PH-1/T-1"), "w", encoding="utf-8") as f:
+        f.write("{torn write")
+    assert leases.read_lease(lay, "PLAN-001/PH-1/T-1") is None
+
+
 def test_clear_is_idempotent(lay):
     leases.write_lease(lay, "PLAN-001/PH-1/T-1", "worker-a", ttl_s=100)
     leases.clear_lease(lay, "PLAN-001/PH-1/T-1")

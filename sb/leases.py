@@ -1,5 +1,7 @@
 """Claim leases. A stale lease means the claiming session died or stalled;
-the task is requeued with attempts UNCHANGED (infra failure, not task failure)."""
+the task is requeued with attempts UNCHANGED (infra failure, not task failure).
+Flow: write_lease on claim, clear_lease on completion/requeue, is_expired
+drives the stale sweep."""
 
 import os
 import time
@@ -21,8 +23,14 @@ def write_lease(lay, task_id, worker_id, ttl_s):
 
 
 def read_lease(lay, task_id):
+    """A corrupt lease reads as None: unreadable = can't prove ownership = stale."""
     p = lease_path(lay, task_id)
-    return store.read_json(p) if os.path.exists(p) else None
+    if not os.path.exists(p):
+        return None
+    try:
+        return store.read_json(p)
+    except ValueError:
+        return None
 
 
 def is_expired(lease, now=None):
