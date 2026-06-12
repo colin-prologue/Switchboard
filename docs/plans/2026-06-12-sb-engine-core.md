@@ -1300,8 +1300,9 @@ def spawn_research(lay, cfg, parent_id, goal, tier, done_statement):
         parent["failure"] = {
             "reason": f"chain depth {depth} exceeds max "
                       f"{cfg.get('max_chain_depth', 3)}; human review required"}
+        # write-before-move invariant (see claims.requeue_stale)
+        store.write_task(lay, "active", parent)
         store.move_task(lay, "active", "paused", parent_id)
-        store.write_task(lay, "paused", parent)
         leases.clear_lease(lay, parent_id)
         return None
 
@@ -1339,8 +1340,10 @@ def spawn_research(lay, cfg, parent_id, goal, tier, done_statement):
     parent["status"] = "queued"
     parent.pop("claim", None)
     parent.pop("result", None)
+    # write-before-move invariant: body finalized while still in active/
+    # (un-claimable), then renamed. Never write after a move into queued/.
+    store.write_task(lay, "active", parent)
     store.move_task(lay, "active", "queued", parent_id)
-    store.write_task(lay, "queued", parent)
     leases.clear_lease(lay, parent_id)
     return research
 ```
@@ -1541,8 +1544,12 @@ def file_result(lay, cfg, task_id):
         dest = _apply_verdict(lay, cfg, task, result, target_id)
     else:
         dest = _route_outcome(lay, cfg, task, result)
-    store.move_task(lay, "active", dest, task_id)
-    store.write_task(lay, dest, task)
+    # Body finalized BEFORE the rename: once a file lands in queued/ it is
+    # instantly claimable, so no write may follow the move (ghost-task race —
+    # same invariant as claims.requeue_stale).
+    store.write_task(lay, "active", task)
+    if not store.move_task(lay, "active", dest, task_id):
+        raise ValueError(f"{task_id} vanished from active while filing (swept?)")
     leases.clear_lease(lay, task_id)
     os.remove(rp)
     return dest
@@ -1622,8 +1629,11 @@ def _apply_verdict(lay, cfg, vtask, result, target_id):
         else:
             target["status"] = "queued"
             dest = "queued"
-    store.move_task(lay, "paused", dest, target_id)
-    store.write_task(lay, dest, target)
+    # Same write-before-move invariant: update the body while the target is
+    # still in paused/ (un-claimable), then rename. Never write after a move.
+    store.write_task(lay, "paused", target)
+    if not store.move_task(lay, "paused", dest, target_id):
+        raise ValueError(f"{target_id} vanished from paused while applying verdict")
     vtask["status"] = "done"
     return "done"  # the verification task itself always completes
 ```
