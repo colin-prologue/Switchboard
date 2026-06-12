@@ -84,6 +84,49 @@ def test_task_schema_accepts_gate_source():
     schema.validate(task)
 
 
+def test_task_schema_rejects_old_version():
+    v = load("task.schema.json")
+    task = {
+        "schema_version": "0.1.0",
+        "id": "PLAN-001/PH-1/T-1",
+        "tier": "haiku",
+        "status": "queued",
+        "goal": "g",
+        "done": {"statement": "d"},
+        "created_at": "2026-06-12T00:00:00+00:00",
+    }
+    assert not v.is_valid(task)
+
+
+def test_task_schema_rejects_unknown_status():
+    v = load("task.schema.json")
+    task = {
+        "schema_version": "0.2.0",
+        "id": "PLAN-001/PH-1/T-1",
+        "tier": "haiku",
+        "status": "no-such-status",
+        "goal": "g",
+        "done": {"statement": "d"},
+        "created_at": "2026-06-12T00:00:00+00:00",
+    }
+    assert not v.is_valid(task)
+
+
+def test_decision_schema_rejects_unknown_field():
+    v = load("decision-record.schema.json")
+    rec = {
+        "schema_version": "0.3.0",
+        "id": "ADR-051",
+        "type": "agent",
+        "status": "proposed",
+        "timestamp": "2026-06-12T00:00:00+00:00",
+        "title": "t",
+        "author": {"kind": "model", "id": "m"},
+        "surprise": True,
+    }
+    assert not v.is_valid(rec)
+
+
 def test_decision_schema_accepts_steelman_and_blast_radius():
     rec = {
         "schema_version": "0.3.0",

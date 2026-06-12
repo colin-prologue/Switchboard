@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://colin-prologue/schemas/task/v0.1.0.json",
+  "$id": "https://colin-prologue/schemas/task/v0.2.0.json",
   "title": "Queue Task",
   "description": "One unit of work in the git-backed file queue. The orchestrator emits these from a plan; a tier-pinned worker claims one, runs it in a FRESH model session, writes a result + any decisions, then moves on. The file's directory lane (.tasks/queued|active|paused|done|failed) is the authoritative claim state; the `status` field mirrors it for readability.",
   "$comment": "EXPANSION JOINTS — `tier`, `status`, and `done.verify.kind` are the fields most likely to grow. additionalProperties:false enforces the 'version the contract' discipline shared with the plan and decision schemas. `source` yields the exact `provenance` block a decision record needs, so work and its decisions stay linked.",
