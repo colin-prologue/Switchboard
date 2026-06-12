@@ -37,6 +37,32 @@ def test_find_task_scans_lanes(lay):
     assert store.find_task(lay, "PLAN-999/PH-9/T-9") == (None, None)
 
 
+def test_read_json_attributes_corrupt_file(lay, tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text("{nope", encoding="utf-8")
+    with pytest.raises(ValueError, match="corrupt json"):
+        store.read_json(str(p))
+
+
+def test_find_task_tolerates_concurrent_move(lay, monkeypatch):
+    t = make_task()
+    store.write_task(lay, "queued", t)
+    real_read = store.read_json
+    moved = []
+
+    def racing_read(path):
+        # simulate the file being claimed away between listing and reading
+        if not moved:
+            moved.append(True)
+            store.move_task(lay, "queued", "active", t["id"])
+        return real_read(path)
+
+    monkeypatch.setattr(store, "read_json", racing_read)
+    lane, found = store.find_task(lay, t["id"])
+    # first attempt (queued) raced away; scan continues and finds it in active
+    assert lane == "active" and found["id"] == t["id"]
+
+
 def test_list_tasks_and_done_ids(lay):
     a = make_task("PLAN-001/PH-1/T-1")
     b = make_task("PLAN-001/PH-1/T-2", status="done")
