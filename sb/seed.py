@@ -44,6 +44,18 @@ def seed(lay, plan, repo_state="HEAD", force=False):
     where = {t["task_id"]: ph["phase_id"]
              for ph in plan["phases"] for t in ph.get("tasks", [])}
     phase_order = {ph["phase_id"]: i for i, ph in enumerate(plan["phases"])}
+
+    # pre-flight: validate every dep before writing anything (all-or-nothing
+    # seed)
+    for ph in plan["phases"]:
+        for t in ph.get("tasks", []):
+            for d in t.get("depends_on", []):
+                if d in where and (phase_order[where[d]]
+                                   > phase_order[ph["phase_id"]]):
+                    raise ValueError(
+                        f"{t['task_id']} depends on {d} in later phase "
+                        f"{where[d]} — forward deps deadlock behind the gate")
+
     seeded = []
     prev_gate = None
 
@@ -52,12 +64,6 @@ def seed(lay, plan, repo_state="HEAD", force=False):
         phase_cids = []
         for t in ph.get("tasks", []):
             cid = composite(plan_id, ph["phase_id"], t["task_id"])
-            for d in t.get("depends_on", []):
-                if d in where and (phase_order[where[d]]
-                                   > phase_order[ph["phase_id"]]):
-                    raise ValueError(
-                        f"{t['task_id']} depends on {d} in later phase "
-                        f"{where[d]} — forward deps deadlock behind the gate")
             deps = [composite(plan_id, where[d], d)
                     for d in t.get("depends_on", []) if d in where]
             if prev_gate:

@@ -80,3 +80,15 @@ def test_forward_dep_rejected(lay):
     bad["phases"][0]["tasks"][0]["depends_on"] = ["T-2"]  # T-2 lives in PH-2
     with pytest.raises(ValueError, match="later phase"):
         seed.seed(lay, bad)
+
+
+def test_forward_dep_rejected_before_any_write(lay):
+    bad = json.loads(json.dumps(PLAN))
+    bad["phases"][1]["tasks"][0]["depends_on"] = ["T-1", "T-9"]
+    bad["phases"][1]["tasks"].append(
+        {"task_id": "T-9", "title": "late", "done": {"statement": "d"}})
+    bad["phases"][0]["tasks"][0]["depends_on"] = ["T-2"]  # forward dep, phase 1
+    with pytest.raises(ValueError, match="later phase"):
+        seed.seed(lay, bad)
+    assert store.list_tasks(lay, "queued") == []
+    assert store.list_tasks(lay, "paused") == []
