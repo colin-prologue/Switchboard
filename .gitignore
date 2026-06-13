@@ -2,3 +2,6 @@
 .claude/settings.local.json
 .switchboard/
 .venv/
+__pycache__/
+*.egg-info/
+.claude/scheduled_tasks.lock

@@ -52,32 +52,14 @@ The lanes, `reviews/`, and `.results/` ship empty (just `.gitkeep`); the tools f
 
 ## Quickstart — run the demo with no model wired
 
+v1's worker.py/bootstrap.py are superseded by the sb engine — see docs/specs/2026-06-12-switchboard-v2-design.md.
+
 ```bash
-git init && git add -A && git commit -m init      # tools coordinate via git
-
-# Seed the example plan. It has a BLOCKING question, so the front door holds for sign-off:
-python3 bootstrap.py --plan plans/PLAN-031.json --repo .
-
-# Acknowledge it and seed for real:
-python3 bootstrap.py --plan plans/PLAN-031.json --repo . --force
-#   → 4 tasks: 3 opus, 1 haiku. 1 ready now, 3 waiting on dependencies.
-#   → GATE placeholders dropped into .tasks/paused for the two human gates.
-
-# A worker finds the one ready task (dry run pauses it, since no model is wired):
-python3 worker.py --tier opus --repo . --once
-
-# Inspect / review a gate:
-python3 gate.py status --plan PLAN-031 --repo .
-python3 gate.py brief  --plan PLAN-031 --phase PH-1 --repo .
-
-# Approve it — completes the gate task, which unblocks the next phase:
-python3 gate.py stamp  --plan PLAN-031 --phase PH-1 --action approve \
-        --note "Agree. Revisit if we adopt thread-local caching." --reviewer colin --repo .
+pip install -e '.[dev]' && pytest          # the engine is fully unit-tested
+sb init --repo .                            # scaffold .switchboard/
+sb seed --repo . --plan plans/PLAN-031.json --force
+sb claim --repo . --worker-id me            # JSON task on stdout; exit 3 = empty
 ```
-
-`status` shows whether a gate is ready; `brief` renders the scannable summary (see
-`examples/review-brief-PLAN-031-PH-1.md`); `stamp` records your verdict as feedback on the
-phase's decisions plus a human decision record, and on approval lets the next phase run.
 
 ## Wiring a real model
 
