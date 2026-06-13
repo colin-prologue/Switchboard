@@ -2,7 +2,7 @@
   "schema_version": "0.3.0",
   "id": "HDR-010",
   "type": "human",
-  "status": "approved",
+  "status": "feedback-incorporated",
   "timestamp": "2026-06-13T01:05:00Z",
   "level": "feature",
   "tags": [
@@ -50,5 +50,17 @@
   "blast_radius": "Orchestration-layer policy only; no engine code change. Shapes Plan 2 (pending-review AgDRs must route through the notification digest) and Plan 3 (worker-skill escalation logic implements the three tiers).",
   "depends_on": [
     "HDR-008"
+  ],
+  "feedback": [
+    {
+      "author": {
+        "kind": "human",
+        "id": "colin",
+        "role": "architect"
+      },
+      "timestamp": "2026-06-13T01:15:00Z",
+      "action": "approve",
+      "note": "Amendment: self-assessed escalation tiers are BOOTSTRAP MODE ONLY. As soon as a functional Switchboard is stood up, tier judgment (confidence, blast radius, interrupt-worthiness) must come from an independent agent \u2014 fresh context, different model than the author, same independence rule as the verification lane (PHI-030). The judge reviews tier assignments on filed AgDRs: it can promote record-silent to flag-async (send the ping) or pause dependents on a call that should have blocked. Closure condition: Plan 3 routes tier assignment through the verifier-class judge; the M0 exit bar exercises it."
+    }
   ]
 }
