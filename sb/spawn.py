@@ -1,6 +1,12 @@
 """Research handoff. A waiting parent NEVER holds a worker: the parent is
 re-enqueued as its own continuation, gaining a dependency on the research
-task and carrying its partial result forward (retries are never blind)."""
+task and carrying its partial result forward (retries are never blind).
+
+Crash window: the research task is written to queued/ before the parent
+gains its depends_on edge. A crash in that window orphans the research task
+(it runs, completes, unblocks nothing) and the parent recovers via lease
+expiry and re-spawns under the next suffix. Accepted: bounded duplicate
+work, no corruption."""
 
 import datetime as dt
 import os
@@ -67,7 +73,10 @@ def spawn_research(lay, cfg, parent_id, goal, tier, done_statement):
     # consume the parent's partial result, if the session wrote one
     rpath = os.path.join(lay.results, store.fname(parent_id))
     if os.path.exists(rpath):
-        partial = store.read_json(rpath)
+        try:
+            partial = store.read_json(rpath)
+        except ValueError:
+            partial = {"note": "partial result file was corrupt and was discarded"}
         parent.setdefault("context", {}).setdefault("prior_attempts", []).append(partial)
         os.remove(rpath)
 

@@ -43,6 +43,18 @@ def test_spawn_carries_partial_result(lay):
     assert not os.path.exists(rpath)  # consumed
 
 
+def test_spawn_discards_corrupt_partial(lay):
+    parent = claimed_parent(lay)
+    rpath = os.path.join(lay.results, store.fname(parent["id"]))
+    with open(rpath, "w", encoding="utf-8") as f:
+        f.write("{torn")
+    spawn.spawn_research(lay, DEFAULT_CONFIG, parent["id"],
+                         goal="g", tier="haiku", done_statement="d")
+    _, p = store.find_task(lay, parent["id"])
+    assert "corrupt" in p["context"]["prior_attempts"][0]["note"]
+    assert not os.path.exists(rpath)
+
+
 def test_spawn_suffix_increments(lay):
     parent = claimed_parent(lay)
     spawn.spawn_research(lay, DEFAULT_CONFIG, parent["id"],
