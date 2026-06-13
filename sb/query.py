@@ -24,7 +24,7 @@ def _load(lay):
         if f.endswith(".json"):
             try:
                 out.append(store.read_json(os.path.join(lay.decisions, f)))
-            except Exception:
+            except (ValueError, FileNotFoundError):
                 continue
     return out
 

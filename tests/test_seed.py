@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from sb import seed, store
@@ -65,3 +67,16 @@ def test_force_overrides_blocking_questions(lay):
         {"question": "Which SLA?", "blocking": True, "resolve_by": "human"}])
     seeded = seed.seed(lay, plan, force=True)
     assert len(seeded) == 2
+
+
+def test_reseeding_same_plan_refuses(lay):
+    seed.seed(lay, PLAN)
+    with pytest.raises(seed.AlreadySeeded, match="PLAN-001"):
+        seed.seed(lay, PLAN)
+
+
+def test_forward_dep_rejected(lay):
+    bad = json.loads(json.dumps(PLAN))
+    bad["phases"][0]["tasks"][0]["depends_on"] = ["T-2"]  # T-2 lives in PH-2
+    with pytest.raises(ValueError, match="later phase"):
+        seed.seed(lay, bad)

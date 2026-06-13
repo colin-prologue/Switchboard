@@ -5,9 +5,14 @@ git operations, schema validation throughout."""
 import datetime as dt
 
 from sb import store, validate
+from sb.paths import LANES
 
 
 class BlockingQuestions(Exception):
+    pass
+
+
+class AlreadySeeded(Exception):
     pass
 
 
@@ -21,15 +26,24 @@ def composite(plan_id, phase_id, task_id):
 
 def seed(lay, plan, repo_state="HEAD", force=False):
     validate.check("plan", plan)
+    plan_id = plan["plan_id"]
+    prefix = f"{plan_id}/"
+    for lane in LANES:
+        for t in store.list_tasks(lay, lane):
+            if t["id"].startswith(prefix):
+                raise AlreadySeeded(
+                    f"{plan_id} already has tasks on disk ({t['id']} in "
+                    f"{lane}); re-seeding would clobber progress")
+
     blocking = [q["question"] for q in plan.get("open_questions", [])
                 if q.get("blocking")]
     if blocking and not force:
         raise BlockingQuestions("; ".join(blocking))
 
-    plan_id = plan["plan_id"]
     author = plan.get("author", {}).get("id", "unknown")
     where = {t["task_id"]: ph["phase_id"]
              for ph in plan["phases"] for t in ph.get("tasks", [])}
+    phase_order = {ph["phase_id"]: i for i, ph in enumerate(plan["phases"])}
     seeded = []
     prev_gate = None
 
@@ -38,6 +52,12 @@ def seed(lay, plan, repo_state="HEAD", force=False):
         phase_cids = []
         for t in ph.get("tasks", []):
             cid = composite(plan_id, ph["phase_id"], t["task_id"])
+            for d in t.get("depends_on", []):
+                if d in where and (phase_order[where[d]]
+                                   > phase_order[ph["phase_id"]]):
+                    raise ValueError(
+                        f"{t['task_id']} depends on {d} in later phase "
+                        f"{where[d]} — forward deps deadlock behind the gate")
             deps = [composite(plan_id, where[d], d)
                     for d in t.get("depends_on", []) if d in where]
             if prev_gate:
