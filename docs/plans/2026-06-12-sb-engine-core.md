@@ -1231,10 +1231,22 @@ def test_spawn_suffix_increments(lay):
     _, p = store.find_task(lay, parent["id"])
     p["context"]["depends_on"] = []
     store.write_task(lay, "queued", p)
-    claims.claim_one(lay, "w1", tier=p["tier"])
+    claims.claim_one(lay, "w1", tier="haiku")  # claims R1 (sorts first)
+    claims.claim_one(lay, "w1", tier="haiku")  # claims the parent
     r2 = spawn.spawn_research(lay, DEFAULT_CONFIG, parent["id"],
                               goal="g2", tier="haiku", done_statement="d")
     assert r2["id"].endswith(".R2")
+
+
+def test_spawn_rejects_queued_continuation_parent(lay):
+    parent = claimed_parent(lay)
+    spawn.spawn_research(lay, DEFAULT_CONFIG, parent["id"],
+                         goal="g1", tier="haiku", done_statement="d")
+    # parent is queued as a continuation; spawning from it must fail —
+    # only the active claimer owns the right to spawn
+    with pytest.raises(ValueError, match="not active"):
+        spawn.spawn_research(lay, DEFAULT_CONFIG, parent["id"],
+                             goal="g2", tier="haiku", done_statement="d")
 
 
 def test_spawn_depth_cap_pauses_for_human(lay):
