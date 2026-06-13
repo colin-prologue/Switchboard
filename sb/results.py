@@ -1,6 +1,12 @@
 """file-result: the only door results enter through. Routes by outcome,
 enqueues the verification lane (PHI-030: only a verifier verdict reaches
-done), and applies verdicts back to targets."""
+done), and applies verdicts back to targets.
+
+Known race: the verify task is enqueued before its author moves to
+paused/awaiting_verification. A verifier that claims and files in that gap
+gets a retryable ValueError and recovers via the stale sweep. The reverse
+order would risk a silently-stuck author (paused with no verify task and
+no sweeper), which is worse."""
 
 import datetime as dt
 import os
@@ -24,11 +30,16 @@ def verifier_tier_for(author_tier, cfg):
 def file_result(lay, cfg, task_id):
     rp = result_path(lay, task_id)
     if not os.path.exists(rp):
+        lane, _ = store.find_task(lay, task_id)
+        if lane not in (None, "active"):
+            raise FileNotFoundError(
+                f"no result file at {rp} — task is in {lane}; already filed?")
         raise FileNotFoundError(f"no result file at {rp}")
     result = validate.check("result", store.read_json(rp))
     lane, task = store.find_task(lay, task_id)
     if lane != "active":
-        raise ValueError(f"{task_id} is not active (lane={lane})")
+        where = f"lane={lane}" if lane else "not found in any lane"
+        raise ValueError(f"{task_id} is not active ({where})")
     result.setdefault("completed_at", now_iso())
     task["result"] = result
 

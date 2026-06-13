@@ -109,6 +109,14 @@ def test_partial_requeues_and_increments_attempts(lay):
     assert on_disk["context"]["prior_attempts"][0]["summary"] == "half done"
 
 
+def test_double_filing_explains_itself(lay):
+    t = active_task(lay)
+    write_result(lay, t["id"])
+    results.file_result(lay, DEFAULT_CONFIG, t["id"])
+    with pytest.raises(FileNotFoundError, match="already filed"):
+        results.file_result(lay, DEFAULT_CONFIG, t["id"])
+
+
 def test_missing_result_file_raises(lay):
     t = active_task(lay)
     with pytest.raises(FileNotFoundError):
