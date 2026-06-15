@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://colin-prologue/schemas/digest/v0.1.0.json",
+  "title": "Status Digest",
+  "description": "The read-side primitive (spec §7): a pure snapshot of orchestration state for the notify hook and the future nexus. Produced by sb status --emit. Carries pending-review AgDRs so HDR-010 tier-2 escalations reach the human through the notification channel.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "lanes", "gates_ready",
+               "paused_for_human", "pending_agdrs", "stale_workers",
+               "stale_active", "quota"],
+  "properties": {
+    "schema_version": { "const": "0.1.0" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "lanes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "queued": { "type": "integer", "minimum": 0 },
+        "active": { "type": "integer", "minimum": 0 },
+        "paused": { "type": "integer", "minimum": 0 },
+        "done": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "gates_ready": {
+      "type": "array",
+      "description": "GATE tasks whose dependencies are all done — ready for sb stamp.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string" },
+          "condition": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "paused_for_human": {
+      "type": "array",
+      "description": "Non-gate tasks escalated to a human (blocked/hard-escalation/depth cap).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string" },
+          "reason": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "pending_agdrs": {
+      "type": "array",
+      "description": "HDR-010 tier-2: AgDRs filed status=pending-review, pushed through this channel while work proceeds.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": ["string", "null"] },
+          "confidence": { "type": ["string", "null"] },
+          "blast_radius": { "type": ["string", "null"] },
+          "provenance": { "type": "object" }
+        }
+      }
+    },
+    "stale_workers": {
+      "type": "array",
+      "description": "Heartbeats older than lease TTL — the fleet-stalled signal.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["worker_id"],
+        "properties": {
+          "worker_id": { "type": ["string", "null"] },
+          "last_seen_s_ago": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "stale_active": {
+      "type": "array",
+      "description": "Active tasks with an expired/missing lease — where malformed-verdict verify tasks land before the stale sweep requeues them (results.py carry-over).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string" },
+          "verifies": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "quota": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Quota/usage-cap state — ADVISORY ONLY, never a claim gate (HDR-011). Populated in Plan 3 by a deterministic detector (a PostToolUse hook that catches rate-limit/429 signals token-free), NOT by reasoning in a throttled session; optionally enriched from Claude Code OTEL token counters. Absent => {state: ok}. The engine never sets it and never reads it to block a claim.",
+      "required": ["state"],
+      "properties": {
+        "state": { "type": "string", "examples": ["ok", "throttled", "exhausted"] },
+        "detail": { "type": "string" },
+        "retry_after_s": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
