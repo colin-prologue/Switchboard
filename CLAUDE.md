@@ -8,16 +8,18 @@ are durable records; humans review at PR gates.
 
 - [MISSION.md](MISSION.md) — why this exists; principles every decision tests against
 - [docs/specs/2026-06-12-switchboard-v2-design.md](docs/specs/2026-06-12-switchboard-v2-design.md) — the v2 design (platform-native; supersedes ARCHITECTURE.md's v1 framing where they conflict)
-- [decisions/](decisions/) — HDR-001..010, file-per-record. HDR-006 (runtime), HDR-007 (substrate), HDR-008 (oversight), HDR-010 (substance-tiered escalation + independent tier judgment, bootstrap exception in its feedback)
+- [decisions/](decisions/) — HDR-001..011, file-per-record. HDR-006 (runtime), HDR-007 (substrate), HDR-008 (oversight), HDR-010 (substance-tiered escalation + independent tier judgment, bootstrap exception in its feedback), HDR-011 (quota/liveness via deterministic hook + external token-free monitor; quota is advisory, never a claim gate)
 - [docs/plans/2026-06-12-sb-engine-core.md](docs/plans/2026-06-12-sb-engine-core.md) — M0 Plan 1 (EXECUTED; includes errata commits — the plan was patched when reviews found bugs in planned code)
+- [docs/plans/2026-06-14-sb-operator-surfaces.md](docs/plans/2026-06-14-sb-operator-surfaces.md) — M0 Plan 2 (DRAFTED, not executed) — operator surfaces; branch `plan/sb-operator-surfaces`
 
-## State (2026-06-13)
+## State (2026-06-15)
 
-- Branch `design/switchboard-v2` (unpushed; `main` holds only the v1 baseline; a commit hook blocks direct main commits)
+- Branch `design/switchboard-v2` is the integration line; `plan/sb-operator-surfaces` (off it) holds the drafted Plan 2 + HDR-011 (unpushed; `main` holds only the v1 baseline; a commit hook blocks direct main commits)
 - M0 Plan 1 complete: full `sb` engine, 84 tests green (`.venv/bin/pytest -q`)
-- Engine surface: `sb init|seed|claim|file-result|spawn|requeue-stale|query|heartbeat`; exit codes 0 ok / 2 held / 3 nothing-to-claim
-- `gate.py`, `rabbit_guard.py` are v1 leftovers — do NOT wire to the new layout; Plans 2/3 replace them
-- Hard invariants (each has pinning tests — keep it that way, see PHI-034): write-before-move into claimable lanes; attempts count task failures only, never infra; only a verifier verdict reaches done; every phase ends at a GATE task; seeds all-or-nothing
+- Plan 2 DRAFTED only — no Plan 2 code written yet; the plan doc is self-contained and ready to execute task-by-task (subagent-driven or inline)
+- Engine surface (after Plan 2 executes): `sb init|seed|claim|file-result|spawn|requeue-stale|query|heartbeat|status|brief|stamp|notify`; exit codes 0 ok / 2 held / 3 nothing-to-claim
+- `gate.py`, `rabbit_guard.py` are v1 leftovers — do NOT wire to the new layout; Plan 2 deletes `gate.py` (→ `sb brief`/`sb stamp`), Plan 3 replaces `rabbit_guard.py`
+- Hard invariants (each has pinning tests — keep it that way, see PHI-034): write-before-move into claimable lanes; attempts count task failures only, never infra; only a verifier verdict reaches done; every phase ends at a GATE task; seeds all-or-nothing; (Plan 2 adds) `sb stamp` completes the GATE (paused→done) — the only thing that unblocks the next phase; quota is advisory, never gates a claim (HDR-011)
 
 ## M0 remaining work
 
@@ -32,6 +34,7 @@ are durable records; humans review at PR gates.
 - Subagent prompt protocols: task (worktree on context.branch, AgDR-instead-of-prompt with steelman + blast radius), verifier, planner (planning is a task type)
 - Tripwire hooks (rabbit_guard v2, deterministic only, no API calls)
 - HDR-010 requirements: three-tier escalation in the worker skill; independent fresh-context agent judges AgDR tier assignments (self-assessment is bootstrap-only)
+- HDR-011 requirements: rate-limit detection is a deterministic PostToolUse hook (token-free) that writes `.switchboard/quota.json`; an external token-free monitor (cron'd `sb status --emit`/`sb notify`, no model calls) surfaces quota + liveness even when the whole fleet is capped/dead — also covers silent session death (spec §11 #3). No Anthropic API exists for subscription 5h/weekly usage; signals are reactive 429 + optional OTEL token counters.
 - M0 exit bar: 2-phase toy plan end-to-end with a research-handoff continuation, human stamps the gate
 - M0 research tasks: idle-poll tuning (sb claim --wait vs self-pacing); subagent budget enforcement
 
