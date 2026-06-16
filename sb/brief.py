@@ -52,7 +52,13 @@ def decisions_in_phase(lay, plan_id, phase_id):
     for f in sorted(os.listdir(lay.decisions)):
         if not f.endswith(".json"):
             continue
-        rec = store.read_json(os.path.join(lay.decisions, f))
+        # decisions/ is hand-edited git-tracked; a corrupt file must not crash
+        # an operator-facing brief (or stamp, which imports this). Skip it,
+        # matching digest._load_decisions.
+        try:
+            rec = store.read_json(os.path.join(lay.decisions, f))
+        except (ValueError, OSError):
+            continue
         prov = rec.get("provenance", {})
         if prov.get("plan_id") == plan_id and prov.get("phase_id") == phase_id:
             out.append(rec)
