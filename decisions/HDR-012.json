@@ -1,0 +1,56 @@
+{
+    "schema_version": "0.3.0",
+    "id": "HDR-012",
+    "type": "human",
+    "status": "approved",
+    "timestamp": "2026-06-16T00:00:00Z",
+    "level": "system",
+    "tags": [
+        "deliberation",
+        "planning",
+        "architecture-boundary",
+        "scope"
+    ],
+    "author": {
+        "kind": "human",
+        "id": "colin",
+        "role": "architect"
+    },
+    "title": "Deliberation is a separate interactive front-end layer; coupled to the execution substrate only through the plan/goal artifact",
+    "context": "While scoping Plan 3 (the judgment layer), Colin described wanting a persona/frame panel — PM, Engineer, Product, QA — that autonomously debates a proposal's pros and cons and lets the human join, a virtual meeting that reaches consensus before recording it into a goal or plan. This read at first as a conflict with the execution architecture, which deliberately forbids live peer-to-peer messaging between agents (ARCHITECTURE.md:39; HDR-006/007/008): coordination there is file-mediated and asynchronous (AgDR-instead-of-prompt, spawn-and-release research continuations §3.3, verifier reopen §6, PR-gate ratification). The clarification that resolves it: the persona panel is PRE-WORK deliberation, upstream of `sb seed` — it is not agents conversing during execution. ARCHITECTURE.md:39's no-live-messaging rule is scoped to the execution substrate; it says nothing about a planning front-end.",
+    "options": [
+        {
+            "name": "fold-conversation-into-execution",
+            "rationale": "Make the personas long-running agents that converse to resolve issues inside the same substrate that runs tasks — one system, one mechanism.",
+            "tradeoff": "Reverses HDR-006/007/008 and ARCHITECTURE.md:39. Live conversation reintroduces held-slot waiting (breaks the deadlock-freedom §3.3 was built to guarantee), accumulates shared session context (breaks disposability §3.1), and resolves issues in an ephemeral chat (breaks MISSION's durability premise). Pays the full cost of multi-agent messaging infra inside the layer least able to tolerate it."
+        },
+        {
+            "name": "no-deliberation-surface",
+            "rationale": "Keep only the planned file-mediated path: `sb seed --goal` enqueues a plan task, a planner subagent writes the plan + SDR. No interactive meeting at all.",
+            "tradeoff": "Does not deliver the interactive, multi-voice consensus experience Colin wants; a single planner subagent monologue is not a PM/Eng/QA debate the human can engage with live."
+        },
+        {
+            "name": "separate-deliberation-front-end",
+            "rationale": "A new interactive deliberation layer (persona frames + the human, converging on consensus) that emits a durable artifact — a goal, plan, or SDR — which the existing execution engine consumes unchanged via `sb seed`. The no-live-messaging rule stays scoped to execution; deliberation is exempt because its output IS the durable record.",
+            "tradeoff": "New product surface and scope; must be held out of M0 (whose bar is the execution engine self-hosting) to avoid scope creep before the engine is validated end-to-end. Two layers to maintain, joined by one contract."
+        }
+    ],
+    "chosen": "separate-deliberation-front-end",
+    "steelman": [
+        {
+            "option": "fold-conversation-into-execution",
+            "strongest_case": "One mechanism for both pre-work and work would be conceptually unified, and if peer messaging existed it could serve mid-execution disagreements (verifier vs coder) too, not just planning."
+        },
+        {
+            "option": "no-deliberation-surface",
+            "strongest_case": "Zero new scope; the planner-as-task path already exists in the spec, and PR-gate feedback already gives the human a binding say — arguably the consensus can happen at the gate rather than before seeding."
+        }
+    ],
+    "reasoning": "The two layers have opposite requirements, so forcing them into one mechanism is the square peg. Deliberation WANTS live back-and-forth, accumulated shared context, human presence, and divergent voices — that is the whole point. Execution WANTS statelessness, durability, no held slots, single-purpose subagents. Separating them lets each optimize for its own thing. The boundary artifact (a `plans/<id>.json` or a goal for `sb seed --goal`) is exactly the durable record the project already values: the deliberation is allowed to be ephemeral precisely BECAUSE its conclusion is written down, which embodies rather than violates MISSION's 'the why must not evaporate when the chat closes.' This is additive, not a reversal: ARCHITECTURE.md:39 governs execution and is untouched. Recommended starting shape is FRAMES (one model voicing PM/Eng/QA in turn within a single interactive session, human interjecting) rather than autonomous conversing agents — frames deliver the experience without rebuilding the messaging machinery execution deliberately omits; escalate to genuine multi-agent only if frames prove too shallow.",
+    "blast_radius": "No `sb` engine code change — the engine consumes the same plan/goal artifact it already does. The deliberation layer is a new skill/orchestration track (closest kin: the superpowers:brainstorming flow), specced and built on its own spec→plan cycle AFTER M0's execution bar is met. M0 scope is unchanged: Plan 3-A (the /sb-work execution loop) continues as planned. Reversal is cheap: the layer is loosely coupled by a single artifact contract, so it can be redesigned, replaced, or dropped without touching execution.",
+    "depends_on": [
+        "HDR-006",
+        "HDR-007",
+        "HDR-008"
+    ]
+}
