@@ -40,6 +40,8 @@ Components:
   §8 requires a rate-limited dispatch to requeue attempts-unchanged.
 - Consumes (already built): `sb claim --wait`, `sb heartbeat`,
   `sb file-result`, `sb query`, `tiers.json`, `git worktree`.
+- **Loop instrumentation** (skill-owned, token-free): a per-iteration ledger and
+  a `max_loop_iterations` diagnostic checkpoint (§8).
 
 The `sb` engine remains git-free; the skill owns all git operations.
 
@@ -61,6 +63,9 @@ loop:
   sb file-result <id>                          # validate, lane move, enqueue verify
     dispatch raised a rate-limit/usage-cap signal → sb release <id>; back off; repeat
   git worktree remove WT                        # branch + commits persist
+  append iteration to loop-ledger; i += 1
+  if i >= max_loop_iterations:                  # diagnostic checkpoint, not a kill (§8)
+      write loop-diagnostic; notify; PAUSE claiming, await human (resume resets i)
   repeat
 ```
 
@@ -138,12 +143,39 @@ Unlike Plans 1–2, A is mostly a skill + prompts, which are not pytest-able.
   result-outcome + re-enqueue, so it is real engine work, not A's spine.
 - **Tripwire guards + token-free quota detection** → sub-plan B.
 
-## 8. Accepted risk + revision condition
+## 8. Loop cap as a diagnostic checkpoint (not a kill-switch)
 
-A has **no hard iteration/budget cap** in the loop (the lean choice). Drift
-containment leans on fresh-context subagents and the sub-plan B external
-monitor (liveness) + tripwire hooks (runaway). **Revision condition:** if a
-long-running session is observed to drift, loop, or wedge in practice before B's
-monitor catches it, add a hard iteration/budget cap to the skill (the bounded
-self-terminate + external-restart variant). Recorded here so the omission is a
-conscious, reversible choice rather than an oversight.
+The loop carries `max_loop_iterations` — **high by default (200) and
+overridable** per session (flag/config). Reaching it does **not** throw the
+session away. It is a **diagnostic checkpoint**: the cap exists to force a
+periodic "why has this worker iterated this much, and what does that tell us
+about our tooling or structure?" review — not to contain drift.
+
+Mechanism:
+
+- The loop keeps a lightweight, **token-free iteration ledger** in
+  `.switchboard/loop-ledger-<worker_id>.jsonl` — one line per iteration:
+  `{i, claimed_id, type, outcome, released, wall_s}`. Pure bookkeeping, no model
+  reasoning; survives session death (disposability-respecting).
+- On reaching the cap the loop **pauses claiming** (it does NOT exit/kill) and
+  writes `.switchboard/loop-diagnostic-<worker_id>.json`: total iterations, the
+  split of **productive** work (distinct tasks reaching `done`) vs **churn**
+  (releases, retries, repeated `claimed_id`s), quota events, and wallclock. It
+  fires a notify event ("worker hit loop cap — review"). The interactive session
+  stays open, so its transcript is available for inspection alongside the durable
+  diagnostic.
+- The human resumes (resets the counter, optionally raising the cap) or
+  investigates the diagnostic to improve tooling/structure. Resuming is cheap:
+  at a high default the common case through the checkpoint is "all productive →
+  bump and continue."
+
+Why a checkpoint and not a drift kill: a raw iteration count conflates healthy
+high throughput with unproductive looping, so killing on it would fire on good
+workers (review fatigue, PHI-005 tension). The diagnostic classifies the two.
+The **sharp early-warning** on unproductive looping (consecutive no-progress) is
+a **sub-plan B tripwire**, surfaced through the same diagnostic. A owns the
+coarse periodic checkpoint; B owns the early churn detector.
+
+**Revision condition:** if the high-default cap proves too noisy or too coarse
+in practice, move the primary trigger to a churn-specific counter (consecutive
+iterations with no task reaching `done`) rather than total iterations.
