@@ -36,6 +36,11 @@ def gate_ready(lay, plan_id, phase_id):
     """Every real work task in the phase has reached done (none queued/active/
     paused/failed). Verification and GATE tasks are excluded by tasks_in_phase."""
     tasks = tasks_in_phase(lay, plan_id, phase_id)
+    # The `bool(tasks)` guard intentionally treats a work-less phase as NOT
+    # ready (require --force to stamp it). digest.build_digest takes the
+    # opposite, purer view — a GATE with no deps is `gates_ready` there — so the
+    # two definitions diverge only on the degenerate empty-phase case, which a
+    # seeded plan never produces.
     return bool(tasks) and all(lane == "done" for lane, _ in tasks)
 
 
