@@ -83,6 +83,14 @@ def test_approve_without_note_marks_approved(lay):
     assert store.read_json(f"{lay.decisions}/ADR-051.json")["status"] == "approved"
 
 
+def test_approve_whitespace_note_marks_approved_not_incorporated(lay):
+    # a whitespace-only note is not substantive feedback -> plain approval
+    seed_and_finish_ph1(lay)
+    put_decision(lay, make_agdr("ADR-051", status="pending-review"))
+    stamp.stamp(lay, "PLAN-001", "PH-1", action="approve", note="   ")
+    assert store.read_json(f"{lay.decisions}/ADR-051.json")["status"] == "approved"
+
+
 def test_revise_returns_decisions_to_proposed_and_keeps_gate_paused(lay):
     seed_and_finish_ph1(lay)
     put_decision(lay, make_agdr("ADR-051", status="pending-review"))

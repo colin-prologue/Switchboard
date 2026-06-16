@@ -44,6 +44,10 @@ _STATUS_ON_APPROVE = {True: "feedback-incorporated", False: "approved"}
 
 def stamp(lay, plan_id, phase_id, action, note="", reviewer="colin",
           target=None, force=False):
+    # NOTE: not idempotent on the decision trail. A second approve on an
+    # already-advanced gate re-appends a feedback entry to each phase AgDR and
+    # writes another HDR (the gate-lane move itself is guarded below). Single
+    # operator, one stamp per gate — re-running corrupts the audit trail.
     if action == "approve" and not force and not gate_ready(lay, plan_id, phase_id):
         raise GateNotReady(
             f"{plan_id}/{phase_id} is not gate-ready (work tasks unfinished); "
@@ -59,7 +63,9 @@ def stamp(lay, plan_id, phase_id, action, note="", reviewer="colin",
             continue
         d.setdefault("feedback", []).append(fb)
         if action == "approve":
-            d["status"] = _STATUS_ON_APPROVE[bool(note)]
+            # feedback-incorporated signals SUBSTANTIVE feedback; a whitespace-
+            # only note is not substantive, so it reads as a plain approval.
+            d["status"] = _STATUS_ON_APPROVE[bool(note.strip())]
         elif action == "revise":
             d["status"] = "proposed"
         elif action == "flag":
