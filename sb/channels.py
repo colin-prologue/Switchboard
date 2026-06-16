@@ -7,10 +7,14 @@ import subprocess
 
 
 def macos(title, body):
-    # AppleScript string literals are double-quoted; json.dumps gives correct
-    # quoting/escaping for the common case. Best-effort: never raise.
-    script = (f"display notification {json.dumps(body)} "
-              f"with title {json.dumps(title)}")
+    # AppleScript string literals are double-quoted and accept the same
+    # backslash escapes json.dumps emits for ", \, \n, \t. But osascript does
+    # NOT understand \uXXXX, so json must keep non-ASCII literal — em-dashes in
+    # AgDR titles otherwise raise a syntax error and (check=False) drop the
+    # notification silently. ensure_ascii=False keeps those characters intact.
+    # Best-effort: never raise.
+    script = (f"display notification {json.dumps(body, ensure_ascii=False)} "
+              f"with title {json.dumps(title, ensure_ascii=False)}")
     subprocess.run(["osascript", "-e", script], check=False,
                    capture_output=True)
 
