@@ -66,3 +66,16 @@ def test_channels_resolve_known_and_default():
     assert channels.resolve("null")("t", "b") is None
     # unknown name falls back to stdout, never raises
     assert channels.resolve("nope") is channels.stdout
+
+
+def test_macos_channel_degrades_when_osascript_missing(monkeypatch):
+    # check=False swallows a non-zero exit but NOT a missing-binary OSError;
+    # the channel must still degrade to a no-op (plan invariant: never raise),
+    # so a non-macOS worker doesn't crash sb notify and wedge its poll loop.
+    from sb import channels
+
+    def boom(*a, **k):
+        raise FileNotFoundError(2, "No such file or directory", "osascript")
+
+    monkeypatch.setattr(channels.subprocess, "run", boom)
+    assert channels.macos("title", "body — em-dash") is None

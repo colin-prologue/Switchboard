@@ -12,11 +12,17 @@ def macos(title, body):
     # NOT understand \uXXXX, so json must keep non-ASCII literal — em-dashes in
     # AgDR titles otherwise raise a syntax error and (check=False) drop the
     # notification silently. ensure_ascii=False keeps those characters intact.
-    # Best-effort: never raise.
+    # Best-effort: never raise. check=False swallows a non-zero exit, but NOT a
+    # missing-binary FileNotFoundError, so guard OSError too — on a non-macOS
+    # worker (or any env without osascript) the channel must degrade to a no-op
+    # rather than crash sb notify and wedge the poll loop.
     script = (f"display notification {json.dumps(body, ensure_ascii=False)} "
               f"with title {json.dumps(title, ensure_ascii=False)}")
-    subprocess.run(["osascript", "-e", script], check=False,
-                   capture_output=True)
+    try:
+        subprocess.run(["osascript", "-e", script], check=False,
+                       capture_output=True)
+    except OSError:
+        pass
 
 
 def stdout(title, body):
