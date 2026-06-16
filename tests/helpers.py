@@ -28,3 +28,42 @@ def make_task(task_id="PLAN-001/PH-1/T-1", tier="haiku", **over):
     if ctx:
         task["context"] = {**task["context"], **ctx}
     return task
+
+
+def make_agdr(rec_id="ADR-051", status="pending-review", plan_id="PLAN-001",
+              phase_id="PH-1", **over):
+    """Schema-valid (decision v0.3.0) AgDR for brief/stamp/digest tests."""
+    rec = {
+        "schema_version": "0.3.0",
+        "id": rec_id,
+        "type": "agent",
+        "status": status,
+        "timestamp": "2026-06-14T00:00:00+00:00",
+        "level": "component",
+        "tags": ["caching"],
+        "author": {"kind": "model", "id": "claude-opus-4-8", "role": "coder"},
+        "title": "Use immutable snapshots for the cache",
+        "context": "Concurrency model had to be chosen before implementation.",
+        "options": [
+            {"name": "immutable-snapshots", "rationale": "no locks"},
+            {"name": "mutable-with-locks", "rationale": "lower memory"},
+        ],
+        "chosen": "immutable-snapshots",
+        "confidence": "medium",
+        "reasoning": "Snapshots remove the lock-contention failure mode entirely.",
+        "steelman": [{"option": "mutable-with-locks",
+                      "strongest_case": "Lower memory; a familiar pattern."}],
+        "blast_radius": "Cache module only; no public API change.",
+        "evidence": [{"kind": "test", "ref": "tests/test_cache.py", "result": "pass"}],
+        "provenance": {"plan_id": plan_id, "phase_id": phase_id, "task_id": "T-1"},
+    }
+    rec.update(over)
+    return rec
+
+
+def put_decision(lay, rec):
+    import json
+    import os
+    with open(os.path.join(lay.decisions, f"{rec['id']}.json"), "w",
+              encoding="utf-8") as f:
+        json.dump(rec, f)

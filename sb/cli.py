@@ -3,9 +3,12 @@ flow (0 ok, 2 held/blocked, 3 nothing to claim). Skills consume this."""
 
 import argparse
 import json
+import os
 import sys
 
-from sb import claims, paths, query, results, seed, spawn, store
+from sb import (brief as brief_mod, channels, claims, digest as digest_mod,
+                notify as notify_mod, paths, query, results, seed, spawn,
+                stamp as stamp_mod, store)
 
 
 def _out(obj):
@@ -50,6 +53,32 @@ def main(argv=None):
 
     p = common(sub.add_parser("heartbeat"))
     p.add_argument("--worker-id", required=True)
+
+    p = common(sub.add_parser("brief"))
+    p.add_argument("--plan", required=True, help="plan id, e.g. PLAN-001")
+    p.add_argument("--phase", required=True)
+    p.add_argument("--write", action="store_true",
+                   help="also write reviews/<plan>_<phase>.md")
+
+    p = common(sub.add_parser("stamp"))
+    p.add_argument("--plan", required=True, help="plan id, e.g. PLAN-001")
+    p.add_argument("--phase", required=True)
+    p.add_argument("--action", required=True,
+                   choices=["approve", "revise", "flag"])
+    p.add_argument("--note", default="")
+    p.add_argument("--reviewer", default="colin")
+    p.add_argument("--decision", dest="target", default=None,
+                   help="target one decision id; default = all phase AgDRs")
+    p.add_argument("--force", action="store_true",
+                   help="approve even if work tasks are unfinished")
+
+    p = common(sub.add_parser("status"))
+    p.add_argument("--emit", action="store_true",
+                   help="persist the digest to .switchboard/digest.json")
+
+    p = common(sub.add_parser("notify"))
+    p.add_argument("--channel", default=None,
+                   help="override notify_channel: macos|stdout|null")
 
     a = ap.parse_args(argv)
 
@@ -106,6 +135,42 @@ def main(argv=None):
     if a.cmd == "heartbeat":
         claims.heartbeat(lay, a.worker_id)
         _out({"heartbeat": a.worker_id})
+        return 0
+
+    if a.cmd == "status":
+        dg = digest_mod.build_digest(lay, cfg)
+        if a.emit:
+            store.write_json(os.path.join(lay.root, "digest.json"), dg)
+        _out(dg)
+        return 0
+
+    if a.cmd == "brief":
+        plan = store.read_json(os.path.join(lay.plans, f"{a.plan}.json"))
+        md = brief_mod.build_brief(lay, plan, a.phase)
+        if a.write:
+            os.makedirs(os.path.join(lay.repo, "reviews"), exist_ok=True)
+            with open(os.path.join(lay.repo, "reviews",
+                                   f"{a.plan}_{a.phase}.md"),
+                      "w", encoding="utf-8") as f:
+                f.write(md)
+        print(md)
+        return 0
+
+    if a.cmd == "stamp":
+        try:
+            out = stamp_mod.stamp(lay, a.plan, a.phase, action=a.action,
+                                  note=a.note, reviewer=a.reviewer,
+                                  target=a.target, force=a.force)
+        except stamp_mod.GateNotReady as e:
+            print(json.dumps({"held": str(e)}), file=sys.stderr)
+            return 2
+        _out(out)
+        return 0
+
+    if a.cmd == "notify":
+        ch = channels.resolve(a.channel) if a.channel else None
+        events = notify_mod.notify(lay, cfg, channel=ch)
+        _out({"fired": [e["key"] for e in events]})
         return 0
 
     return 1

@@ -17,6 +17,7 @@ NAMES = {
     "plan": "plan.schema.json",
     "decision": "decision-record.schema.json",
     "result": "result.schema.json",
+    "digest": "digest.schema.json",
 }
 
 _cache = {}

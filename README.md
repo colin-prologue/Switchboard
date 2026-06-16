@@ -45,7 +45,13 @@ pip install -e '.[dev]' && pytest          # the engine is fully unit-tested
 sb init --repo .                            # scaffold .switchboard/
 sb seed --repo . --plan plans/PLAN-031.json --force
 sb claim --repo . --worker-id me            # JSON task on stdout; exit 3 = empty
+sb status --repo . --emit                   # JSON digest -> .switchboard/digest.json
+sb brief  --repo . --plan PLAN-031 --phase PH-1   # markdown review brief (PR body)
+sb stamp  --repo . --plan PLAN-031 --phase PH-1 --action approve --note "LGTM"
+sb notify --repo . --channel macos          # fire new gate/pause/AgDR/stall signals
 ```
+
+`sb stamp --action approve` completes the phase GATE task, which unblocks the next phase; `sb brief` and `sb status` are the read side (PR body + the notification/nexus digest).
 
 Exit codes are the contract: **0** ok, **2** held/blocked, **3** nothing to claim.
 JSON on stdout; skills consume this, humans can too.
@@ -61,8 +67,5 @@ JSON on stdout; skills consume this, humans can too.
 
 ## Status / what's not here yet
 
-- `sb brief` / `stamp` / `status` / `notify` — Plan 2. Gates currently advance only
-  by hand-editing the GATE task; this is deliberate until the stamp surface lands.
 - Worker skill, subagent protocols, tripwire hooks — Plan 3.
-- `gate.py` and `rabbit_guard.py` are v1 leftovers kept until Plans 2–3 replace
-  them. Do not wire them to the new layout.
+- `rabbit_guard.py` is a v1 leftover kept until Plan 3 replaces it. Do not wire it to the new layout.
