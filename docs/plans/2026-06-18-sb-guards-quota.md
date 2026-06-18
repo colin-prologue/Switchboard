@@ -427,8 +427,10 @@ def test_distinct_calls_do_not_trip():
 
 def test_repeat_error_trips():
     st = sb_guard.new_state(now=0.0)
-    st = feed(st, post("Bash", {"command": "x"},
-                       text="Traceback: ValueError: boom"), n=3)
+    # distinct commands (so repeat_call does NOT trip) sharing one error sig
+    for cmd in ("cat a", "cat b", "cat c"):
+        st = sb_guard.update_state(
+            st, post("Bash", {"command": cmd}, text="Traceback: ValueError: boom"), CFG)
     tripped, signal, _ = sb_guard.evaluate(st, CFG, now=0.0)
     assert tripped and signal == "repeat_error"
 
@@ -697,17 +699,19 @@ def _nudge(signal, evidence):
 
 
 def decide_post(state, cfg, now=None):
-    """Returns (output_dict_or_None, new_state). Trip #1 nudges (cooldown +
-    cap respected); trip #2+ arms the PreToolUse block."""
+    """Returns (output_dict_or_None, new_state). Two-strike + fail-safe (ADR-003):
+    trip #1 nudges (cooldown + cap respected); the block arms on trip #2 OR when
+    the nudge budget is exhausted — so a subagent that keeps tripping past its
+    nudge budget escalates to a hard block instead of getting silence."""
     tripped, signal, evidence = evaluate(state, cfg, now=now)
     if not tripped:
         return None, state
     state["trips"] += 1
-    if state["trips"] >= 2:
+    nudge_budget_left = state["nudges"] < cfg["guard_nudge_cap"]
+    cooldown_ok = state["calls"] - state["last_nudge_call"] >= cfg["guard_cooldown_calls"]
+    if state["trips"] >= 2 or not nudge_budget_left:
         state["block_armed"] = True
-    can_nudge = (state["nudges"] < cfg["guard_nudge_cap"] and
-                 state["calls"] - state["last_nudge_call"] >= cfg["guard_cooldown_calls"])
-    if can_nudge:
+    if nudge_budget_left and cooldown_ok:
         state["nudges"] += 1
         state["last_nudge_call"] = state["calls"]
         return _nudge(signal, evidence), state
