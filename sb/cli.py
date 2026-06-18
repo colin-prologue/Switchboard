@@ -46,6 +46,9 @@ def main(argv=None):
 
     common(sub.add_parser("requeue-stale"))
 
+    p = common(sub.add_parser("release"))
+    p.add_argument("task_id")
+
     p = common(sub.add_parser("query"))
     p.add_argument("--text", default=None)
     p.add_argument("--tags", default="")
@@ -125,6 +128,11 @@ def main(argv=None):
 
     if a.cmd == "requeue-stale":
         _out({"requeued": claims.requeue_stale(lay, cfg)})
+        return 0
+
+    if a.cmd == "release":
+        dest = claims.release(lay, a.task_id)
+        _out({"task_id": a.task_id, "lane": dest})
         return 0
 
     if a.cmd == "query":

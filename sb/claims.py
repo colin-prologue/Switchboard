@@ -74,6 +74,29 @@ def requeue_stale(lay, cfg):
     return requeued
 
 
+def release(lay, task_id):
+    """Infra-requeue a named active task: active -> queued, attempts UNCHANGED,
+    lease dropped. The loop calls this when a dispatch raises a rate-limit /
+    usage-cap signal (infra failure, not task failure — spec §5/§8). Unlike
+    file-result's requeue path it never increments attempts; unlike
+    requeue_stale it targets one task and does not consult the lease.
+
+    Same ordering as requeue_stale: finalize the body while still in active/
+    (un-claimable), clear the lease before the rename so a fresh claimer's lease
+    is never clobbered, then the atomic move. Never write after the move."""
+    lane, task = store.find_task(lay, task_id)
+    if lane != "active":
+        where = f"lane={lane}" if lane else "not found in any lane"
+        raise ValueError(f"{task_id} is not active ({where}); cannot release")
+    task["status"] = "queued"
+    task.pop("claim", None)
+    store.write_task(lay, "active", task)
+    leases.clear_lease(lay, task_id)
+    if not store.move_task(lay, "active", "queued", task_id):
+        raise ValueError(f"{task_id} vanished from active while releasing")
+    return "queued"
+
+
 def heartbeat(lay, worker_id):
     store.write_json(os.path.join(lay.heartbeats, store.fname(worker_id)),
                      {"worker_id": worker_id, "at": time.time()})
