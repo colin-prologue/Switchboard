@@ -42,3 +42,17 @@ def test_load_config_raises_on_corrupt_json(lay):
 def test_lane_rejects_unknown_name(lay):
     with pytest.raises(ValueError, match="unknown lane"):
         lay.lane("archived")
+
+
+def test_guard_dir_and_config_defaults(lay):
+    from sb import paths
+    assert lay.guard.endswith("/.switchboard/guard")
+    cfg = paths.load_config(lay)
+    assert cfg["guard_max_tool_calls"] == 80
+    assert cfg["guard_max_wall_s"] == 1200
+    assert cfg["guard_repeat_call"] == 3
+    assert cfg["guard_repeat_error"] == 3
+    assert cfg["guard_no_progress"] == 15
+    assert cfg["guard_nudge_cap"] == 3
+    assert cfg["guard_cooldown_calls"] == 3
+    assert cfg["monitor_churn_threshold"] == 6

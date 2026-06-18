@@ -16,6 +16,15 @@ DEFAULT_CONFIG = {
     "max_attempts": 3,
     "lease_ttl_s": 5400,
     "max_chain_depth": 3,
+    # sub-plan B guard/monitor thresholds (all tunable — spec §7)
+    "guard_max_tool_calls": 80,
+    "guard_max_wall_s": 1200,
+    "guard_repeat_call": 3,
+    "guard_repeat_error": 3,
+    "guard_no_progress": 15,
+    "guard_nudge_cap": 3,
+    "guard_cooldown_calls": 3,
+    "monitor_churn_threshold": 6,
 }
 
 
@@ -27,6 +36,7 @@ class Layout:
         self.leases = os.path.join(self.root, "leases")
         self.heartbeats = os.path.join(self.root, "heartbeats")
         self.results = os.path.join(self.root, "results")
+        self.guard = os.path.join(self.root, "guard")
         self.config_path = os.path.join(self.root, "config.json")
         self.decisions = os.path.join(self.repo, "decisions")
         self.plans = os.path.join(self.repo, "plans")
