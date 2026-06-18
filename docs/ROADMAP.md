@@ -1,0 +1,83 @@
+# Switchboard Roadmap
+
+Living planning doc for milestone work. CLAUDE.md links here for the
+decomposition detail and carries only the terse current state. Update the
+status line of a sub-plan when it lands; promote durable design decisions into
+specs/ADRs rather than narrating them here.
+
+## Milestone status
+
+| Milestone | What | Status |
+|---|---|---|
+| M0 Plan 1 | `sb` engine core (lanes, leases, claims/wait, spawn, seed, query) | **EXECUTED** — 84 tests at landing |
+| M0 Plan 2 | operator surfaces (`brief`/`stamp`/`status`/`notify`); `gate.py` retired | **EXECUTED** (merged via PR #1) — 122 tests |
+| M0 Plan 3-A | worker loop + subagent protocols + `sb release` | **IMPLEMENTED** 2026-06-17 — 135 tests |
+| M0 Plan 3 A-planner | `sb seed --goal` + planner protocol | spec'd in 3-A doc §7; **not built** |
+| M0 Plan 3 A-continuation | research-handoff continuation chain | spec'd (worker-loop §3.3); **not built** |
+| M0 Plan 3-B | guards + quota/liveness | spec written + approved; **not built** |
+| M0 Plan 3-C | HDR-010 escalation layer | design sketch; finalize after A |
+| M0 Plan 3-D | M0 exit bar (acceptance) | **not built** |
+
+## Plan 3 — judgment layer (decomposed into four sub-plans)
+
+HDR-012 keeps the deliberation front-end out of scope — that is a separate
+post-M0 track.
+
+- **A — worker loop + subagent protocols** (the execution spine). **IMPLEMENTED**
+  on `design/switchboard-v2` (commits `f4091d7`..`038a158`, 135 tests green).
+  Plan: [docs/plans/2026-06-17-sb-worker-loop.md](plans/2026-06-17-sb-worker-loop.md);
+  spec: [docs/specs/2026-06-16-sb-worker-loop-design.md](specs/2026-06-16-sb-worker-loop-design.md).
+  Delivered: `/sb-work` skill (`.claude/skills/sb-work/SKILL.md` + `task-protocol.md`
+  + `verifier-protocol.md`) — long-running interactive loop (claim --wait →
+  provision worktree → dispatch fresh subagent at tier → file-result → teardown;
+  heartbeat per task pass); `sb release` (infra-requeue, attempts unchanged);
+  `sb/loopledger.py` (token-free loop-ledger + productive/churn diagnostic);
+  stub-dispatcher integration test. `max_loop_iterations` is a **diagnostic
+  checkpoint that pauses, not a kill**; idle waits are not loop iterations
+  (heartbeat only). Skill owns all git; engine stays git-free.
+  - *Reviewed-not-tested (by design, spec §6):* the task/verifier **prompt
+    protocols** — get their live exercise in D.
+  - *Follow-on:* `max_loop_iterations` is a skill default (200), not in
+    `paths.DEFAULT_CONFIG`. Add to config if operator-tunability is wanted.
+- **A-planner** (small follow-on before D): `sb seed --goal` + planner prompt
+  protocol (planning is a task type → writes `plans/<id>.json` + SDR). The loop
+  dispatches a planner identically; only the entry point and SDR/plan emission
+  are new.
+- **A-continuation** (small follow-on before D): research-handoff chain —
+  `paused_for_research` result outcome → `sb spawn` (exists) → continuation task
+  depending on it (worker-loop spec §3.3). `sb spawn` exists; this needs a
+  result-outcome + re-enqueue, so it is real engine work. D requires exercising
+  one chain.
+- **B — guards + quota/liveness** (independent of A; token-free). rabbit_guard v2
+  deterministic tripwire hooks (repeat-call/repeat-error/no-progress/budget;
+  first trip nudge, second forces `blocked`); HDR-011 rate-limit PostToolUse
+  detector → `.switchboard/quota.json`; external token-free monitor (cron'd
+  `sb status --emit`/`sb notify`, no model calls) for quota + liveness +
+  silent-session-death (v2 design §11 #3). Owns the sharp early no-progress
+  detector A's coarse cap defers to. Research task: subagent budget enforcement
+  (hooks vs loop checks). **B can now finalize against A's real artifacts** (the
+  ledger vocabulary, the release path, the checkpoint semantics) rather than
+  projected ones.
+- **C — HDR-010 escalation layer** (depends on A; uses Plan 2 notify). three-tier
+  interrupt/flag-async/record-silent routing; independent fresh-context agent
+  judges AgDR tier assignments (self-assessment is bootstrap-only). Open Qs
+  (finalize now that A is real): when the tier judge runs (per-AgDR vs batched),
+  bootstrap handoff.
+- **D — M0 exit bar** (validates A+B+C). 2-phase toy plan end-to-end with a
+  research-handoff continuation, human stamps the gate. Acceptance test, not a
+  feature.
+
+**Self-build runway note:** the fleet cannot safely self-build until A+B are
+built and D passes under human supervision (PHI-030: verification before
+autonomy). So C and M1 are the first genuinely autonomous-executable work; specs
+written ahead of A were runway, and B/C specs may need revision now that A's
+emergent behavior is real.
+
+**M0 research tasks:** idle-poll tuning (`sb claim --wait` vs self-pacing, v2
+design §3.4); subagent budget enforcement (in B).
+
+## Deferred (explicitly)
+
+Packaging (schemas are editable-install-only — comment in `sb/validate.py`),
+`dag.all_edges` skipping done/failed lanes, embeddings retrieval, nexus,
+multi-machine substrate.
