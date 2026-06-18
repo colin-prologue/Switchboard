@@ -16,6 +16,7 @@ import sys
 
 
 def append(ledger_path, *, i, claimed_id, type, outcome, released, wall_s):
+    os.makedirs(os.path.dirname(ledger_path) or ".", exist_ok=True)
     line = {"i": i, "claimed_id": claimed_id, "type": type,
             "outcome": outcome, "released": bool(released), "wall_s": wall_s}
     with open(ledger_path, "a", encoding="utf-8") as f:
@@ -30,6 +31,9 @@ def _read(ledger_path):
         for line in f:
             line = line.strip()
             if line:
+                # A partial write (e.g. session killed mid-line) raises here —
+                # intentional: a corrupt ledger should surface loudly, never
+                # produce a silently undercounted diagnostic.
                 out.append(json.loads(line))
     return out
 
@@ -62,7 +66,7 @@ def diagnose(ledger_path, *, worker_id, out=None):
         "churn": releases + retries,
         "wall_s_total": wall_total,
     }
-    if out:
+    if out is not None:
         tmp = f"{out}.tmp.{os.getpid()}"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(diag, f, indent=2)

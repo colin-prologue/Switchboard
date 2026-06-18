@@ -74,7 +74,8 @@ def test_diagnose_writes_out_file(tmp_path):
                       outcome="done", released=False, wall_s=3.0)
     out = str(tmp_path / "loop-diagnostic-w1.json")
     loopledger.diagnose(led, worker_id="w1", out=out)
-    assert json.load(open(out))["productive"] == 1
+    with open(out) as f:
+        assert json.load(f)["productive"] == 1
 
 
 def test_cli_append_then_diagnose(tmp_path, capsys):
