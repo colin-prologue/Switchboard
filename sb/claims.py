@@ -83,7 +83,11 @@ def release(lay, task_id):
 
     Same ordering as requeue_stale: finalize the body while still in active/
     (un-claimable), clear the lease before the rename so a fresh claimer's lease
-    is never clobbered, then the atomic move. Never write after the move."""
+    is never clobbered, then the atomic move. Never write after the move.
+
+    Caller contract: release is called by the worker loop for a task it currently
+    holds (valid lease), so the concurrent-sweep race below is normally
+    unreachable; the ghost-cleanup is defensive."""
     lane, task = store.find_task(lay, task_id)
     if lane != "active":
         where = f"lane={lane}" if lane else "not found in any lane"
@@ -93,6 +97,12 @@ def release(lay, task_id):
     store.write_task(lay, "active", task)
     leases.clear_lease(lay, task_id)
     if not store.move_task(lay, "active", "queued", task_id):
+        # Swept out of active/ between find_task and here: our write_task
+        # re-created a ghost in active/. Remove it before surfacing the race.
+        try:
+            os.remove(store.task_path(lay, "active", task_id))
+        except FileNotFoundError:
+            pass
         raise ValueError(f"{task_id} vanished from active while releasing")
     return "queued"
 
