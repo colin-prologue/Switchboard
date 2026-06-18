@@ -96,11 +96,11 @@ def test_loop_releases_on_simulated_rate_limit(repo):
     loop calls release; the task is claimable again with attempts unchanged."""
     lay = paths.init(repo)
     cfg = paths.load_config(lay)
-    store.write_task(lay, "queued", make_task("PLAN-001/PH-1/T-1"))
+    store.write_task(lay, "queued", make_task("PLAN-001/PH-1/T-1", attempts=1))
     claimed = claims.claim_one(lay, "w1", cfg=cfg)
     # simulate: dispatch raised before writing any result -> release
     dest = claims.release(lay, claimed["id"])
     assert dest == "queued"
     again = claims.claim_one(lay, "w2", cfg=cfg)
     assert again["id"] == "PLAN-001/PH-1/T-1"
-    assert again["attempts"] == 0
+    assert again["attempts"] == 1
