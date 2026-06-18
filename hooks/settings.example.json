@@ -1,30 +1,21 @@
 {
-  "comment": "Merge the hooks block into your .claude/settings.json. Same script handles both events.",
+  "comment": "Merge into your .claude/settings.json. Token-free deterministic guards (no API key). sb_guard handles BOTH PreToolUse (2nd-strike deny) and PostToolUse (detection + 1st-strike nudge); sb_quota detects rate limits on PostToolUse. Use absolute paths.",
   "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "python3 /ABS/PATH/TO/rabbit_guard.py", "timeout": 50 }
-        ]
-      }
+    "PreToolUse": [
+      { "matcher": "*", "hooks": [
+        { "type": "command", "command": "python3 /ABS/PATH/TO/hooks/sb_guard.py", "timeout": 10 }
+      ] }
     ],
-    "Stop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "python3 /ABS/PATH/TO/rabbit_guard.py", "timeout": 50 }
-        ]
-      }
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [
+        { "type": "command", "command": "python3 /ABS/PATH/TO/hooks/sb_guard.py", "timeout": 10 },
+        { "type": "command", "command": "python3 /ABS/PATH/TO/hooks/sb_quota.py", "timeout": 10 }
+      ] }
     ]
   },
-  "env_you_can_set": {
-    "ANTHROPIC_API_KEY": "required for the fresh-reviewer call",
-    "RG_MODEL": "claude-fable-5 (default) — or a cheaper model for the reviewer",
-    "RG_EFFORT": "optional; high|medium|low — Fable/Mythos only; auto-dropped if unsupported",
-    "RG_GOAL_FILE": "GOAL.md — restate the task here so the reviewer has an anchor",
-    "RG_LEDGER_FILE": "PROGRESS.md — the append-only progress ledger the no-progress trip watches",
-    "RG_MAX_REVIEWS": "6 — hard per-session cap on paid Fable calls",
-    "RG_REVIEW_COOLDOWN": "5 — min tool calls between paid reviews"
-  }
+  "notes": [
+    "No ANTHROPIC_API_KEY needed — the v1 paid reviewer is deleted; verification is A's lane.",
+    "Guard state is per-subagent under .switchboard/guard/<agent_id>.json; top-level session calls are not guarded.",
+    "Thresholds live in .switchboard/config.json (guard_* keys); all are tunable (spec §7)."
+  ]
 }
