@@ -88,3 +88,29 @@ def test_cli_append_then_diagnose(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["total_iterations"] == 1
     assert out["productive"] == 1
+
+
+def test_consecutive_no_progress_counts_trailing_non_done(tmp_path):
+    led = str(tmp_path / "loop-ledger-w1.jsonl")
+    loopledger.append(led, i=0, claimed_id="P/PH/T-1.V1", type="verify",
+                      outcome="done", released=False, wall_s=1.0)
+    loopledger.append(led, i=1, claimed_id="P/PH/T-2", type="task",
+                      outcome="released", released=True, wall_s=1.0)
+    loopledger.append(led, i=2, claimed_id="P/PH/T-2", type="task",
+                      outcome="queued", released=False, wall_s=1.0)
+    loopledger.append(led, i=3, claimed_id="P/PH/T-3", type="task",
+                      outcome="paused", released=False, wall_s=1.0)
+    assert loopledger.consecutive_no_progress(led) == 3
+
+
+def test_consecutive_no_progress_resets_on_trailing_done(tmp_path):
+    led = str(tmp_path / "loop-ledger-w1.jsonl")
+    loopledger.append(led, i=0, claimed_id="P/PH/T-2", type="task",
+                      outcome="released", released=True, wall_s=1.0)
+    loopledger.append(led, i=1, claimed_id="P/PH/T-1.V1", type="verify",
+                      outcome="done", released=False, wall_s=1.0)
+    assert loopledger.consecutive_no_progress(led) == 0
+
+
+def test_consecutive_no_progress_empty_ledger(tmp_path):
+    assert loopledger.consecutive_no_progress(str(tmp_path / "none.jsonl")) == 0

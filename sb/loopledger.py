@@ -76,6 +76,16 @@ def diagnose(ledger_path, *, worker_id, out=None):
     return diag
 
 
+def consecutive_no_progress(ledger_path):
+    """Length of the trailing run of iterations with no task reaching `done`
+    (spec §6). A done line resets the run. Idle waits aren't logged, so this is
+    consecutive *task* iterations — the early-churn signal B's monitor flags."""
+    run = 0
+    for ln in _read(ledger_path):
+        run = 0 if ln.get("outcome") == "done" else run + 1
+    return run
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m sb.loopledger")
     sub = ap.add_subparsers(dest="cmd", required=True)
