@@ -14,7 +14,7 @@ specs/ADRs rather than narrating them here.
 | M0 Plan 3-A | worker loop + subagent protocols + `sb release` + `sb block` | **IMPLEMENTED** 2026-06-17 — 140 tests |
 | M0 Plan 3 A-planner | `sb seed --goal` + planner protocol | spec'd in 3-A doc §7; **not built** |
 | M0 Plan 3 A-continuation | research-handoff continuation chain | spec'd (worker-loop §3.3); **not built** |
-| M0 Plan 3-B | guards + quota/liveness | spec finalized against A (2026-06-17); **not built** |
+| M0 Plan 3-B | guards + quota/liveness | **IMPLEMENTED** 2026-06-18 — 171 tests |
 | M0 Plan 3-C | HDR-010 escalation layer | design sketch; finalize after A |
 | M0 Plan 3-D | M0 exit bar (acceptance) | **not built** |
 
@@ -68,7 +68,11 @@ post-M0 track.
   real artifacts** — the deny→blocked contract (worker synthesizes `blocked`),
   per-task budget (deferred; global defaults for M0), and the early-churn
   detector (extends `sb/loopledger.py`, reads the real ledger schema) are now
-  pinned.
+  pinned. **IMPLEMENTED 2026-06-18** ([plan](plans/2026-06-18-sb-guards-quota.md),
+  171 tests): `hooks/sb_guard.py` + `hooks/sb_quota.py` + `hooks/sb_monitor.py`;
+  v1 `rabbit_guard.py` deleted; ADR-001/002/003 recorded (pending-review). Plan
+  carried 2 errata commits (guard test/logic bugs caught by the implementer
+  subagent's spec-compliance refusal — the two-stage review working as designed).
 - **C — HDR-010 escalation layer** (depends on A; uses Plan 2 notify). three-tier
   interrupt/flag-async/record-silent routing; independent fresh-context agent
   judges AgDR tier assignments (self-assessment is bootstrap-only). Open Qs
