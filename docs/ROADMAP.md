@@ -14,7 +14,7 @@ specs/ADRs rather than narrating them here.
 | M0 Plan 3-A | worker loop + subagent protocols + `sb release` | **IMPLEMENTED** 2026-06-17 — 135 tests |
 | M0 Plan 3 A-planner | `sb seed --goal` + planner protocol | spec'd in 3-A doc §7; **not built** |
 | M0 Plan 3 A-continuation | research-handoff continuation chain | spec'd (worker-loop §3.3); **not built** |
-| M0 Plan 3-B | guards + quota/liveness | spec written + approved; **not built** |
+| M0 Plan 3-B | guards + quota/liveness | spec finalized against A (2026-06-17); **not built** |
 | M0 Plan 3-C | HDR-010 escalation layer | design sketch; finalize after A |
 | M0 Plan 3-D | M0 exit bar (acceptance) | **not built** |
 
@@ -37,6 +37,13 @@ post-M0 track.
   (heartbeat only). Skill owns all git; engine stays git-free.
   - *Reviewed-not-tested (by design, spec §6):* the task/verifier **prompt
     protocols** — get their live exercise in D.
+  - *Follow-on (hardening, needed by B's deny→blocked contract):* when a
+    dispatched subagent returns and **no valid result file exists**, the worker
+    must synthesize a `blocked` result and file it (engine routes to
+    paused-for-human). Today `sb file-result` just raises `FileNotFoundError`.
+    This is the guarantee that a guard-forced stop (B §3) pauses for human
+    instead of erroring/looping. Small loop addition; B depends on it for its
+    integration test.
   - *Follow-on:* `max_loop_iterations` is a skill default (200), not in
     `paths.DEFAULT_CONFIG`. Add to config if operator-tunability is wanted.
 - **A-planner** (small follow-on before D): `sb seed --goal` + planner prompt
@@ -55,9 +62,11 @@ post-M0 track.
   `sb status --emit`/`sb notify`, no model calls) for quota + liveness +
   silent-session-death (v2 design §11 #3). Owns the sharp early no-progress
   detector A's coarse cap defers to. Research task: subagent budget enforcement
-  (hooks vs loop checks). **B can now finalize against A's real artifacts** (the
-  ledger vocabulary, the release path, the checkpoint semantics) rather than
-  projected ones.
+  (resolved: hooks, not loop checks). **Spec finalized 2026-06-17 against A's
+  real artifacts** — the deny→blocked contract (worker synthesizes `blocked`),
+  per-task budget (deferred; global defaults for M0), and the early-churn
+  detector (extends `sb/loopledger.py`, reads the real ledger schema) are now
+  pinned.
 - **C — HDR-010 escalation layer** (depends on A; uses Plan 2 notify). three-tier
   interrupt/flag-async/record-silent routing; independent fresh-context agent
   judges AgDR tier assignments (self-assessment is bootstrap-only). Open Qs

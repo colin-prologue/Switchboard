@@ -1,8 +1,11 @@
 # sb Guards + Quota/Liveness — Design (M0, Plan 3 sub-plan B)
 
-**Status:** Approved design 2026-06-16 (graded depth: full — B is deterministic
-and the keystone for safe autonomy). Independent of sub-plan A; can be built in
-parallel. Implementation plan to follow via writing-plans.
+**Status:** Approved design 2026-06-16; **revised 2026-06-17 against A's
+implemented artifacts** — the three seams that deferred to A (the deny→blocked
+contract §3/§9, per-task budget §3, the early-churn detector §6) are now
+finalized. Graded depth: full — B is deterministic and the keystone for safe
+autonomy. Independent of A for the hooks/quota/monitor; the early-churn slice
+consumes A's real loop-ledger. Implementation plan to follow via writing-plans.
 
 **Scope:** The safety + observability layer of the M0 judgment layer — the
 deterministic tripwire guard (rabbit_guard v2), the token-free quota detector,
@@ -66,7 +69,14 @@ under the worktree / a git commit / a result-file write). Tripwires:
 - **repeat-error** — same error signature ≥3 consecutive.
 - **no-progress** — ≥15 tool calls since the last progress marker.
 - **budget** — per-subagent tool-call count over `guard.max_tool_calls`
-  (default 80) or wallclock over `guard.max_wall_s` (default 1200).
+  (default 80) or wallclock over `guard.max_wall_s` (default 1200). **M0 uses
+  these global config defaults only.** The task schema's per-task `budget` block
+  (`tool_calls`/`wallclock_s`) is forward-looking metadata; wiring it through to
+  the guard (the worker would publish the active task's budget where the hook
+  reads it, keyed via cwd→worker_id) is **deferred past M0** — per-task ceilings
+  matter more at fleet scale, and the schema field stays valid for later. So the
+  schema comment "the numbers the PostToolUse guard enforces" describes the
+  eventual state, not M0.
 
 (Defaults are starting points; see §7 revision condition.)
 
@@ -74,10 +84,21 @@ under the worktree / a git commit / a result-file write). Tripwires:
 - **1st trip** → PostToolUse injects a corrective nudge (exit 2 / stderr, shown
   to the agent as feedback) and marks the agent `tripped_once`.
 - **2nd trip** → the next **PreToolUse** denies the offending tool and directs
-  the subagent to stop and file a `blocked` result. A subagent that returns
-  without a valid result after a guard denial is treated by the worker loop (A)
-  as `blocked` — so the guard *induces* the blocked outcome via deny+directive;
-  the engine's existing `blocked` routing pauses the task for verifier/human.
+  the subagent to stop. The guard does **detection + denial only** — it does not
+  write engine result files (that would break the "result file is the worker's
+  channel" layering).
+
+**The deny→blocked contract (finalized against A).** A's worker loop, as built,
+calls `sb file-result <id>` after the subagent returns; with no result file that
+raises `FileNotFoundError` — A does *not* currently synthesize an outcome. So
+the guarantee that a guard-forced stop becomes a human-pausing `blocked` (not an
+error or a silent re-loop) lives in **A, via a small follow-on**: *when a
+subagent returns and no valid result file exists, the worker synthesizes a
+`blocked` result and files it* (engine's existing `blocked` routing then pauses
+the task for verifier/human). This keeps outcome semantics in the loop, needs no
+agent_id→task_id mapping in the hook, and is robust to a subagent that ignores
+the deny directive. B depends on that A follow-on existing; B itself only
+denies + nudges. (Tracked as an A hardening item in docs/ROADMAP.md.)
 
 **Fail-open, always.** Any hook error, malformed payload, or missing state →
 exit 0, never crash or stall a session (v1 discipline). Cooldown + a hard
@@ -110,11 +131,28 @@ needed.
 ## 6. Early no-progress churn detector (the one A's coarse cap defers to)
 
 A's loop writes a token-free per-iteration ledger
-(`loop-ledger-<worker>.jsonl`). B's monitor **reads** that ledger and flags **N
-consecutive iterations with no task reaching `done`** (releases/retries only) →
-fires an early notify, well before A's coarse `max_loop_iterations` checkpoint.
-This lives in the monitor (consuming A's ledger), not a hook — simplest place,
-no new in-session machinery.
+`.switchboard/loop-ledger-<worker_id>.jsonl` (one JSON line per **task**
+iteration: `{i, claimed_id, type, outcome, released, wall_s}`). Concrete facts
+that pin this detector (confirmed against the shipped `sb/loopledger.py`):
+
+- `outcome` is the lane `file-result` returned (`paused`/`done`/`queued`/
+  `failed`) or the literal `released` (rate-limit infra-requeue). A task reaches
+  `done` only via its verify-pass line, so **`outcome == "done"` is the progress
+  marker.**
+- **Idle waits are NOT logged** (A heartbeats and loops without a ledger line),
+  so consecutive ledger lines are consecutive *task* iterations — an idle worker
+  cannot trip this detector. This is exactly the false-positive A's idle-fix
+  removed from its own checkpoint; B inherits the clean signal.
+
+B's monitor **reads** that ledger and flags **N consecutive trailing lines with
+`outcome != "done"`** (i.e. releases/retries/failed with no completion) → fires
+an early notify, well before A's coarse `max_loop_iterations` checkpoint.
+**Reuse `sb/loopledger.py` rather than re-parse:** it already owns the ledger
+schema and the productive/churn aggregation (`diagnose`); add a small
+`consecutive_no_progress(ledger_path) -> int` helper there (TDD'd alongside the
+existing diagnose tests) and have the monitor call it. This lives in the monitor
+(consuming A's ledger), not a hook — simplest place, no new in-session
+machinery. `N` is a tunable default (see §7 revision condition).
 
 ## 7. Subagent budget enforcement (resolves the M0 research task)
 
@@ -143,10 +181,17 @@ healthy work) or too loose (rabbit-trails slip through), adjust and record.
 
 ## 9. Scope / dependencies
 
-- **Independent of A** for the hooks + quota + monitor; the *early churn
-  detector* (§6) consumes A's loop-ledger, so that one slice integrates after A.
-- The "force blocked result" handshake (§3) is shared with A's worker loop —
-  finalize the exact deny→blocked contract when A is implemented.
+- **Independent of A** for the hooks + quota + monitor. Two slices touch A's
+  now-shipped artifacts: the *early churn detector* (§6) consumes A's loop-ledger
+  and extends `sb/loopledger.py`; the *deny→blocked contract* (§3) depends on the
+  A hardening follow-on (worker synthesizes `blocked` on a missing result file).
+- **Deny→blocked contract — resolved** (was "finalize when A is implemented"):
+  the guard denies + nudges only; A's worker synthesizes the `blocked` result
+  (§3). No hook writes engine result files. The A follow-on is tracked in
+  docs/ROADMAP.md; B's guard work can proceed in parallel and only the
+  integration test needs that follow-on present.
+- **Per-task budget — resolved:** M0 guard enforces global `guard.*` config
+  defaults only; per-task `task.budget` wiring is deferred past M0 (§3).
 - Does **not** include the HDR-010 escalation routing (that is sub-plan C) — B
   provides the notify *firing* and the deterministic guards; C decides tier and
   routing.
