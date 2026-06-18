@@ -414,7 +414,7 @@ def feed(state, payload, cfg=CFG, n=1):
 def test_repeat_call_trips_at_threshold():
     st = sb_guard.new_state(now=0.0)
     st = feed(st, post("Bash", {"command": "ls"}), n=3)
-    tripped, signal, _ = sb_guard.evaluate(st, CFG)
+    tripped, signal, _ = sb_guard.evaluate(st, CFG, now=0.0)
     assert tripped and signal == "repeat_call"
 
 
@@ -422,14 +422,14 @@ def test_distinct_calls_do_not_trip():
     st = sb_guard.new_state(now=0.0)
     for cmd in ("a", "b", "c", "d"):
         st = sb_guard.update_state(st, post("Bash", {"command": cmd}), CFG)
-    assert not sb_guard.evaluate(st, CFG)[0]
+    assert not sb_guard.evaluate(st, CFG, now=0.0)[0]
 
 
 def test_repeat_error_trips():
     st = sb_guard.new_state(now=0.0)
     st = feed(st, post("Bash", {"command": "x"},
                        text="Traceback: ValueError: boom"), n=3)
-    tripped, signal, _ = sb_guard.evaluate(st, CFG)
+    tripped, signal, _ = sb_guard.evaluate(st, CFG, now=0.0)
     assert tripped and signal == "repeat_error"
 
 
@@ -438,7 +438,7 @@ def test_no_progress_trips_after_window():
     # 15 read-only calls (distinct, no edits/commits) -> no-progress
     for i in range(15):
         st = sb_guard.update_state(st, post("Read", {"file_path": f"/f{i}"}), CFG)
-    tripped, signal, _ = sb_guard.evaluate(st, CFG)
+    tripped, signal, _ = sb_guard.evaluate(st, CFG, now=0.0)
     assert tripped and signal == "no_progress"
 
 
@@ -448,7 +448,7 @@ def test_edit_resets_no_progress():
         st = sb_guard.update_state(st, post("Read", {"file_path": f"/f{i}"}), CFG)
     st = sb_guard.update_state(st, post("Write", {"file_path": "/x"}), CFG)
     assert st["since_progress"] == 0
-    assert not sb_guard.evaluate(st, CFG)[0]
+    assert not sb_guard.evaluate(st, CFG, now=0.0)[0]
 
 
 def test_git_commit_counts_as_progress():
@@ -462,7 +462,7 @@ def test_git_commit_counts_as_progress():
 def test_tool_budget_trips():
     st = sb_guard.new_state(now=0.0)
     st["calls"] = 80
-    tripped, signal, _ = sb_guard.evaluate(st, CFG)
+    tripped, signal, _ = sb_guard.evaluate(st, CFG, now=0.0)
     assert tripped and signal == "tool_budget"
 
 
@@ -616,7 +616,7 @@ import os
 def test_decide_post_first_trip_nudges():
     st = sb_guard.new_state(now=0.0)
     st = feed(st, post("Bash", {"command": "ls"}), n=3)
-    out, st = sb_guard.decide_post(st, CFG)
+    out, st = sb_guard.decide_post(st, CFG, now=0.0)
     assert out["hookSpecificOutput"]["additionalContext"]
     assert st["trips"] == 1 and st["block_armed"] is False
 
@@ -624,17 +624,17 @@ def test_decide_post_first_trip_nudges():
 def test_decide_post_second_trip_arms_block():
     st = sb_guard.new_state(now=0.0)
     st = feed(st, post("Bash", {"command": "ls"}), n=3)
-    _, st = sb_guard.decide_post(st, CFG)          # trip 1: nudge
+    _, st = sb_guard.decide_post(st, CFG, now=0.0)          # trip 1: nudge
     st["last_nudge_call"] = -999                    # clear cooldown for the test
     st = feed(st, post("Bash", {"command": "ls"}), n=1)
-    _, st = sb_guard.decide_post(st, CFG)          # trip 2: arm
+    _, st = sb_guard.decide_post(st, CFG, now=0.0)          # trip 2: arm
     assert st["block_armed"] is True
 
 
 def test_decide_post_no_trip_is_silent():
     st = sb_guard.new_state(now=0.0)
     st = sb_guard.update_state(st, post("Read", {"file_path": "/a"}), CFG)
-    out, st = sb_guard.decide_post(st, CFG)
+    out, st = sb_guard.decide_post(st, CFG, now=0.0)
     assert out is None and st["trips"] == 0
 
 
@@ -642,7 +642,7 @@ def test_decide_post_respects_nudge_cap():
     st = sb_guard.new_state(now=0.0)
     st["nudges"] = CFG["guard_nudge_cap"]          # cap already reached
     st = feed(st, post("Bash", {"command": "ls"}), n=3)
-    out, st = sb_guard.decide_post(st, CFG)
+    out, st = sb_guard.decide_post(st, CFG, now=0.0)
     assert out is None                              # no more nudges
     assert st["block_armed"] is True                # but escalation still arms
 
