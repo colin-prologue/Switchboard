@@ -51,6 +51,8 @@ def diagnose(ledger_path, *, worker_id, out=None):
                 retries += 1
             seen.add(cid)
             distinct.add(cid)
+        # productive == distinct tasks reaching done, given the loop writes
+        # exactly one done-outcome line per completed task (one verify pass).
         if ln.get("outcome") == "done":
             productive += 1
         if ln.get("released"):

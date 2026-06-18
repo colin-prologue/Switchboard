@@ -37,14 +37,12 @@ Repeat until the operator stops the session:
    ```
    sb claim --wait $W --worker-id $WORKER_ID
    ```
-   - **exit 3** (nothing to claim): run `sb heartbeat --worker-id $WORKER_ID`,
-     then record an idle ledger line and continue:
-     ```
-     python -m sb.loopledger append --ledger $LEDGER --i $i \
-       --type idle --outcome idle --wall-s <elapsed>
-     ```
-     Increment `i`, check the loop checkpoint, repeat. (If quota is throttled,
-     lengthen `W` first — see Backoff.)
+   - **exit 3** (nothing to claim): the wait window expired with no task. This
+     is NOT a loop iteration — do not write a ledger line, do not increment `i`,
+     do not run the checkpoint. Just run `sb heartbeat --worker-id $WORKER_ID`
+     (liveness for the stale-fleet signal), lengthen `W` if quota is throttled
+     (see Backoff), and loop back to step 1. (Idle liveness is the heartbeat's
+     job; the loop ledger and checkpoint are about task work only.)
    - **exit 0**: the task JSON is on stdout. Continue with it as `T`.
 2. **Heartbeat**: `sb heartbeat --worker-id $WORKER_ID` (feeds the stale-fleet
    signal, spec §7).
@@ -90,10 +88,9 @@ Repeat until the operator stops the session:
 9. **Record the iteration** and advance:
    ```
    python -m sb.loopledger append --ledger $LEDGER --i $i \
-     --claimed-id <T.id> \
-     --type $( [ -n "$T.context.verifies" ] && echo verify || echo task ) \
-     --outcome $OUTCOME --wall-s <elapsed>
+     --claimed-id <T.id> --type <verify|task> --outcome $OUTCOME --wall-s <elapsed>
    ```
+   Use `--type verify` if `T.context.verifies` is set, otherwise `--type task`.
    `i = i + 1`.
 10. **Loop checkpoint** (see below). Then repeat from step 1.
 
