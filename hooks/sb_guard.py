@@ -97,3 +97,111 @@ def evaluate(state, cfg, now=None):
     if state["since_progress"] >= cfg["guard_no_progress"]:
         return True, "no_progress", f"{state['since_progress']} calls since progress"
     return False, "", ""
+
+
+def _nudge(signal, evidence):
+    return {"hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext": (f"[sb-guard:{signal}] {evidence}. You appear to be "
+                              f"looping without progress — stop and reassess; do "
+                              f"not repeat the same action.")}}
+
+
+def decide_post(state, cfg, now=None):
+    """Returns (output_dict_or_None, new_state). Two-strike + fail-safe (ADR-003):
+    trip #1 nudges (cooldown + cap respected); the block arms on trip #2 OR when
+    the nudge budget is exhausted — so a subagent that keeps tripping past its
+    nudge budget escalates to a hard block instead of getting silence."""
+    tripped, signal, evidence = evaluate(state, cfg, now=now)
+    if not tripped:
+        return None, state
+    state["trips"] += 1
+    nudge_budget_left = state["nudges"] < cfg["guard_nudge_cap"]
+    cooldown_ok = state["calls"] - state["last_nudge_call"] >= cfg["guard_cooldown_calls"]
+    if state["trips"] >= 2 or not nudge_budget_left:
+        state["block_armed"] = True
+    if nudge_budget_left and cooldown_ok:
+        state["nudges"] += 1
+        state["last_nudge_call"] = state["calls"]
+        return _nudge(signal, evidence), state
+    return None, state
+
+
+def decide_pre(state):
+    """Returns a deny output if a 2nd strike armed the block, else None."""
+    if not state.get("block_armed"):
+        return None
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": (
+            "[sb-guard] Repeated no-progress / looping detected. Stop now: do not "
+            "call more tools. Write a brief `blocked` result if you can, then end "
+            "your turn — the worker will file a blocked result for human review.")}}
+
+
+def _state_path(repo, agent_id):
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", agent_id)
+    return os.path.join(repo, ".switchboard", "guard", f"{safe}.json")
+
+
+def load_state(repo, agent_id, now):
+    p = _state_path(repo, agent_id)
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return new_state(now)
+
+
+def save_state(repo, agent_id, state):
+    p = _state_path(repo, agent_id)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = f"{p}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp, p)
+
+
+def _emit(payload):
+    if payload:
+        sys.stdout.write(json.dumps(payload))
+    sys.exit(0)
+
+
+def main():
+    try:
+        data = json.load(sys.stdin)
+        agent_id = data.get("agent_id")
+        if not agent_id:          # top-level worker-session call: never guarded
+            _emit(None)
+        from sb import paths
+        root = sb_quota_find_root(data.get("cwd"))
+        if not root:
+            _emit(None)
+        cfg = paths.load_config(paths.Layout(root))
+        event = data.get("hook_event_name") or ""
+        now = time.time()
+        st = load_state(root, agent_id, now)
+        if event == "PreToolUse":
+            out = decide_pre(st)
+            _emit(out)
+        # PostToolUse
+        st = update_state(st, data, cfg)
+        out, st = decide_post(st, cfg, now=now)
+        save_state(root, agent_id, st)
+        _emit(out)
+    except SystemExit:
+        raise
+    except Exception:
+        sys.exit(0)   # fail open, always
+
+
+def sb_quota_find_root(cwd):
+    """Same upward .switchboard discovery as the quota hook (ADR-002)."""
+    from hooks.sb_quota import find_root
+    return find_root(cwd)
+
+
+if __name__ == "__main__":
+    main()
