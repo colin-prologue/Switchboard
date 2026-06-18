@@ -80,6 +80,15 @@ Repeat until the operator stops the session:
    sb file-result <T.id>
    ```
    Capture the returned `lane` as the iteration `OUTCOME`.
+   - **If the subagent returned with NO valid result file** at
+     `.switchboard/results/<T.id>.json` (a guard hook forced it to stop, or it
+     crashed), do **not** leave the task wedged:
+     - a **task** subagent (`T.context.verifies` unset) → `sb block <T.id>
+       --reason "<why, e.g. guard-forced stop>"`: the engine synthesizes a
+       `blocked` result and pauses the task for human (`OUTCOME=paused`).
+     - a **verifier** subagent (`T.context.verifies` set) → `sb release <T.id>`:
+       a crashed verifier is infra, not human-blockable — re-queue it for
+       another verifier (`OUTCOME=released`, set `--released` in the ledger).
 8. **Tear down the worktree** (commits persist on the branch; the result lives
    in `.switchboard/`, not the worktree, so teardown is safe even if dirty):
    ```
@@ -139,4 +148,4 @@ skill owns only the coarse periodic checkpoint.
   rejection or attempt exhaustion is the only path to `failed` — and that is the
   engine's job inside `file-result`, never yours.
 - The engine does no git; you do no lane-state mutation except through `sb`
-  verbs (`claim`, `file-result`, `release`, `heartbeat`).
+  verbs (`claim`, `file-result`, `release`, `block`, `heartbeat`).

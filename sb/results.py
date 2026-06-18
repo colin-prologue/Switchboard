@@ -59,6 +59,36 @@ def file_result(lay, cfg, task_id):
     return dest
 
 
+def block(lay, cfg, task_id, reason):
+    """Force a task to paused_for_human via a synthesized `blocked` result.
+
+    The deny->blocked contract (sub-plan B §3): when a dispatched subagent
+    returns with NO valid result file — a guard-forced stop for rabbit-trailing,
+    or a crash — the worker calls this so the task pauses for human review
+    instead of `file_result` raising FileNotFoundError. The guard hook only
+    denies + nudges; outcome semantics stay here in the engine.
+
+    Reuses file_result's routing (DRY, single validated path): synthesize the
+    blocked result on disk, then file it normally. A crashed *verifier* is infra,
+    not human-blockable — reject it and let the caller `release` instead."""
+    rp = result_path(lay, task_id)
+    if os.path.exists(rp):
+        raise ValueError(
+            f"{task_id} already has a result file at {rp}; file it with "
+            f"file-result rather than synthesizing a block")
+    lane, task = store.find_task(lay, task_id)
+    if lane != "active":
+        where = f"lane={lane}" if lane else "not found in any lane"
+        raise ValueError(f"{task_id} is not active ({where}); cannot block")
+    if task.get("context", {}).get("verifies"):
+        raise ValueError(
+            f"{task_id} is a verification task; a crashed verifier is infra — "
+            f"release it for another verifier, do not block")
+    store.write_json(rp, {"schema_version": "0.1.0", "outcome": "blocked",
+                          "summary": reason or "subagent returned no result file"})
+    return file_result(lay, cfg, task_id)
+
+
 def _route_outcome(lay, cfg, task, result):
     outcome = result["outcome"]
     if outcome == "success":

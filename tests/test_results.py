@@ -129,3 +129,56 @@ def test_invalid_result_rejected(lay):
                      {"schema_version": "0.1.0", "outcome": "success"})
     with pytest.raises(ValueError):
         results.file_result(lay, DEFAULT_CONFIG, t["id"])
+
+
+def test_block_synthesizes_blocked_result_and_pauses_for_human(lay):
+    # The deny->blocked contract (sub-plan B §3): a subagent returned with NO
+    # result file (guard-forced stop / crash); the worker synthesizes a blocked
+    # result so the task pauses for human instead of file_result erroring.
+    t = active_task(lay)
+    dest = results.block(lay, DEFAULT_CONFIG, t["id"],
+                         reason="guard forced stop: rabbit-trail")
+    assert dest == "paused"
+    lane, on_disk = store.find_task(lay, t["id"])
+    assert lane == "paused" and on_disk["status"] == "paused_for_human"
+    assert on_disk["result"]["outcome"] == "blocked"
+    assert "rabbit-trail" in on_disk["result"]["summary"]
+    # synthesized result file is consumed, like any filed result
+    assert not os.path.exists(os.path.join(lay.results, store.fname(t["id"])))
+
+
+def test_block_rejects_non_active(lay):
+    store.write_task(lay, "queued", make_task())
+    with pytest.raises(ValueError, match="not active"):
+        results.block(lay, DEFAULT_CONFIG, "PLAN-001/PH-1/T-1", reason="x")
+
+
+def test_block_rejects_when_result_file_already_exists(lay):
+    t = active_task(lay)
+    write_result(lay, t["id"])  # a real result is present -> file it, don't block
+    with pytest.raises(ValueError, match="already has a result"):
+        results.block(lay, DEFAULT_CONFIG, t["id"], reason="x")
+
+
+def test_block_rejects_verify_task_directs_to_release(lay):
+    # a crashed verifier is infra (release), not a human-blockable condition
+    t = active_task(lay, tier="opus")
+    write_result(lay, t["id"])
+    results.file_result(lay, DEFAULT_CONFIG, t["id"])
+    v = claims.claim_one(lay, "w2", tier="sonnet")
+    with pytest.raises(ValueError, match="verification task"):
+        results.block(lay, DEFAULT_CONFIG, v["id"], reason="x")
+
+
+def test_cli_block(lay, capsys):
+    import json
+
+    from sb import cli
+    active_task(lay)
+    rc = cli.main(["block", "PLAN-001/PH-1/T-1", "--reason", "no result",
+                   "--repo", lay.repo])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"task_id": "PLAN-001/PH-1/T-1", "lane": "paused"}
+    _, on_disk = store.find_task(lay, "PLAN-001/PH-1/T-1")
+    assert on_disk["status"] == "paused_for_human"

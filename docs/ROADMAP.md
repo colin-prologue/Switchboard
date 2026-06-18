@@ -11,7 +11,7 @@ specs/ADRs rather than narrating them here.
 |---|---|---|
 | M0 Plan 1 | `sb` engine core (lanes, leases, claims/wait, spawn, seed, query) | **EXECUTED** — 84 tests at landing |
 | M0 Plan 2 | operator surfaces (`brief`/`stamp`/`status`/`notify`); `gate.py` retired | **EXECUTED** (merged via PR #1) — 122 tests |
-| M0 Plan 3-A | worker loop + subagent protocols + `sb release` | **IMPLEMENTED** 2026-06-17 — 135 tests |
+| M0 Plan 3-A | worker loop + subagent protocols + `sb release` + `sb block` | **IMPLEMENTED** 2026-06-17 — 140 tests |
 | M0 Plan 3 A-planner | `sb seed --goal` + planner protocol | spec'd in 3-A doc §7; **not built** |
 | M0 Plan 3 A-continuation | research-handoff continuation chain | spec'd (worker-loop §3.3); **not built** |
 | M0 Plan 3-B | guards + quota/liveness | spec finalized against A (2026-06-17); **not built** |
@@ -24,7 +24,8 @@ HDR-012 keeps the deliberation front-end out of scope — that is a separate
 post-M0 track.
 
 - **A — worker loop + subagent protocols** (the execution spine). **IMPLEMENTED**
-  on `design/switchboard-v2` (commits `f4091d7`..`038a158`, 135 tests green).
+  on `design/switchboard-v2` (135 tests at landing; 140 after the deny→blocked
+  follow-on below).
   Plan: [docs/plans/2026-06-17-sb-worker-loop.md](plans/2026-06-17-sb-worker-loop.md);
   spec: [docs/specs/2026-06-16-sb-worker-loop-design.md](specs/2026-06-16-sb-worker-loop-design.md).
   Delivered: `/sb-work` skill (`.claude/skills/sb-work/SKILL.md` + `task-protocol.md`
@@ -37,13 +38,14 @@ post-M0 track.
   (heartbeat only). Skill owns all git; engine stays git-free.
   - *Reviewed-not-tested (by design, spec §6):* the task/verifier **prompt
     protocols** — get their live exercise in D.
-  - *Follow-on (hardening, needed by B's deny→blocked contract):* when a
-    dispatched subagent returns and **no valid result file exists**, the worker
-    must synthesize a `blocked` result and file it (engine routes to
-    paused-for-human). Today `sb file-result` just raises `FileNotFoundError`.
-    This is the guarantee that a guard-forced stop (B §3) pauses for human
-    instead of erroring/looping. Small loop addition; B depends on it for its
-    integration test.
+  - *Follow-on (hardening, needed by B's deny→blocked contract) — **DONE**
+    2026-06-17:* `sb block <id> --reason` synthesizes a `blocked` result and
+    routes the task to paused-for-human, for when a dispatched subagent returns
+    with **no valid result file** (guard-forced stop or crash). Rejects verify
+    tasks (a crashed verifier is infra → `release`) and tasks that already have a
+    result file. SKILL.md step 7 wires the branch (task→`block`, verifier→
+    `release`). This is the guarantee that a guard-forced stop (B §3) pauses for
+    human instead of `sb file-result` raising `FileNotFoundError`.
   - *Follow-on:* `max_loop_iterations` is a skill default (200), not in
     `paths.DEFAULT_CONFIG`. Add to config if operator-tunability is wanted.
 - **A-planner** (small follow-on before D): `sb seed --goal` + planner prompt

@@ -49,6 +49,10 @@ def main(argv=None):
     p = common(sub.add_parser("release"))
     p.add_argument("task_id")
 
+    p = common(sub.add_parser("block"))
+    p.add_argument("task_id")
+    p.add_argument("--reason", default="subagent returned no result file")
+
     p = common(sub.add_parser("query"))
     p.add_argument("--text", default=None)
     p.add_argument("--tags", default="")
@@ -132,6 +136,11 @@ def main(argv=None):
 
     if a.cmd == "release":
         dest = claims.release(lay, a.task_id)
+        _out({"task_id": a.task_id, "lane": dest})
+        return 0
+
+    if a.cmd == "block":
+        dest = results.block(lay, cfg, a.task_id, a.reason)
         _out({"task_id": a.task_id, "lane": dest})
         return 0
 

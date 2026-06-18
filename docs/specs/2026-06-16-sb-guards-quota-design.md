@@ -88,17 +88,16 @@ under the worktree / a git commit / a result-file write). Tripwires:
   write engine result files (that would break the "result file is the worker's
   channel" layering).
 
-**The deny→blocked contract (finalized against A).** A's worker loop, as built,
-calls `sb file-result <id>` after the subagent returns; with no result file that
-raises `FileNotFoundError` — A does *not* currently synthesize an outcome. So
-the guarantee that a guard-forced stop becomes a human-pausing `blocked` (not an
-error or a silent re-loop) lives in **A, via a small follow-on**: *when a
-subagent returns and no valid result file exists, the worker synthesizes a
-`blocked` result and files it* (engine's existing `blocked` routing then pauses
-the task for verifier/human). This keeps outcome semantics in the loop, needs no
-agent_id→task_id mapping in the hook, and is robust to a subagent that ignores
-the deny directive. B depends on that A follow-on existing; B itself only
-denies + nudges. (Tracked as an A hardening item in docs/ROADMAP.md.)
+**The deny→blocked contract (finalized against A; A side now built).** When a
+guard-forced stop leaves the subagent returning with no result file, the
+guarantee that this becomes a human-pausing `blocked` (not an error or a silent
+re-loop) lives in **A**, now implemented: `sb block <id> --reason` synthesizes a
+`blocked` result and routes the task to paused-for-human, and SKILL.md step 7
+calls it when a task subagent returns no result (a crashed *verifier* instead
+`release`s — infra, not human-blockable). This keeps outcome semantics in the
+loop, needs no agent_id→task_id mapping in the hook, and is robust to a subagent
+that ignores the deny directive. B itself only denies + nudges; it relies on
+`sb block` existing (it does) for its integration test.
 
 **Fail-open, always.** Any hook error, malformed payload, or missing state →
 exit 0, never crash or stall a session (v1 discipline). Cooldown + a hard
@@ -185,11 +184,10 @@ healthy work) or too loose (rabbit-trails slip through), adjust and record.
   now-shipped artifacts: the *early churn detector* (§6) consumes A's loop-ledger
   and extends `sb/loopledger.py`; the *deny→blocked contract* (§3) depends on the
   A hardening follow-on (worker synthesizes `blocked` on a missing result file).
-- **Deny→blocked contract — resolved** (was "finalize when A is implemented"):
-  the guard denies + nudges only; A's worker synthesizes the `blocked` result
-  (§3). No hook writes engine result files. The A follow-on is tracked in
-  docs/ROADMAP.md; B's guard work can proceed in parallel and only the
-  integration test needs that follow-on present.
+- **Deny→blocked contract — resolved and A side built**: the guard denies +
+  nudges only; A's worker synthesizes the `blocked` result via `sb block` (§3).
+  No hook writes engine result files. B's guard work can proceed in parallel;
+  its integration test depends on `sb block`, which now exists.
 - **Per-task budget — resolved:** M0 guard enforces global `guard.*` config
   defaults only; per-task `task.budget` wiring is deferred past M0 (§3).
 - Does **not** include the HDR-010 escalation routing (that is sub-plan C) — B
