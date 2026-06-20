@@ -100,6 +100,16 @@ emergent behavior is real.
 **M0 research tasks:** idle-poll tuning (`sb claim --wait` vs self-pacing, v2
 design §3.4); subagent budget enforcement (in B).
 
+## Known follow-ups
+
+- **Fully race-free claim+lease** (Codex C3, partially mitigated 2026-06-20):
+  `claim_one` now writes the lease before the body, narrowing — but not closing —
+  the window where a concurrent `requeue-stale` can bounce a just-claimed task
+  back to queued (duplicate dispatch). **Closure condition:** before anything
+  *auto-runs* `requeue-stale` (a scheduled sweep / future monitor wiring), make
+  the claim+lease fully atomic. Today the sweep is manual-only, so the residual
+  window is latent.
+
 ## Deferred (explicitly)
 
 Packaging (schemas are editable-install-only — comment in `sb/validate.py`),
