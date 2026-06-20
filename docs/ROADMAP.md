@@ -78,6 +78,15 @@ post-M0 track.
   judges AgDR tier assignments (self-assessment is bootstrap-only). Open Qs
   (finalize now that A is real): when the tier judge runs (per-AgDR vs batched),
   bootstrap handoff.
+  - **Intervention-learning loop** (director-directed 2026-06-19; ADR-004,
+    proposed): when the guard hard-stops a thrashing agent and a human resolves
+    the resulting paused-for-human task, capture the resolution as a tagged
+    decision record so it flows into the existing `sb query` grounding and helps
+    future similar tasks avoid the same dead-end. Lean MVP reuses the decision
+    corpus + grounding loop already built; a small capture step at the
+    blocked→paused_for_human boundary is the only new machinery. Active
+    pre-emptive failure-signature matching is the heavier fallback if passive
+    grounding misses repeats. Builds on B's guard escalation (ADR-003).
 - **D — M0 exit bar** (validates A+B+C). 2-phase toy plan end-to-end with a
   research-handoff continuation, human stamps the gate. Acceptance test, not a
   feature.

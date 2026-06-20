@@ -30,6 +30,17 @@ def test_find_root_returns_none_when_no_switchboard(tmp_path):
     assert sb_quota.find_root(str(tmp_path)) is None
 
 
+def test_find_root_walk_is_bounded(tmp_path):
+    # containment: a .switchboard above the bound must NOT be found, so a missing
+    # root can never send the search climbing into a parent project or to /
+    root = tmp_path / "proj"
+    (root / ".switchboard").mkdir(parents=True)
+    deep = root / "a" / "b" / "c"   # proj is 3 levels up from here
+    deep.mkdir(parents=True)
+    assert sb_quota.find_root(str(deep), max_up=2) is None
+    assert sb_quota.find_root(str(deep), max_up=3) == str(root)
+
+
 def test_run_writes_quota_json_on_rate_limit(lay):
     payload = {"hook_event_name": "PostToolUse", "cwd": lay.repo,
                "tool_response": {"type": "text", "text": "HTTP 429 Too Many Requests"}}

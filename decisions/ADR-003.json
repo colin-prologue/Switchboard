@@ -2,7 +2,7 @@
   "schema_version": "0.3.0",
   "id": "ADR-003",
   "type": "agent",
-  "status": "pending-review",
+  "status": "approved",
   "confidence": "medium",
   "timestamp": "2026-06-18T23:10:00+00:00",
   "phase": "implementation",
@@ -26,5 +26,13 @@
   "evidence": [
     {"kind": "test", "ref": "tests/test_guard.py::test_decide_post_respects_nudge_cap", "result": "pending"},
     {"kind": "doc", "ref": "docs/specs/2026-06-16-sb-guards-quota-design.md", "result": "§3 two-strike; §7 thresholds tunable"}
+  ],
+  "feedback": [
+    {
+      "author": {"kind": "human", "id": "colin", "role": "director"},
+      "timestamp": "2026-06-19T02:18:00+00:00",
+      "action": "approve",
+      "note": "Approved the aggressive posture: stop the agent and err toward human intervention we can learn from, over letting waste run silent. Directed a follow-on capability — each human resolution of a guard hard-stop must be recorded, and turned into a rule/record that helps future runs avoid the same dead-end. Captured as ADR-004 (proposed) and on the roadmap under the oversight layer."
+    }
   ]
 }

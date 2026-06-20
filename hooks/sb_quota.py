@@ -32,17 +32,27 @@ def detect(text):
     return None
 
 
-def find_root(cwd):
-    """Walk up from cwd to the dir containing .switchboard/ (ADR-002). The
-    subagent cwd is its worktree, which has no .switchboard. None if not found."""
+# Containment cap (director review 2026-06-19): a missing/misconfigured root must
+# not send the upward search climbing to the filesystem root or into a different
+# project. The hook cwd is the repo root (0 levels up) or a task worktree at
+# <repo>/.worktrees/<id> (2 levels up), so this bound covers every legitimate
+# case with wide margin while keeping the walk inside the project.
+_MAX_UP = 16
+
+
+def find_root(cwd, max_up=_MAX_UP):
+    """Walk up from cwd to the dir containing .switchboard/ — bounded to at most
+    `max_up` parent levels (containment, ADR-002). The subagent cwd is its
+    worktree, which has no .switchboard. None if not found within the bound."""
     d = os.path.abspath(cwd or ".")
-    while True:
+    for _ in range(max_up + 1):
         if os.path.isdir(os.path.join(d, ".switchboard")):
             return d
         parent = os.path.dirname(d)
         if parent == d:
             return None
         d = parent
+    return None
 
 
 def run(payload):

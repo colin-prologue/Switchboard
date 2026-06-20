@@ -2,7 +2,7 @@
   "schema_version": "0.3.0",
   "id": "ADR-002",
   "type": "agent",
-  "status": "pending-review",
+  "status": "approved",
   "confidence": "high",
   "timestamp": "2026-06-18T22:47:00+00:00",
   "phase": "plan",
@@ -25,6 +25,15 @@
   "blast_radius": "A single helper (find_root) in hooks/sb_quota.py, reused by hooks/sb_guard.py. Pure filesystem read. If a future layout breaks the upward scan (e.g. worktrees outside the repo tree), swap find_root for the git-common-dir approach — localized, one function. No engine or schema impact.",
   "evidence": [
     {"kind": "doc", "ref": ".claude/skills/sb-work/SKILL.md", "result": "worktree at .worktrees/$WORKER_ID; .switchboard/ in main tree"},
-    {"kind": "test", "ref": "tests/test_quota.py::test_find_root_walks_up_from_worktree", "result": "pending"}
+    {"kind": "test", "ref": "tests/test_quota.py::test_find_root_walks_up_from_worktree", "result": "pass"},
+    {"kind": "test", "ref": "tests/test_quota.py::test_find_root_walk_is_bounded", "result": "pass"}
+  ],
+  "feedback": [
+    {
+      "author": {"kind": "human", "id": "colin", "role": "director"},
+      "timestamp": "2026-06-19T02:15:00+00:00",
+      "action": "approve",
+      "note": "Approved the upward search, with a containment condition: it must have a hard limit on how far up it can climb, so a missing/misconfigured .switchboard cannot send it walking to the filesystem root or into another project. Incorporated as a max-parent-levels cap (default 16) in find_root, covered by tests/test_quota.py::test_find_root_walk_is_bounded."
+    }
   ]
 }
