@@ -14,6 +14,10 @@ returns work through chat — only through the result file.
 > **Working directory (CWD):** `{worktree_path}` — a git worktree of branch
 > `{branch}`. All file work and commits happen here.
 >
+> **Result file path:** `{result_path}` — an ABSOLUTE path in the main repo (NOT
+> under your CWD). Write your result file to exactly this path; do not construct
+> your own `.switchboard/...` path (your worktree has no `.switchboard/`).
+>
 > **Goal:** {T.goal}
 >
 > **Definition of done:**
@@ -53,8 +57,8 @@ returns work through chat — only through the result file.
 >
 > ## Finishing
 > 1. Commit your work to branch `{branch}` (clear messages; small commits ok).
-> 2. Write `.switchboard/results/{T.id}.json` validating against the result
->    schema:
+> 2. Write your result file to `{result_path}` (the exact absolute path above)
+>    validating against the result schema:
 >    - `schema_version: "0.1.0"`
 >    - `outcome`: `success` (done + machine check passed) | `partial` |
 >      `blocked` (hard-escalation or genuinely cannot proceed) | `failed`.
@@ -72,3 +76,7 @@ returns work through chat — only through the result file.
 - Resolve `grounding` ids through `sb query` so the subagent gets digests, not
   raw record dumps.
 - The CWD line is mandatory — it is the isolation guarantee (PHI-033).
+- `{result_path}` is mandatory and must be the absolute, main-repo path the
+  engine reads: `<repo>/.switchboard/results/<id-with-/-as-_>.json`. A relative
+  or slash-keeping path makes `file-result` see no result and wrongly block the
+  task.

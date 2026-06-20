@@ -47,7 +47,19 @@ def test_run_writes_quota_json_on_rate_limit(lay):
     sb_quota.run(payload)
     q = json.load(open(os.path.join(lay.root, "quota.json")))
     assert q["state"] == "throttled"
-    assert "at" in q
+    # only digest-schema-allowed keys (additionalProperties:false on quota)
+    assert set(q) <= {"state", "detail", "retry_after_s"}
+
+
+def test_quota_json_stays_digest_valid(lay):
+    # regression (Codex C2): the digest embeds quota.json verbatim and validates
+    # it; an extra field here would break sb status/notify/monitor on first 429
+    from sb import digest, paths, validate
+    sb_quota.run({"hook_event_name": "PostToolUse", "cwd": lay.repo,
+                  "tool_response": {"type": "text", "text": "rate limit exceeded"}})
+    dg = digest.build_digest(lay, paths.load_config(lay))  # validates internally
+    validate.check("digest", dg)
+    assert dg["quota"]["state"] == "throttled"
 
 
 def test_run_noop_on_clean(lay):

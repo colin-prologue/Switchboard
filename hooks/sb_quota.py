@@ -11,7 +11,6 @@ import json
 import os
 import re
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -64,7 +63,10 @@ def run(payload):
     root = find_root(payload.get("cwd"))
     if not root:
         return
-    state["at"] = time.time()
+    # NB: write only fields the digest schema's `quota` object allows
+    # (additionalProperties:false → {state, detail, retry_after_s}). The digest
+    # embeds quota.json verbatim and validates it, so an extra key here would
+    # break sb status/notify/monitor on the first rate-limit (the worst moment).
     qp = os.path.join(root, ".switchboard", "quota.json")
     tmp = f"{qp}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:

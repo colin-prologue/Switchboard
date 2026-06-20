@@ -34,10 +34,16 @@ def claim_one(lay, worker_id, tier=None, cfg=None):
     for t in claimable(lay, tier):
         if not store.move_task(lay, "queued", "active", t["id"]):
             continue  # lost the race; next candidate
+        # Lease BEFORE the body write: a concurrent requeue-stale sweep keys off
+        # the lease, so writing it first stops the sweep from seeing this
+        # just-moved active file as lease-less and bouncing it back to queued
+        # (which would leave the task in both lanes — duplicate dispatch). This
+        # narrows the race to the rename→lease gap; it does not fully close it,
+        # but nothing auto-runs the sweep today (Codex C3 mitigation).
+        leases.write_lease(lay, t["id"], worker_id, ttl)
         t["status"] = "claimed"
         t["claim"] = {"worker_id": worker_id, "claimed_at": now_iso()}
         store.write_task(lay, "active", t)
-        leases.write_lease(lay, t["id"], worker_id, ttl)
         return t
     return None
 

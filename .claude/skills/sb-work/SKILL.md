@@ -61,15 +61,25 @@ Repeat until the operator stops the session:
    --force "$WT"` first.)
 5. **Pick the model**: read `tiers.json` (repo root); `MODEL = tiers["tiers"][T.tier]`.
    Tier lives on the dispatch, not the session — any worker serves any tier.
-6. **Dispatch a fresh-context subagent** with the `model` override, working in
+6. **Compute the engine-visible result path, then dispatch.** The engine reads
+   the result at `<main-repo>/.switchboard/results/<id>.json` where `<id>` has
+   every `/` replaced by `_` — it does **not** look inside the worktree and does
+   **not** honor nested slashes. So compute, in the MAIN repo and **absolute**
+   (never relative to `$WT`, which is a separate working tree with no
+   `.switchboard/`):
+   ```
+   RESULT_PATH="$REPO/.switchboard/results/$(printf '%s' "<T.id>" | tr / _).json"
+   ```
+   (`$REPO` = the absolute path of this checkout, where you run `sb`.)
+   **Dispatch a fresh-context subagent** with the `model` override, working in
    `$WT`:
    - If `T.context.verifies` is set → use **verifier-protocol.md**.
    - Otherwise → use **task-protocol.md**.
    Fill the protocol template from `T` (goal, `done`, constraints, grounding via
-   `sb query`, prior result if this is a retry/continuation, the worktree CWD).
-   The subagent commits its work to `$BRANCH` and writes
-   `.switchboard/results/<T.id>.json` against the result schema. It is the only
-   thing that writes that file; you do not.
+   `sb query`, prior result if this is a retry/continuation, the worktree CWD,
+   and **`RESULT_PATH`**). The subagent commits its work to `$BRANCH` and writes
+   its result to the **exact absolute `RESULT_PATH` you pass it** (against the
+   result schema). It is the only thing that writes that file; you do not.
    - **If the dispatch raises a rate-limit / usage-cap signal** (infra failure,
      not task failure): `sb release <T.id>` (→ queued, attempts unchanged),
      apply Backoff, remove the worktree, record a ledger line with
@@ -80,9 +90,9 @@ Repeat until the operator stops the session:
    sb file-result <T.id>
    ```
    Capture the returned `lane` as the iteration `OUTCOME`.
-   - **If the subagent returned with NO valid result file** at
-     `.switchboard/results/<T.id>.json` (a guard hook forced it to stop, or it
-     crashed), do **not** leave the task wedged:
+   - **If the subagent returned with NO valid result file** at `$RESULT_PATH`
+     (a guard hook forced it to stop, or it crashed), do **not** leave the task
+     wedged:
      - a **task** subagent (`T.context.verifies` unset) → `sb block <T.id>
        --reason "<why, e.g. guard-forced stop>"`: the engine synthesizes a
        `blocked` result and pauses the task for human (`OUTCOME=paused`).

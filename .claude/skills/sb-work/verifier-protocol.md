@@ -16,6 +16,9 @@ with this verdict carried into the retry prompt. The engine enforces this inside
 > **Working directory (CWD):** `{worktree_path}` — a git worktree of branch
 > `{branch}` containing the author's committed work.
 >
+> **Result file path:** `{result_path}` — an ABSOLUTE path in the main repo (NOT
+> under your CWD). Write your result file to exactly this path.
+>
 > **Task under verification:** `{T.context.verifies}`
 > **Original goal:** {target.goal}
 > **Definition of done:**
@@ -30,7 +33,7 @@ with this verdict carried into the retry prompt. The engine enforces this inside
 > 2. **Judge the committed diff against the done statement** — not just whether
 >    the command exits 0, but whether the work actually satisfies the stated
 >    outcome (no faked tests, no scope gaps, no obvious correctness holes).
-> 3. **Write the result file** `.switchboard/results/{T.id}.json`:
+> 3. **Write the result file** to `{result_path}` (the exact absolute path above):
 >    - `schema_version: "0.1.0"`
 >    - `outcome: "success"` (you completed the verification — this is about the
 >      verification running, not the verdict).
