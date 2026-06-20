@@ -2,7 +2,7 @@
   "schema_version": "0.3.0",
   "id": "ADR-001",
   "type": "agent",
-  "status": "pending-review",
+  "status": "approved",
   "confidence": "high",
   "timestamp": "2026-06-18T22:45:00+00:00",
   "phase": "plan",
@@ -26,5 +26,13 @@
   "evidence": [
     {"kind": "doc", "ref": "docs/specs/2026-06-16-sb-guards-quota-design.md", "result": "§2 engine-untouched + §8 TDD-able"},
     {"kind": "doc", "ref": "docs/plans/2026-06-18-sb-guards-quota.md", "result": "tasks 3-6 structured for unit testing"}
+  ],
+  "feedback": [
+    {
+      "author": {"kind": "human", "id": "colin", "role": "director"},
+      "timestamp": "2026-06-19T02:40:00+00:00",
+      "action": "approve",
+      "note": "Approved keeping the safety logic as a separate add-on package rather than folding it into the frozen core."
+    }
   ]
 }

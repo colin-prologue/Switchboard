@@ -13,7 +13,7 @@ are durable records; humans review at PR gates.
 - [docs/plans/2026-06-14-sb-operator-surfaces.md](docs/plans/2026-06-14-sb-operator-surfaces.md) — M0 Plan 2 (EXECUTED) — operator surfaces (brief/stamp/status/notify); branch `plan/sb-operator-surfaces`
 - [docs/plans/2026-06-17-sb-worker-loop.md](docs/plans/2026-06-17-sb-worker-loop.md) — M0 Plan 3-A (IMPLEMENTED) — worker loop + subagent protocols + `sb release`
 - [docs/plans/2026-06-18-sb-guards-quota.md](docs/plans/2026-06-18-sb-guards-quota.md) — M0 Plan 3-B (IMPLEMENTED) — guards + quota detector + monitor; includes errata commits (plan patched when the implementer caught test/logic bugs)
-- AgDRs: ADR-001 (guard logic in tested `hooks/` package, not `sb/`) — still `pending-review`; ADR-002 (`.switchboard/` upward discovery, **approved** with a director-required containment cap on the walk, `_MAX_UP=16`); ADR-003 (guard arms on 2nd trip OR exhausted nudge budget — **approved**: err toward stopping); ADR-004 (intervention-learning loop — `proposed`, director-directed, lands with the oversight layer)
+- AgDRs (all director-reviewed 2026-06-19, **approved**): ADR-001 (guard logic in tested `hooks/` package, not `sb/`); ADR-002 (`.switchboard/` upward discovery, approved with a containment cap on the walk, `_MAX_UP=16`); ADR-003 (guard arms on 2nd trip OR exhausted nudge budget — err toward stopping); ADR-004 (intervention-learning loop — shape confirmed = reuse decision-grounding; build deferred to the oversight layer)
 - [docs/ROADMAP.md](docs/ROADMAP.md) — milestone status + the Plan 3 A/B/C/D decomposition, runway, and deferred work (the planning detail; keep it here, not in this file)
 
 ## State (2026-06-18)

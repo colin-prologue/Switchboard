@@ -2,7 +2,7 @@
   "schema_version": "0.3.0",
   "id": "ADR-004",
   "type": "agent",
-  "status": "proposed",
+  "status": "approved",
   "confidence": "medium",
   "timestamp": "2026-06-19T02:25:00+00:00",
   "phase": "spec",
@@ -29,5 +29,13 @@
   "depends_on": ["ADR-003"],
   "evidence": [
     {"kind": "doc", "ref": "docs/ROADMAP.md", "result": "queued under the oversight layer as a director-directed capability"}
+  ],
+  "feedback": [
+    {
+      "author": {"kind": "human", "id": "colin", "role": "director"},
+      "timestamp": "2026-06-19T02:42:00+00:00",
+      "action": "approve",
+      "note": "Confirmed the lean shape: reuse the decision corpus + grounding loop rather than building active failure-signature matching up front. Active pre-check remains the documented fallback if passive grounding misses repeats. Approved for build with the oversight layer (not now)."
+    }
   ]
 }
