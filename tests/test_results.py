@@ -14,7 +14,7 @@ def active_task(lay, **over):
 
 
 def write_result(lay, task_id, **fields):
-    r = {"schema_version": "0.1.0", "outcome": "success", "summary": "done", **fields}
+    r = {"schema_version": "0.2.0", "outcome": "success", "summary": "done", **fields}
     store.write_json(os.path.join(lay.results, store.fname(task_id)), r)
 
 
@@ -182,3 +182,21 @@ def test_cli_block(lay, capsys):
     assert out == {"task_id": "PLAN-001/PH-1/T-1", "lane": "paused"}
     _, on_disk = store.find_task(lay, "PLAN-001/PH-1/T-1")
     assert on_disk["status"] == "paused_for_human"
+
+
+def test_result_schema_v2_allows_paused_for_research(lay):
+    from sb import validate
+    good = {"schema_version": "0.2.0", "outcome": "paused_for_research",
+            "summary": "Need a benchmark before choosing the cache design.",
+            "research": {"goal": "Benchmark snapshot vs lock cache under 10k writes",
+                         "tier": "haiku",
+                         "done_statement": "A table comparing p50/p99 exists."}}
+    validate.check("result", good)  # must not raise
+
+
+def test_result_schema_rejects_old_version(lay):
+    import pytest
+    from sb import validate
+    with pytest.raises(ValueError):
+        validate.check("result", {"schema_version": "0.1.0", "outcome": "success",
+                                  "summary": "x"})

@@ -34,7 +34,7 @@ def test_spawn_creates_research_and_requeues_parent(lay):
 def test_spawn_carries_partial_result(lay):
     parent = claimed_parent(lay)
     rpath = os.path.join(lay.results, store.fname(parent["id"]))
-    store.write_json(rpath, {"schema_version": "0.1.0", "outcome": "blocked",
+    store.write_json(rpath, {"schema_version": "0.2.0", "outcome": "blocked",
                              "summary": "Need benchmark data before deciding."})
     spawn.spawn_research(lay, DEFAULT_CONFIG, parent["id"],
                          goal="g", tier="haiku", done_statement="d")

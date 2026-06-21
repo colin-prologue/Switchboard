@@ -59,7 +59,7 @@ returns work through chat — only through the result file.
 > 1. Commit your work to branch `{branch}` (clear messages; small commits ok).
 > 2. Write your result file to `{result_path}` (the exact absolute path above)
 >    validating against the result schema:
->    - `schema_version: "0.1.0"`
+>    - `schema_version: "0.2.0"`
 >    - `outcome`: `success` (done + machine check passed) | `partial` |
 >      `blocked` (hard-escalation or genuinely cannot proceed) | `failed`.
 >    - `summary`: 2–3 sentences, a handoff digest, never a transcript.

@@ -12,7 +12,7 @@ def load(name):
 
 
 GOOD_RESULT = {
-    "schema_version": "0.1.0",
+    "schema_version": "0.2.0",
     "outcome": "success",
     "summary": "Implemented the parser; tests green.",
     "evidence": [{"kind": "test", "ref": "tests/test_parser.py", "result": "pass"}],

@@ -84,7 +84,7 @@ def block(lay, cfg, task_id, reason):
         raise ValueError(
             f"{task_id} is a verification task; a crashed verifier is infra — "
             f"release it for another verifier, do not block")
-    store.write_json(rp, {"schema_version": "0.1.0", "outcome": "blocked",
+    store.write_json(rp, {"schema_version": "0.2.0", "outcome": "blocked",
                           "summary": reason or "subagent returned no result file"})
     return file_result(lay, cfg, task_id)
 
