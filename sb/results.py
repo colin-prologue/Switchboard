@@ -11,7 +11,7 @@ no sweeper), which is worse."""
 import datetime as dt
 import os
 
-from sb import leases, store, validate
+from sb import leases, spawn, store, validate
 
 
 def now_iso():
@@ -44,6 +44,20 @@ def file_result(lay, cfg, task_id):
     task["result"] = result
 
     target_id = task.get("context", {}).get("verifies")
+    if not target_id and result["outcome"] == "paused_for_research":
+        req = result.get("research")
+        if not req:
+            raise ValueError(
+                "paused_for_research result must carry a `research` block "
+                "{goal, tier, done_statement}")
+        # spawn_research reads+consumes the parent's result file, re-enqueues the
+        # parent as a continuation, and clears the lease — it owns the whole lane
+        # transition, so return immediately (do NOT fall through to embed/move/
+        # remove). ADR-005: file-result is the single door; spawn is the mechanism.
+        research = spawn.spawn_research(
+            lay, cfg, task_id, goal=req["goal"], tier=req["tier"],
+            done_statement=req["done_statement"])
+        return "paused" if research is None else "queued"  # None => chain-depth cap
     if target_id:
         dest = _apply_verdict(lay, cfg, task, result, target_id)
     else:

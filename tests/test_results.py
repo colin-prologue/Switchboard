@@ -184,6 +184,30 @@ def test_cli_block(lay, capsys):
     assert on_disk["status"] == "paused_for_human"
 
 
+def test_paused_for_research_spawns_and_requeues_parent(lay):
+    t = active_task(lay)  # active parent
+    write_result(lay, t["id"], outcome="paused_for_research",
+                 summary="need data first",
+                 research={"goal": "benchmark the two designs", "tier": "haiku",
+                           "done_statement": "a comparison table exists"})
+    dest = results.file_result(lay, DEFAULT_CONFIG, t["id"])
+    assert dest == "queued"                          # parent re-enqueued as continuation
+    lane, p = store.find_task(lay, t["id"])
+    assert lane == "queued" and p["status"] == "queued"
+    rid = f"{t['id']}.R1"
+    assert rid in p["context"]["depends_on"]          # depends on the research task
+    assert store.find_task(lay, rid)[0] == "queued"   # research task enqueued
+    assert p["context"]["prior_attempts"][0]["summary"] == "need data first"  # partial carried
+    assert not os.path.exists(results.result_path(lay, t["id"]))  # consumed
+
+
+def test_paused_for_research_requires_research_block(lay):
+    t = active_task(lay)
+    write_result(lay, t["id"], outcome="paused_for_research", summary="oops no block")
+    with pytest.raises(ValueError, match="research"):
+        results.file_result(lay, DEFAULT_CONFIG, t["id"])
+
+
 def test_result_schema_v2_allows_paused_for_research(lay):
     from sb import validate
     good = {"schema_version": "0.2.0", "outcome": "paused_for_research",
