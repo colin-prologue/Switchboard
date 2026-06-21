@@ -80,6 +80,12 @@ Repeat until the operator stops the session:
    and **`RESULT_PATH`**). The subagent commits its work to `$BRANCH` and writes
    its result to the **exact absolute `RESULT_PATH` you pass it** (against the
    result schema). It is the only thing that writes that file; you do not.
+   - **If this is a continuation** (`T.context.depends_on` contains any
+     `<...>.R<n>` research ids), fetch each completed research dep with
+     `sb result <dep-id>` (exit 0 → its result JSON; exit 3 → not ready, which
+     should not happen since deps are `done` before claim) and pass their
+     `summary`/`evidence` into the prompt as **Research findings**. This is how
+     the research output reaches the continuation (ADR-006).
    - **If the dispatch raises a rate-limit / usage-cap signal** (infra failure,
      not task failure): `sb release <T.id>` (→ queued, attempts unchanged),
      apply Backoff, remove the worktree, record a ledger line with
@@ -90,6 +96,9 @@ Repeat until the operator stops the session:
    sb file-result <T.id>
    ```
    Capture the returned `lane` as the iteration `OUTCOME`.
+   - A `paused_for_research` result needs **no special handling** — just
+     `sb file-result <T.id>` as normal. The engine spawns the research task and
+     re-enqueues this task as a continuation (ADR-005); `OUTCOME=queued`.
    - **If the subagent returned with NO valid result file** at `$RESULT_PATH`
      (a guard hook forced it to stop, or it crashed), do **not** leave the task
      wedged:
