@@ -1,0 +1,30 @@
+{
+  "schema_version": "0.3.0",
+  "id": "ADR-006",
+  "type": "agent",
+  "status": "pending-review",
+  "confidence": "medium",
+  "timestamp": "2026-06-21T01:08:00+00:00",
+  "phase": "plan",
+  "level": "component",
+  "tags": ["continuation", "research-handoff", "worker", "prompts", "a-continuation"],
+  "author": {"kind": "model", "id": "claude-opus-4-8", "role": "coder"},
+  "title": "Research output reaches the continuation via worker-fetch through a new sb result read verb",
+  "context": "A research handoff re-enqueues the parent as a continuation depending on the research task. When the research task completes (success -> verify -> done) its findings live in its embedded result. The parent re-claims once the dep is done, but NOTHING currently routes the research findings into the continuation's dispatch prompt — a gap not anticipated by the spec. Director confirmed the worker-fetch direction before planning.",
+  "options": [
+    {"name": "worker-fetch-via-sb-result", "rationale": "Add a small read-only verb `sb result <id>` returning a task's embedded result. The worker, dispatching a continuation, fetches each completed `.R<n>` dep and inlines its summary/evidence as 'Research findings' in the prompt.", "tradeoff": "One new read verb + worker prompt-assembly logic. Engine write-path stays untouched; the read is stateless and reusable."},
+    {"name": "engine-wire-into-parent-context", "rationale": "When a research task reaches done (its verify-pass file-result), append its result summary into the parent continuation's context (e.g. prior_attempts/research_findings) automatically.", "tradeoff": "Dumber worker (the continuation prompt just reads context), but couples the verify-pass write-path to the parent: file-result for a verify task would have to locate the research task's PARENT and mutate a queued task — more engine surface and a cross-task write the engine otherwise avoids."},
+    {"name": "unblocks-field", "rationale": "Have the research result populate the existing result `unblocks` array with the parent id; surface it on filing.", "tradeoff": "Reuses an existing field, but `unblocks` is currently unused/unspecified and still needs a consumer that injects the summary into the prompt — solving nothing the other two don't, with vaguer semantics."}
+  ],
+  "chosen": "worker-fetch-via-sb-result",
+  "reasoning": "Prompt assembly is the worker's job; fetching is a read, so it belongs on the read side, not bolted onto the result write-path. A stateless `sb result <id>` keeps the engine's write path (and its write-before-move invariants) untouched and is independently useful (debugging, future surfaces). The engine-wire alternative makes a verify-pass mutate an unrelated queued task — new coupling on the most invariant-sensitive path for marginal benefit.",
+  "steelman": [
+    {"option": "engine-wire-into-parent-context", "strongest_case": "It guarantees the finding is present without the worker having to remember to fetch — robustness by construction, and the continuation prompt becomes a pure function of the task body with no extra CLI round-trips. If worker prompt-assembly is where bugs cluster (cf. the C1 result-path bug), moving this into the engine removes a prose-driven step that can be gotten wrong."}
+  ],
+  "blast_radius": "A new read-only `sb result` verb (results.read_result + CLI) and worker prompt-assembly prose in SKILL.md/task-protocol. No write-path or schema change beyond ADR-005's. Reversible: if worker-fetch proves error-prone in live runs (D), switch to engine-wiring — the verb can stay as a debugging read. Confidence medium because the worker-side fetch is prose (reviewed-not-tested) until D exercises it live.",
+  "depends_on": ["ADR-005"],
+  "evidence": [
+    {"kind": "doc", "ref": "docs/specs/2026-06-16-sb-worker-loop-design.md", "result": "§3.3 continuation prompt carries research output"},
+    {"kind": "test", "ref": "tests/test_results.py::test_read_result_returns_embedded_result", "result": "pending"}
+  ]
+}

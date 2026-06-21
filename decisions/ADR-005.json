@@ -1,0 +1,28 @@
+{
+  "schema_version": "0.3.0",
+  "id": "ADR-005",
+  "type": "agent",
+  "status": "pending-review",
+  "confidence": "high",
+  "timestamp": "2026-06-21T01:05:00+00:00",
+  "phase": "plan",
+  "level": "component",
+  "tags": ["continuation", "research-handoff", "engine", "results", "a-continuation"],
+  "author": {"kind": "model", "id": "claude-opus-4-8", "role": "coder"},
+  "title": "file-result delegates the paused_for_research outcome to spawn_research (engine-atomic), not the worker",
+  "context": "The continuation engine (sb/spawn.py::spawn_research) already creates the research task, re-enqueues the parent as a continuation depending on it, carries the partial forward, cycle-checks, and caps chain depth. What was missing: how a subagent signals a research handoff (it can only speak through its result file) and who turns that into a spawn. The result outcome enum had no paused_for_research. Director confirmed the direction before planning.",
+  "options": [
+    {"name": "engine-atomic", "rationale": "Add a paused_for_research outcome + a research block to the result schema; file-result sees that outcome and calls spawn_research itself, then returns. The worker just files as always — one validated door.", "tradeoff": "file-result gains a branch and a `from sb import spawn` import (no cycle: spawn doesn't import results). spawn_research already owns the full lane transition, so the branch must return early and skip the normal embed/move/remove."},
+    {"name": "worker-orchestrates", "rationale": "The worker reads the paused_for_research result, then calls `sb spawn --task ... --goal ... --tier ... --done ...` itself, then continues.", "tradeoff": "Keeps file-result unchanged, but splits one logical transition across two CLI calls in the prose skill (un-atomic): a crash between file and spawn leaves the parent active with a stale result file, recovered only by lease expiry. Also duplicates the research-request plumbing in the prompt."}
+  ],
+  "chosen": "engine-atomic",
+  "reasoning": "file-result is already 'the only door results enter through'; making the research handoff one more outcome it routes keeps that invariant and makes the whole transition atomic and validated in one place, reusing the tested spawn_research. The worker stays dumb (file as normal). The alternative spreads a single state transition across two prose-driven CLI calls, reintroducing exactly the crash-window/duplicate-plumbing the single-door design exists to avoid.",
+  "steelman": [
+    {"option": "worker-orchestrates", "strongest_case": "It keeps the engine's file-result smaller and avoids coupling results.py to spawn.py; `sb spawn` already exists as a public verb meant to be called, so using it from the worker is the 'intended' seam, and the crash window is already an accepted risk documented in spawn.py."}
+  ],
+  "blast_radius": "One branch in file_result + a `from sb import spawn` import; a result-schema bump (0.1.0->0.2.0) touching every result writer. No change to spawn_research itself. Reversible: the branch could be removed and the worker taught to call `sb spawn` instead, with no data migration.",
+  "evidence": [
+    {"kind": "doc", "ref": "docs/specs/2026-06-16-sb-worker-loop-design.md", "result": "§3.3 research handoffs/continuations"},
+    {"kind": "test", "ref": "tests/test_results.py::test_paused_for_research_spawns_and_requeues_parent", "result": "pending"}
+  ]
+}
