@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://colin-prologue/schemas/decision-record/v0.2.0.json",
+  "$id": "https://colin-prologue/schemas/decision-record/v0.3.0.json",
   "title": "Decision Record",
   "description": "A single decision captured by an agent, a human, or the synthesis/orchestrator layer. Records are the queryable substrate beneath the human-readable DECISIONS.md log; future sessions ground new choices in this corpus instead of re-deriving from first principles.",
   "$comment": "EXPANSION JOINTS — the fields most likely to evolve as the decomposition model settles are `phase`, `level`, `tags`, and `evidence.kind`. These are kept deliberately loose (open strings / extensible enums) so they can grow WITHOUT a breaking schema bump. The structural fields (id, type, status, relationships) are strict on purpose: changing them is a versioned, deliberate act. additionalProperties is false at the root so any genuinely new field forces a schema version bump — that is the 'version the contract, not the implementation' discipline, encoded.",
@@ -11,7 +11,7 @@
 
   "properties": {
     "schema_version": {
-      "const": "0.2.0",
+      "const": "0.3.0",
       "description": "The contract version this record was written against. Consumers use it to migrate."
     },
     "provenance": {
@@ -21,7 +21,7 @@
       "properties": {
         "plan_id": { "type": "string", "pattern": "^PLAN-[0-9]{3,}$" },
         "phase_id": { "type": "string", "pattern": "^PH-[0-9]{1,}$" },
-        "task_id": { "type": "string", "pattern": "^T-[0-9]{1,}$" }
+        "task_id": { "type": "string", "pattern": "^(T-[0-9]{1,}|GATE)$" }
       }
     },
     "id": {
@@ -95,6 +95,23 @@
       "type": "array",
       "items": { "$ref": "#/$defs/evidence" },
       "description": "Proof the decision holds: tests, metrics, diffs, PRs, benchmarks."
+    },
+    "steelman": {
+      "type": "array",
+      "description": "PHI-028: the strongest honest case FOR each rejected option, written by the decider. Counters self-justification; required by convention for AgDR-class records (enforced in review, not schema).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["option", "strongest_case"],
+        "properties": {
+          "option": { "type": "string", "description": "Must match an options[].name." },
+          "strongest_case": { "type": "string" }
+        }
+      }
+    },
+    "blast_radius": {
+      "type": "string",
+      "description": "PHI-028: what this decision touches and how expensive reversal is — enables async review at the PR gate."
     },
 
     "depends_on": {

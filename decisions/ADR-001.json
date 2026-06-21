@@ -1,0 +1,38 @@
+{
+  "schema_version": "0.3.0",
+  "id": "ADR-001",
+  "type": "agent",
+  "status": "approved",
+  "confidence": "high",
+  "timestamp": "2026-06-18T22:45:00+00:00",
+  "phase": "plan",
+  "level": "component",
+  "tags": ["hooks", "architecture", "testing", "sub-plan-b"],
+  "author": {"kind": "model", "id": "claude-opus-4-8", "role": "coder"},
+  "title": "Guard/quota logic lives in a tested hooks/ package, not in the sb/ engine",
+  "context": "Sub-plan B's spec §2 says 'the sb engine is untouched (B adds hooks + a monitor wiring, not engine code), except possibly tiny config keys.' But B's guard/quota/monitor logic must be unit-testable (spec §8: B is 'genuinely TDD-able, unlike A'). The v1 rabbit_guard.py is an untested repo-root script. Where the logic lives determines both testability and whether the engine boundary is respected.",
+  "options": [
+    {"name": "hooks-as-package", "rationale": "Make hooks/ an importable package (hooks/__init__.py); put pure logic in importable functions with a thin main() shim; tests do `from hooks import sb_guard`. Hooks import sb.paths/store/channels READ-ONLY.", "tradeoff": "hooks/ becomes a second tested package alongside sb/; slight import-path care needed."},
+    {"name": "logic-in-sb-engine", "rationale": "Put guard/quota logic in new sb/guard.py + sb/quota.py modules; hooks are thin shims like sb_notify.py.", "tradeoff": "Cleanest import story, but expands the sb engine surface — contradicts the spec's 'engine untouched' and blurs the deterministic-queue-core boundary with the guard layer."},
+    {"name": "untested-root-scripts", "rationale": "Keep the v1 shape: standalone repo-root scripts, logic inline in main().", "tradeoff": "Matches v1, zero new packaging, but not unit-testable — violates spec §8's TDD requirement for B, the safety keystone."}
+  ],
+  "chosen": "hooks-as-package",
+  "reasoning": "Testability is non-negotiable for B (the keystone for safe autonomy, PHI-030) and the spec explicitly calls B TDD-able. hooks-as-package gets full unit coverage of every tripwire/decision via synthetic payloads WITHOUT spawning real Claude Code or a model, while keeping the sb engine surface unchanged (the logic only reads engine primitives). It honors the spec's 'engine untouched' more faithfully than putting guard logic into sb/, where it would enlarge the engine the spec deliberately froze.",
+  "steelman": [
+    {"option": "logic-in-sb-engine", "strongest_case": "sb/ is already an installed package with a clean import story; hooks/ needs __init__.py and sys.path care to be importable in tests. Co-locating all deterministic Python in sb/ is arguably simpler and the 'engine untouched' line was about behavior, not literally the package directory."},
+    {"option": "untested-root-scripts", "strongest_case": "It matches the shipped v1 pattern exactly, requires zero packaging decisions, and hooks are inherently exercised live; one could argue integration testing in D is the real proof for a hook layer."}
+  ],
+  "blast_radius": "New hooks/ package + its test files; two additive engine touch-points only (Layout.guard attr + guard_*/monitor_* config keys, Task 1). No change to existing engine behavior or schemas. Reversible: logic could later move to sb/ with a mechanical import change if the boundary judgment changes.",
+  "evidence": [
+    {"kind": "doc", "ref": "docs/specs/2026-06-16-sb-guards-quota-design.md", "result": "§2 engine-untouched + §8 TDD-able"},
+    {"kind": "doc", "ref": "docs/plans/2026-06-18-sb-guards-quota.md", "result": "tasks 3-6 structured for unit testing"}
+  ],
+  "feedback": [
+    {
+      "author": {"kind": "human", "id": "colin", "role": "director"},
+      "timestamp": "2026-06-19T02:40:00+00:00",
+      "action": "approve",
+      "note": "Approved keeping the safety logic as a separate add-on package rather than folding it into the frozen core."
+    }
+  ]
+}

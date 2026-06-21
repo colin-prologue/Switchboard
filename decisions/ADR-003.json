@@ -1,0 +1,38 @@
+{
+  "schema_version": "0.3.0",
+  "id": "ADR-003",
+  "type": "agent",
+  "status": "approved",
+  "confidence": "medium",
+  "timestamp": "2026-06-18T23:10:00+00:00",
+  "phase": "implementation",
+  "level": "function",
+  "tags": ["hooks", "guard", "safety", "escalation", "sub-plan-b"],
+  "author": {"kind": "model", "id": "claude-opus-4-8", "role": "coder"},
+  "title": "Guard arms the hard block on the 2nd trip OR when the nudge budget is exhausted",
+  "context": "Spec §3 defines a literal two-strike: 1st trip nudges, 2nd trip denies. But the guard also has a nudge cap ('prevent nudge spam'). That leaves an unspecified case: a subagent that keeps tripping after its nudge budget is spent would otherwise get silence (no nudge, and not yet armed if we only arm on trip #2 counting). Surfaced while writing the B plan's decide_post tests — test_decide_post_respects_nudge_cap expects arming when the cap is reached. This is a safety-relevant gap in the literal two-strike.",
+  "options": [
+    {"name": "arm-on-2nd-or-cap-exhausted", "rationale": "block_armed = (trips >= 2) OR (nudge budget exhausted). Once nudges can no longer fire, any further trip escalates straight to the PreToolUse deny.", "tradeoff": "Slightly more aggressive than the spec's literal wording; the guard can arm without a 2nd distinct trip if the cap was already spent."},
+    {"name": "literal-two-strike-only", "rationale": "Arm strictly on the 2nd trip; when the nudge cap is reached, simply stay silent and never escalate from that path.", "tradeoff": "Faithful to spec §3 wording, but a persistently rabbit-trailing subagent past its nudge budget gets neither nudge nor block — it can burn its whole budget/lease tripping into silence. A safety hole."},
+    {"name": "raise-cap-instead", "rationale": "Drop the nudge cap concept; nudge on every trip until the 2nd-trip block.", "tradeoff": "Removes nudge-spam protection the spec explicitly wants; floods the subagent context with repeated nudges."}
+  ],
+  "chosen": "arm-on-2nd-or-cap-exhausted",
+  "reasoning": "The guard's purpose is to stop unproductive looping with minimal nudge spam. Arming when the nudge budget is exhausted is a fail-safe: it guarantees a persistently-tripping subagent is eventually hard-blocked (and the worker then files a `blocked` result via sb block, ADR-deny→blocked) rather than left to burn quota in silence. In normal execution this is belt-and-suspenders — nudges only increment on trips, so reaching the cap (default 3) already implies trips>=2 and the block would arm anyway; the extra clause only matters in degenerate/contrived states, where it errs toward safety. It extends, rather than contradicts, the spec's two-strike intent (escalate when nudging isn't working).",
+  "steelman": [
+    {"option": "literal-two-strike-only", "strongest_case": "Strict spec fidelity is valuable for a safety component: the spec author chose two-strike deliberately, and adding an implicit third trigger ('cap exhausted') is behavior the spec didn't sanction and a reviewer might not expect. In real runs nudges==cap already implies trips>=2, so the literal rule arms in every realistic case anyway — the extra clause is dead code that only complicates the invariant."},
+    {"option": "raise-cap-instead", "strongest_case": "If the worry is silence-after-cap, the simplest cure is to not cap nudges at all — a looping agent keeps getting corrective feedback, which might actually break the loop without needing a hard block at all."}
+  ],
+  "blast_radius": "One conditional in decide_post (hooks/sb_guard.py). Affects only when the guard escalates to a PreToolUse deny; the deny path itself (and the downstream sb block) is unchanged. Tunable via guard_nudge_cap. Fully reversible to literal two-strike by dropping the `or not nudge_budget_left` clause. Confidence medium because the threshold defaults are first guesses (spec §7) and the real escalation cadence wants tuning against live guard-state data.",
+  "evidence": [
+    {"kind": "test", "ref": "tests/test_guard.py::test_decide_post_respects_nudge_cap", "result": "pending"},
+    {"kind": "doc", "ref": "docs/specs/2026-06-16-sb-guards-quota-design.md", "result": "§3 two-strike; §7 thresholds tunable"}
+  ],
+  "feedback": [
+    {
+      "author": {"kind": "human", "id": "colin", "role": "director"},
+      "timestamp": "2026-06-19T02:18:00+00:00",
+      "action": "approve",
+      "note": "Approved the aggressive posture: stop the agent and err toward human intervention we can learn from, over letting waste run silent. Directed a follow-on capability — each human resolution of a guard hard-stop must be recorded, and turned into a rule/record that helps future runs avoid the same dead-end. Captured as ADR-004 (proposed) and on the roadmap under the oversight layer."
+    }
+  ]
+}

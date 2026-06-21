@@ -115,7 +115,7 @@
     "phase": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["phase_id", "name", "default_model", "gate", "tasks"],
+      "required": ["phase_id", "name", "default_model", "tasks"],
       "properties": {
         "phase_id": { "type": "string", "pattern": "^PH-[0-9]{1,}$" },
         "name": { "type": "string" },
