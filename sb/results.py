@@ -73,6 +73,14 @@ def file_result(lay, cfg, task_id):
     return dest
 
 
+def read_result(lay, task_id):
+    """The embedded result of a task in any lane, or None. The worker uses this
+    to pull a completed research task's findings into a continuation prompt
+    (ADR-006); read-only, never mutates."""
+    _, task = store.find_task(lay, task_id)
+    return task.get("result") if task else None
+
+
 def block(lay, cfg, task_id, reason):
     """Force a task to paused_for_human via a synthesized `blocked` result.
 

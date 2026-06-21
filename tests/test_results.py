@@ -224,3 +224,28 @@ def test_result_schema_rejects_old_version(lay):
     with pytest.raises(ValueError):
         validate.check("result", {"schema_version": "0.1.0", "outcome": "success",
                                   "summary": "x"})
+
+
+def test_read_result_returns_embedded_result(lay):
+    t = active_task(lay, tier="opus")
+    write_result(lay, t["id"])
+    results.file_result(lay, DEFAULT_CONFIG, t["id"])  # embeds result, moves to paused
+    got = results.read_result(lay, t["id"])
+    assert got["outcome"] == "success"
+
+
+def test_read_result_none_when_absent(lay):
+    store.write_task(lay, "queued", make_task())  # no result embedded yet
+    assert results.read_result(lay, "PLAN-001/PH-1/T-1") is None
+    assert results.read_result(lay, "NOPE/PH-1/T-9") is None
+
+
+def test_cli_result(lay, capsys):
+    import json
+    from sb import cli
+    t = active_task(lay, tier="opus")
+    write_result(lay, t["id"])
+    results.file_result(lay, DEFAULT_CONFIG, t["id"])
+    rc = cli.main(["result", t["id"], "--repo", lay.repo])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "success"
