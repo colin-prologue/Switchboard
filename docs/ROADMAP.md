@@ -51,7 +51,11 @@ post-M0 track.
 - **A-planner** (small follow-on before D): `sb seed --goal` + planner prompt
   protocol (planning is a task type → writes `plans/<id>.json` + SDR). The loop
   dispatches a planner identically; only the entry point and SDR/plan emission
-  are new.
+  are new. **The planner MUST emit plan-schema-valid plans** (`schemas/plan.schema.json`,
+  v0.1.0: requires `goal`, `created`, `author.{kind,id}`, and each phase `gate.{type,condition}`;
+  `additionalProperties:false` throughout) — confirmed strict by the 2026-06-21 spine
+  smoke (a hand-written plan was rejected on these). The planner prompt must carry
+  the exact schema.
 - **A-continuation** (small follow-on before D): research-handoff chain —
   `paused_for_research` result outcome → `sb spawn` (exists) → continuation task
   depending on it (worker-loop spec §3.3). `sb spawn` exists; this needs a
@@ -89,7 +93,17 @@ post-M0 track.
     grounding misses repeats. Builds on B's guard escalation (ADR-003).
 - **D — M0 exit bar** (validates A+B+C). 2-phase toy plan end-to-end with a
   research-handoff continuation, human stamps the gate. Acceptance test, not a
-  feature.
+  feature. **Must close the guard-hook live gap:** the 2026-06-21 spine smoke
+  exercised the loop happy path (claim → task subagent → file-result → verifier
+  subagent → done → stamp) with real subagents and confirmed the C1 result-path
+  fix live, BUT the subagents ran without the PreToolUse/PostToolUse hooks wired,
+  so guard-trips-mid-subagent → `sb block` is still unexercised in a wired
+  session (unit-tested + direct hook-smoke only). D must run with the hooks wired
+  in `.claude/settings.json`.
+- **Spine smoke (2026-06-21):** worker-loop happy path validated end-to-end live
+  on a throwaway repo — author=haiku, verifier=sonnet (independent model),
+  verdict→done→gate-stamp all clean. De-risks building A-continuation/A-planner
+  on the spine. Open seams above (planner schema strictness; guard-hook live).
 
 **Self-build runway note:** the fleet cannot safely self-build until A+B are
 built and D passes under human supervision (PHI-030: verification before
