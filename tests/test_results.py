@@ -249,3 +249,35 @@ def test_cli_result(lay, capsys):
     rc = cli.main(["result", t["id"], "--repo", lay.repo])
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["outcome"] == "success"
+
+
+def test_planner_task_success_enqueues_plan_verifier_then_done(lay):
+    from sb import paths, seed
+    cfg = paths.load_config(lay)
+    cid = seed.seed_goal(lay, "build a thing")        # PLAN-001/PH-0/T-1, queued
+    store.move_task(lay, "queued", "active", cid)     # simulate a claim
+
+    # planner subagent filed success
+    store.write_json(results.result_path(lay, cid), {
+        "schema_version": "0.2.0", "outcome": "success",
+        "summary": "Emitted plans/PLAN-001.json + SDR-010.",
+        "evidence": [{"kind": "commit", "ref": "abc123"}],
+    })
+    assert results.file_result(lay, cfg, cid) == "paused"  # awaiting_verification
+
+    # a verifier task was enqueued carrying the plan machine-check
+    vlane, vtask = store.find_task(lay, cid + ".V1")
+    assert vlane == "queued"
+    assert vtask["context"]["verifies"] == cid
+    assert vtask["done"]["verify"]["kind"] == "plan"
+    assert vtask["done"]["verify"]["ref"] == "plans/PLAN-001.json"
+
+    # verifier passes -> planner task reaches done (standard verdict path)
+    store.move_task(lay, "queued", "active", cid + ".V1")
+    store.write_json(results.result_path(lay, cid + ".V1"), {
+        "schema_version": "0.2.0", "outcome": "success", "verdict": "pass",
+        "summary": "Validated plans/PLAN-001.json against the plan schema; phases gated.",
+    })
+    assert results.file_result(lay, cfg, cid + ".V1") == "done"
+    lane, t = store.find_task(lay, cid)
+    assert lane == "done" and t["status"] == "done"
