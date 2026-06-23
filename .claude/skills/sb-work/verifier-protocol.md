@@ -27,9 +27,17 @@ with this verdict carried into the retry prompt. The engine enforces this inside
 >   {if expect}(expect: {target.done.verify.expect}){endif}
 >
 > ## What to do
-> 1. **Run the machine check** (`{target.done.verify.ref}`) yourself in the
->    worktree and record its real result. If there is no machine check, inspect
->    the committed diff directly.
+> 1. **Run the machine check** and record its real result:
+>    - If `{target.done.verify.kind}` is `plan`, the check is plan-schema
+>      validation of the file at `{target.done.verify.ref}`. Run, in the worktree:
+>      `python3 -c "from sb import validate, store; validate.check('plan', store.read_json('{target.done.verify.ref}')); print('plan ok')"`
+>      (exit 0 = valid). Then judge the plan on substance: ≥1 phase, EVERY phase
+>      ends at a `gate`, no forward task deps into a later phase, all `task_id`s
+>      unique across the plan, `goal` matches the original ask, routing
+>      (`default_model`/`model`) is sane, and a `decision_ref` SDR exists. A
+>      schema-valid but vacuous plan is a `fail`.
+>    - Otherwise run `{target.done.verify.ref}` yourself and record its result;
+>      if there is no machine check, inspect the committed diff directly.
 > 2. **Judge the committed diff against the done statement** — not just whether
 >    the command exits 0, but whether the work actually satisfies the stated
 >    outcome (no faked tests, no scope gaps, no obvious correctness holes).
