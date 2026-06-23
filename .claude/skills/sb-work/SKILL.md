@@ -74,6 +74,9 @@ Repeat until the operator stops the session:
    **Dispatch a fresh-context subagent** with the `model` override, working in
    `$WT`:
    - If `T.context.verifies` is set → use **verifier-protocol.md**.
+   - Else if `T.done.verify.kind == "plan"` → use **planner-protocol.md** (the
+     task is a `sb seed --goal` planner unit; ADR-007). Fill `{plan_id}` from
+     `T.source.plan_id` and `{plan_path}` from `T.done.verify.ref`.
    - Otherwise → use **task-protocol.md**.
    Fill the protocol template from `T` (goal, `done`, constraints, grounding via
    `sb query`, prior result if this is a retry/continuation, the worktree CWD,
