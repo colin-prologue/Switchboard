@@ -2,7 +2,7 @@
   "schema_version": "0.3.0",
   "id": "ADR-006",
   "type": "agent",
-  "status": "pending-review",
+  "status": "approved",
   "confidence": "medium",
   "timestamp": "2026-06-21T01:08:00+00:00",
   "phase": "plan",
@@ -25,6 +25,14 @@
   "depends_on": ["ADR-005"],
   "evidence": [
     {"kind": "doc", "ref": "docs/specs/2026-06-16-sb-worker-loop-design.md", "result": "§3.3 continuation prompt carries research output"},
-    {"kind": "test", "ref": "tests/test_results.py::test_read_result_returns_embedded_result", "result": "pending"}
+    {"kind": "test", "ref": "tests/test_results.py::test_read_result_returns_embedded_result", "result": "pass"}
+  ],
+  "feedback": [
+    {
+      "author": {"kind": "human", "id": "colin", "role": "director"},
+      "timestamp": "2026-06-21T02:30:00+00:00",
+      "action": "approve",
+      "note": "Ratified by merging PR #3 (research output reaches the continuation via worker-fetch through sb result). Flagged medium-confidence at the gate: the worker-fetch step is prose, reviewed-not-tested until D exercises it live — revision condition stands (switch to engine-wiring if live runs show fetch is error-prone)."
+    }
   ]
 }
