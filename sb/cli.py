@@ -33,6 +33,9 @@ def main(argv=None):
     p = common(sub.add_parser("file-result"))
     p.add_argument("task_id")
 
+    p = common(sub.add_parser("result"))
+    p.add_argument("task_id")
+
     p = common(sub.add_parser("spawn"))
     p.add_argument("--task", required=True)
     p.add_argument("--goal", required=True)
@@ -108,6 +111,14 @@ def main(argv=None):
     if a.cmd == "file-result":
         lane = results.file_result(lay, cfg, a.task_id)
         _out({"task_id": a.task_id, "lane": lane})
+        return 0
+
+    if a.cmd == "result":
+        res = results.read_result(lay, a.task_id)
+        if res is None:
+            print(json.dumps({"task_id": a.task_id, "result": None}))
+            return 3
+        _out(res)
         return 0
 
     if a.cmd == "spawn":

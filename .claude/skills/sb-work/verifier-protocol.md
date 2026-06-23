@@ -34,7 +34,7 @@ with this verdict carried into the retry prompt. The engine enforces this inside
 >    the command exits 0, but whether the work actually satisfies the stated
 >    outcome (no faked tests, no scope gaps, no obvious correctness holes).
 > 3. **Write the result file** to `{result_path}` (the exact absolute path above):
->    - `schema_version: "0.1.0"`
+>    - `schema_version: "0.2.0"`
 >    - `outcome: "success"` (you completed the verification — this is about the
 >      verification running, not the verdict).
 >    - `summary`: 2–3 sentences describing what you ran and what you found (required

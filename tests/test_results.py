@@ -14,7 +14,7 @@ def active_task(lay, **over):
 
 
 def write_result(lay, task_id, **fields):
-    r = {"schema_version": "0.1.0", "outcome": "success", "summary": "done", **fields}
+    r = {"schema_version": "0.2.0", "outcome": "success", "summary": "done", **fields}
     store.write_json(os.path.join(lay.results, store.fname(task_id)), r)
 
 
@@ -182,3 +182,70 @@ def test_cli_block(lay, capsys):
     assert out == {"task_id": "PLAN-001/PH-1/T-1", "lane": "paused"}
     _, on_disk = store.find_task(lay, "PLAN-001/PH-1/T-1")
     assert on_disk["status"] == "paused_for_human"
+
+
+def test_paused_for_research_spawns_and_requeues_parent(lay):
+    t = active_task(lay)  # active parent
+    write_result(lay, t["id"], outcome="paused_for_research",
+                 summary="need data first",
+                 research={"goal": "benchmark the two designs", "tier": "haiku",
+                           "done_statement": "a comparison table exists"})
+    dest = results.file_result(lay, DEFAULT_CONFIG, t["id"])
+    assert dest == "queued"                          # parent re-enqueued as continuation
+    lane, p = store.find_task(lay, t["id"])
+    assert lane == "queued" and p["status"] == "queued"
+    rid = f"{t['id']}.R1"
+    assert rid in p["context"]["depends_on"]          # depends on the research task
+    assert store.find_task(lay, rid)[0] == "queued"   # research task enqueued
+    assert p["context"]["prior_attempts"][0]["summary"] == "need data first"  # partial carried
+    assert not os.path.exists(results.result_path(lay, t["id"]))  # consumed
+
+
+def test_paused_for_research_requires_research_block(lay):
+    t = active_task(lay)
+    write_result(lay, t["id"], outcome="paused_for_research", summary="oops no block")
+    with pytest.raises(ValueError, match="research"):
+        results.file_result(lay, DEFAULT_CONFIG, t["id"])
+
+
+def test_result_schema_v2_allows_paused_for_research(lay):
+    from sb import validate
+    good = {"schema_version": "0.2.0", "outcome": "paused_for_research",
+            "summary": "Need a benchmark before choosing the cache design.",
+            "research": {"goal": "Benchmark snapshot vs lock cache under 10k writes",
+                         "tier": "haiku",
+                         "done_statement": "A table comparing p50/p99 exists."}}
+    validate.check("result", good)  # must not raise
+
+
+def test_result_schema_rejects_old_version(lay):
+    import pytest
+    from sb import validate
+    with pytest.raises(ValueError):
+        validate.check("result", {"schema_version": "0.1.0", "outcome": "success",
+                                  "summary": "x"})
+
+
+def test_read_result_returns_embedded_result(lay):
+    t = active_task(lay, tier="opus")
+    write_result(lay, t["id"])
+    results.file_result(lay, DEFAULT_CONFIG, t["id"])  # embeds result, moves to paused
+    got = results.read_result(lay, t["id"])
+    assert got["outcome"] == "success"
+
+
+def test_read_result_none_when_absent(lay):
+    store.write_task(lay, "queued", make_task())  # no result embedded yet
+    assert results.read_result(lay, "PLAN-001/PH-1/T-1") is None
+    assert results.read_result(lay, "NOPE/PH-1/T-9") is None
+
+
+def test_cli_result(lay, capsys):
+    import json
+    from sb import cli
+    t = active_task(lay, tier="opus")
+    write_result(lay, t["id"])
+    results.file_result(lay, DEFAULT_CONFIG, t["id"])
+    rc = cli.main(["result", t["id"], "--repo", lay.repo])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "success"

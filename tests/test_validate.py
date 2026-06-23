@@ -17,10 +17,10 @@ def test_invalid_task_raises_with_path():
 
 def test_result_validation():
     validate.check("result", {
-        "schema_version": "0.1.0", "outcome": "success", "summary": "ok",
+        "schema_version": "0.2.0", "outcome": "success", "summary": "ok",
     })
     with pytest.raises(ValueError, match="summary"):
-        validate.check("result", {"schema_version": "0.1.0", "outcome": "success"})
+        validate.check("result", {"schema_version": "0.2.0", "outcome": "success"})
 
 
 def test_unknown_schema_name_raises():

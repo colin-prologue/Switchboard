@@ -11,7 +11,7 @@ no sweeper), which is worse."""
 import datetime as dt
 import os
 
-from sb import leases, store, validate
+from sb import leases, spawn, store, validate
 
 
 def now_iso():
@@ -44,6 +44,20 @@ def file_result(lay, cfg, task_id):
     task["result"] = result
 
     target_id = task.get("context", {}).get("verifies")
+    if not target_id and result["outcome"] == "paused_for_research":
+        req = result.get("research")
+        if not req:
+            raise ValueError(
+                "paused_for_research result must carry a `research` block "
+                "{goal, tier, done_statement}")
+        # spawn_research reads+consumes the parent's result file, re-enqueues the
+        # parent as a continuation, and clears the lease — it owns the whole lane
+        # transition, so return immediately (do NOT fall through to embed/move/
+        # remove). ADR-005: file-result is the single door; spawn is the mechanism.
+        research = spawn.spawn_research(
+            lay, cfg, task_id, goal=req["goal"], tier=req["tier"],
+            done_statement=req["done_statement"])
+        return "paused" if research is None else "queued"  # None => chain-depth cap
     if target_id:
         dest = _apply_verdict(lay, cfg, task, result, target_id)
     else:
@@ -57,6 +71,14 @@ def file_result(lay, cfg, task_id):
     leases.clear_lease(lay, task_id)
     os.remove(rp)
     return dest
+
+
+def read_result(lay, task_id):
+    """The embedded result of a task in any lane, or None. The worker uses this
+    to pull a completed research task's findings into a continuation prompt
+    (ADR-006); read-only, never mutates."""
+    _, task = store.find_task(lay, task_id)
+    return task.get("result") if task else None
 
 
 def block(lay, cfg, task_id, reason):
@@ -84,7 +106,7 @@ def block(lay, cfg, task_id, reason):
         raise ValueError(
             f"{task_id} is a verification task; a crashed verifier is infra — "
             f"release it for another verifier, do not block")
-    store.write_json(rp, {"schema_version": "0.1.0", "outcome": "blocked",
+    store.write_json(rp, {"schema_version": "0.2.0", "outcome": "blocked",
                           "summary": reason or "subagent returned no result file"})
     return file_result(lay, cfg, task_id)
 

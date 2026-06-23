@@ -15,7 +15,7 @@ def run(capsys, *argv):
 
 
 def write_result(lay, task_id, **fields):
-    r = {"schema_version": "0.1.0", "outcome": "success", "summary": "ok",
+    r = {"schema_version": "0.2.0", "outcome": "success", "summary": "ok",
          **fields}
     store.write_json(os.path.join(lay.results, store.fname(task_id)), r)
 

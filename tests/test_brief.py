@@ -17,7 +17,7 @@ PLAN = {
 
 def done_task(lay, tid, **over):
     t = make_task(tid, status="done", **over)
-    t["result"] = {"schema_version": "0.1.0", "outcome": "success",
+    t["result"] = {"schema_version": "0.2.0", "outcome": "success",
                    "summary": "Implemented and tested.",
                    "evidence": [{"kind": "commit", "ref": "abc123"}]}
     store.write_task(lay, "done", t)
@@ -27,7 +27,7 @@ def done_task(lay, tid, **over):
 def passed_verify(lay, target_id, notes="looks correct"):
     v = make_task(f"{target_id}.V1", status="done",
                   context={"verifies": target_id})
-    v["result"] = {"schema_version": "0.1.0", "outcome": "success",
+    v["result"] = {"schema_version": "0.2.0", "outcome": "success",
                    "summary": "verified", "verdict": "pass", "verdict_notes": notes}
     store.write_task(lay, "done", v)
 

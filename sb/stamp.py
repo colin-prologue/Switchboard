@@ -100,7 +100,7 @@ def stamp(lay, plan_id, phase_id, action, note="", reviewer="colin",
         if lane == "paused":
             gate["status"] = "done"
             gate["result"] = {
-                "schema_version": "0.1.0", "outcome": "success",
+                "schema_version": "0.2.0", "outcome": "success",
                 "summary": f"Gate approved by {reviewer}. {note}".strip(),
                 "completed_at": now_iso()}
             # write-before-move invariant (see sb/results.py): finalize the body

@@ -13,7 +13,7 @@ specs/ADRs rather than narrating them here.
 | M0 Plan 2 | operator surfaces (`brief`/`stamp`/`status`/`notify`); `gate.py` retired | **EXECUTED** (merged via PR #1) — 122 tests |
 | M0 Plan 3-A | worker loop + subagent protocols + `sb release` + `sb block` | **IMPLEMENTED** 2026-06-17 — 140 tests |
 | M0 Plan 3 A-planner | `sb seed --goal` + planner protocol | spec'd in 3-A doc §7; **not built** |
-| M0 Plan 3 A-continuation | research-handoff continuation chain | spec'd (worker-loop §3.3); **not built** |
+| M0 Plan 3 A-continuation | research-handoff continuation chain | **IMPLEMENTED** 2026-06-21 — 181 tests |
 | M0 Plan 3-B | guards + quota/liveness | **IMPLEMENTED** 2026-06-18 — 171 tests |
 | M0 Plan 3-C | HDR-010 escalation layer | design sketch; finalize after A |
 | M0 Plan 3-D | M0 exit bar (acceptance) | **not built** |
@@ -56,11 +56,18 @@ post-M0 track.
   `additionalProperties:false` throughout) — confirmed strict by the 2026-06-21 spine
   smoke (a hand-written plan was rejected on these). The planner prompt must carry
   the exact schema.
-- **A-continuation** (small follow-on before D): research-handoff chain —
-  `paused_for_research` result outcome → `sb spawn` (exists) → continuation task
-  depending on it (worker-loop spec §3.3). `sb spawn` exists; this needs a
-  result-outcome + re-enqueue, so it is real engine work. D requires exercising
-  one chain.
+- **A-continuation** (**IMPLEMENTED** 2026-06-21,
+  [plan](plans/2026-06-21-sb-continuation.md), 181 tests): research-handoff
+  chain. The engine (`sb/spawn.py::spawn_research` — research task + parent
+  re-enqueue + partial carry + cycle-check + chain-depth cap) was **already
+  built and tested**; this closed the integration gaps around it: result schema
+  `0.2.0` adds a `paused_for_research` outcome + `research` block; `file-result`
+  delegates that outcome to `spawn_research` (ADR-005, engine-atomic); a new
+  `sb result <id>` read verb feeds completed research findings into the
+  continuation prompt (ADR-006, worker-fetch); task-protocol gains a
+  research-handoff section; a full-chain stub-dispatcher integration test
+  (`test_continuation_integration.py`) exercises paused_for_research → research →
+  verify → continuation deterministically. D still exercises the chain *live*.
 - **B — guards + quota/liveness** (independent of A; token-free). rabbit_guard v2
   deterministic tripwire hooks (repeat-call/repeat-error/no-progress/budget;
   first trip nudge, second forces `blocked`); HDR-011 rate-limit PostToolUse

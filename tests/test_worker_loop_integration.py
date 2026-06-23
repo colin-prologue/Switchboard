@@ -33,7 +33,7 @@ def repo(tmp_path):
 
 
 def write_result(lay, task_id, **over):
-    res = {"schema_version": "0.1.0", "outcome": "success",
+    res = {"schema_version": "0.2.0", "outcome": "success",
            "summary": "did the thing"}
     res.update(over)
     store.write_json(os.path.join(lay.results, store.fname(task_id)), res)

@@ -55,11 +55,28 @@ returns work through chat — only through the result file.
 > **not** write an AgDR to override it. File a `blocked` result with a clear
 > `summary` of what is blocked and why, and stop.
 >
+> ## Research handoff (when you need a DIFFERENT agent class first)
+> If you cannot proceed because a question needs a different agent class /
+> tier to research it (not just more work within your depth — that you do
+> inline), do NOT guess and do NOT block. Instead write a `paused_for_research`
+> result and stop:
+> - `outcome`: `"paused_for_research"`
+> - `summary`: your partial progress so far (it is carried into your
+>   continuation as a prior attempt — do not lose context).
+> - `research`: `{ "goal": "<one scoped research question>", "tier":
+>   "fable|opus|sonnet|haiku", "done_statement": "<what the research must
+>   produce>" }`.
+> The worker turns this into a spawned research task and re-enqueues YOU as a
+> continuation that depends on it; when the research is done you will be
+> re-dispatched with its findings. Use this sparingly — only for a genuinely
+> different agent class, and never deeper than the chain-depth cap (the engine
+> pauses for a human past it).
+>
 > ## Finishing
 > 1. Commit your work to branch `{branch}` (clear messages; small commits ok).
 > 2. Write your result file to `{result_path}` (the exact absolute path above)
 >    validating against the result schema:
->    - `schema_version: "0.1.0"`
+>    - `schema_version: "0.2.0"`
 >    - `outcome`: `success` (done + machine check passed) | `partial` |
 >      `blocked` (hard-escalation or genuinely cannot proceed) | `failed`.
 >    - `summary`: 2–3 sentences, a handoff digest, never a transcript.
@@ -80,3 +97,8 @@ returns work through chat — only through the result file.
   engine reads: `<repo>/.switchboard/results/<id-with-/-as-_>.json`. A relative
   or slash-keeping path makes `file-result` see no result and wrongly block the
   task.
+- On a CONTINUATION (the task has completed research deps — ids like
+  `<task>.R<n>` in `context.depends_on`), inline each research finding the
+  worker fetched (`sb result <dep-id>` → its `summary`/`evidence`) under a
+  "Research findings" heading, ahead of the prior-attempt partial. The subagent
+  builds on the findings instead of re-researching.
