@@ -56,6 +56,15 @@ post-M0 track.
   `additionalProperties:false` throughout) — confirmed strict by the 2026-06-21 spine
   smoke (a hand-written plan was rejected on these). The planner prompt must carry
   the exact schema.
+  - **Open design question (resolve at plan time, likely an AgDR):** how does
+    `sb seed --goal "<goal>"` represent the "plan this goal" unit as a queue task
+    the loop can dispatch? The task schema (v0.2.0) has no plan-task type today.
+    Options to weigh: (a) a convention — a normal task whose `done.verify.kind`
+    is `plan` (or a reserved `source.task_id`) that routes to the planner
+    protocol; (b) a new task field/marker; (c) a dedicated lane/verb. The loop
+    then dispatches the planner identically to any subagent, but the entry point
+    + SDR emission + `plans/<id>.json` write are new. Surfaced 2026-06-21,
+    not yet decided.
 - **A-continuation** (**IMPLEMENTED** 2026-06-21,
   [plan](plans/2026-06-21-sb-continuation.md), 181 tests): research-handoff
   chain. The engine (`sb/spawn.py::spawn_research` — research task + parent
