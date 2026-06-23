@@ -3,6 +3,8 @@ chain_depth seeded, EVERY phase ends at a gate (the PR-gate invariant), no
 git operations, schema validation throughout."""
 
 import datetime as dt
+import os
+import re
 
 from sb import store, validate
 from sb.paths import LANES
@@ -22,6 +24,63 @@ def now_iso():
 
 def composite(plan_id, phase_id, task_id):
     return f"{plan_id}/{phase_id}/{task_id}"
+
+
+def allocate_plan_id(lay):
+    """Next free PLAN-NNN. Scans emitted plan files AND in-flight planner task
+    ids (an id allocated by an earlier seed_goal whose plan isn't written yet),
+    so two seed_goal calls never collide."""
+    nums = []
+    if os.path.isdir(lay.plans):
+        for f in os.listdir(lay.plans):
+            m = re.match(r"PLAN-(\d+)\.json$", f)
+            if m:
+                nums.append(int(m.group(1)))
+    for lane in LANES:
+        for t in store.list_tasks(lay, lane):
+            m = re.match(r"PLAN-(\d+)/", t["id"])
+            if m:
+                nums.append(int(m.group(1)))
+    return f"PLAN-{(max(nums) + 1) if nums else 1:03d}"
+
+
+def seed_goal(lay, goal, repo_state="HEAD", tier="opus"):
+    """Enqueue ONE planner task for a raw goal. The worker loop routes it to the
+    planner protocol via done.verify.kind == 'plan' (ADR-007); the planner emits
+    plans/<plan_id>.json + an SDR, verified by the standard verifier path. No
+    gate task: the gate invariant governs the seeded plan this PRODUCES."""
+    plan_id = allocate_plan_id(lay)
+    branch = f"sb/{plan_id}/PH-0".lower()
+    cid = composite(plan_id, "PH-0", "T-1")
+    plan_path = f"plans/{plan_id}.json"
+    task = {
+        "schema_version": "0.2.0",
+        "id": cid,
+        "tier": tier,
+        "status": "queued",
+        "source": {"plan_id": plan_id, "phase_id": "PH-0", "task_id": "T-1"},
+        "goal": goal,
+        "context": {
+            "repo_state": repo_state,
+            "branch": branch,
+            "chain_depth": 0,
+            "grounding": [],
+            "constraints": [],
+            "depends_on": [],
+        },
+        "done": {
+            "statement": (
+                f"A plan-schema-valid plan for the goal is committed at "
+                f"{plan_path}, with an SDR recording the decomposition "
+                f"rationale and set as the plan's decision_ref."),
+            "verify": {"kind": "plan", "ref": plan_path},
+        },
+        "attempts": 0,
+        "created_at": now_iso(),
+        "created_by": "sb",
+    }
+    store.write_task(lay, "queued", task)
+    return cid
 
 
 def seed(lay, plan, repo_state="HEAD", force=False):
