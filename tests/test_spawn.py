@@ -91,6 +91,23 @@ def test_spawn_depth_cap_pauses_for_human(lay):
     assert "chain depth" in p["failure"]["reason"]
 
 
+def test_spawn_depth_cap_consumes_partial(lay):
+    # Codex C1 (PR #3): a handoff filed AT the chain-depth cap must still preserve
+    # the partial (so the human sees why it stalled) and not orphan the result
+    # file under .switchboard/results/.
+    parent = claimed_parent(lay, context={"chain_depth": 3})
+    rpath = os.path.join(lay.results, store.fname(parent["id"]))
+    store.write_json(rpath, {"schema_version": "0.2.0",
+                             "outcome": "paused_for_research",
+                             "summary": "scaffolded; needed a benchmark"})
+    out = spawn.spawn_research(lay, DEFAULT_CONFIG, parent["id"],
+                               goal="g", tier="haiku", done_statement="d")
+    assert out is None
+    _, p = store.find_task(lay, parent["id"])
+    assert p["context"]["prior_attempts"][0]["summary"] == "scaffolded; needed a benchmark"
+    assert not os.path.exists(rpath)  # consumed, not orphaned
+
+
 def test_spawn_requires_active_parent(lay):
     t = make_task()
     store.write_task(lay, "queued", t)

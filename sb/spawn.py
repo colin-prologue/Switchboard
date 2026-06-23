@@ -30,6 +30,23 @@ def _next_suffix(lay, parent_id, marker):
     return n + 1
 
 
+def _consume_partial(lay, parent):
+    """Carry the parent's partial result file (if the session wrote one) into
+    its prior_attempts, then remove the file. Runs on BOTH the spawn and the
+    chain-depth-cap paths — a handoff filed at the cap must still preserve the
+    partial (so the human sees why it stalled) and not orphan the result file
+    (Codex C1, PR #3)."""
+    rpath = os.path.join(lay.results, store.fname(parent["id"]))
+    if not os.path.exists(rpath):
+        return
+    try:
+        partial = store.read_json(rpath)
+    except ValueError:
+        partial = {"note": "partial result file was corrupt and was discarded"}
+    parent.setdefault("context", {}).setdefault("prior_attempts", []).append(partial)
+    os.remove(rpath)
+
+
 def spawn_research(lay, cfg, parent_id, goal, tier, done_statement):
     lane, parent = store.find_task(lay, parent_id)
     if lane != "active":
@@ -37,6 +54,7 @@ def spawn_research(lay, cfg, parent_id, goal, tier, done_statement):
 
     depth = parent.get("context", {}).get("chain_depth", 0) + 1
     if depth > cfg.get("max_chain_depth", 3):
+        _consume_partial(lay, parent)  # preserve the partial; don't orphan rp
         parent["status"] = "paused_for_human"
         parent["failure"] = {
             "reason": f"chain depth {depth} exceeds max "
@@ -70,15 +88,7 @@ def spawn_research(lay, cfg, parent_id, goal, tier, done_statement):
     dag.assert_addition_ok(lay, research, extra_parent_deps=(parent_id, [rid]))
     store.write_task(lay, "queued", research)
 
-    # consume the parent's partial result, if the session wrote one
-    rpath = os.path.join(lay.results, store.fname(parent_id))
-    if os.path.exists(rpath):
-        try:
-            partial = store.read_json(rpath)
-        except ValueError:
-            partial = {"note": "partial result file was corrupt and was discarded"}
-        parent.setdefault("context", {}).setdefault("prior_attempts", []).append(partial)
-        os.remove(rpath)
+    _consume_partial(lay, parent)  # carry partial forward; retries are never blind
 
     parent["context"].setdefault("depends_on", []).append(rid)
     parent["status"] = "queued"
