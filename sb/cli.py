@@ -43,8 +43,12 @@ def main(argv=None):
     p.add_argument("--done", required=True)
 
     p = common(sub.add_parser("seed"))
-    p.add_argument("--plan", required=True)
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--plan", help="path to a plan json to expand into tasks")
+    g.add_argument("--goal", help="raw goal; enqueues one planner task")
     p.add_argument("--repo-state", default="HEAD")
+    p.add_argument("--tier", default="opus",
+                   help="planner tier for --goal (default opus)")
     p.add_argument("--force", action="store_true")
 
     common(sub.add_parser("requeue-stale"))
@@ -131,6 +135,11 @@ def main(argv=None):
         return 0
 
     if a.cmd == "seed":
+        if a.goal:
+            cid = seed.seed_goal(lay, a.goal, repo_state=a.repo_state,
+                                 tier=a.tier)
+            _out({"seeded": [cid]})
+            return 0
         plan = store.read_json(a.plan)
         try:
             seeded = seed.seed(lay, plan, repo_state=a.repo_state,

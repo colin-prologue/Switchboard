@@ -85,3 +85,22 @@ def test_seed_blocked_questions_exit_code(tmp_path, capsys):
         json.dump(plan, f)
     capsys.readouterr()
     assert cli.main(["seed", "--repo", repo, "--plan", plan_path]) == 2
+
+
+def test_cli_seed_goal_enqueues_planner_task(tmp_path, capsys):
+    repo = str(tmp_path)
+    cli.main(["init", "--repo", repo])
+    capsys.readouterr()
+    code, out = run(capsys, "seed", "--repo", repo, "--goal", "build a thing")
+    assert code == 0
+    assert out["seeded"] == ["PLAN-001/PH-0/T-1"]
+    lay = Layout(repo)
+    _, t = store.find_task(lay, "PLAN-001/PH-0/T-1")
+    assert t["done"]["verify"]["kind"] == "plan"
+
+
+def test_cli_seed_requires_plan_xor_goal(tmp_path):
+    repo = str(tmp_path)
+    cli.main(["init", "--repo", repo])
+    with pytest.raises(SystemExit):  # argparse: neither --plan nor --goal given
+        cli.main(["seed", "--repo", repo])
