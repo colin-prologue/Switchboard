@@ -68,8 +68,9 @@ post-M0 track.
     verification branch, no result-schema change. `seed --goal` enqueues exactly
     one bootstrap task (no gate); the gate invariant governs the seeded plan it
     PRODUCES, which a human reviews and expands with the existing `sb seed
-    --plan`. Delivered: `seed.seed_goal`/`allocate_plan_id`, the `--goal`/`--plan`
-    CLI (mutually exclusive, `--tier` default opus), the SKILL routing branch,
+    --plan`. Delivered: `seed.seed_goal`/`allocate_plan_id`, the `--goal`/
+    `--goal-file`/`--plan` CLI (mutually exclusive; `--goal-file` reads a file
+    or stdin for multi-line briefs; `--tier` default opus), the SKILL routing branch,
     `planner-protocol.md` (new, reviewed-not-tested), and the verifier `kind==plan`
     branch. The planner PROMPT is the lowest-confidence artifact — reviewed-not-
     tested, exercised live in D.

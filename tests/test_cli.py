@@ -104,3 +104,44 @@ def test_cli_seed_requires_plan_xor_goal(tmp_path):
     cli.main(["init", "--repo", repo])
     with pytest.raises(SystemExit):  # argparse: neither --plan nor --goal given
         cli.main(["seed", "--repo", repo])
+
+
+def test_cli_seed_goal_file_reads_file(tmp_path, capsys):
+    repo = str(tmp_path)
+    cli.main(["init", "--repo", repo])
+    capsys.readouterr()
+    brief = tmp_path / "brief.md"
+    brief.write_text("Build a rate limiter.\n\nConstraints: no new deps.\n")
+    code, out = run(capsys, "seed", "--repo", repo, "--goal-file", str(brief))
+    assert code == 0
+    assert out["seeded"] == ["PLAN-001/PH-0/T-1"]
+    _, t = store.find_task(Layout(repo), "PLAN-001/PH-0/T-1")
+    assert t["goal"].startswith("Build a rate limiter.")
+    assert "no new deps" in t["goal"]
+
+
+def test_cli_seed_goal_file_stdin(tmp_path, capsys, monkeypatch):
+    import io
+    repo = str(tmp_path)
+    cli.main(["init", "--repo", repo])
+    capsys.readouterr()
+    monkeypatch.setattr("sys.stdin", io.StringIO("Goal from stdin\n"))
+    code, out = run(capsys, "seed", "--repo", repo, "--goal-file", "-")
+    assert code == 0
+    _, t = store.find_task(Layout(repo), "PLAN-001/PH-0/T-1")
+    assert t["goal"] == "Goal from stdin"
+
+
+def test_cli_seed_goal_and_goal_file_are_exclusive(tmp_path):
+    repo = str(tmp_path)
+    cli.main(["init", "--repo", repo])
+    with pytest.raises(SystemExit):
+        cli.main(["seed", "--repo", repo, "--goal", "x", "--goal-file", "f"])
+
+
+def test_cli_seed_empty_goal_file_held(tmp_path):
+    repo = str(tmp_path)
+    cli.main(["init", "--repo", repo])
+    empty = tmp_path / "empty.txt"
+    empty.write_text("   \n")
+    assert cli.main(["seed", "--repo", repo, "--goal-file", str(empty)]) == 2
