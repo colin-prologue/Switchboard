@@ -2,7 +2,7 @@
   "schema_version": "0.3.0",
   "id": "ADR-007",
   "type": "agent",
-  "status": "pending-review",
+  "status": "approved",
   "confidence": "high",
   "timestamp": "2026-06-22T00:00:00+00:00",
   "phase": "plan",
@@ -27,5 +27,13 @@
     {"kind": "doc", "ref": "docs/specs/2026-06-16-sb-worker-loop-design.md", "result": "§7: 'the loop dispatches a planner identically; only the entry point and SDR/plan emission are new'"},
     {"kind": "doc", "ref": "schemas/task.schema.json", "result": "done.verify.kind documented as EXPANSION JOINT (loose string)"},
     {"kind": "doc", "ref": "docs/ROADMAP.md", "result": "A-planner open design question (options a/b/c) — this AgDR resolves it"}
+  ],
+  "feedback": [
+    {
+      "author": {"kind": "human", "id": "colin", "role": "director"},
+      "timestamp": "2026-06-23T00:00:00+00:00",
+      "action": "approve",
+      "note": "Approved at the plan/sb-a-planner gate after reviewing the visual decision explainer. Option A (reserved verify.kind == 'plan', no schema change) accepted; reversibility to an explicit task_type field if many task kinds later emerge was the deciding factor. Open seam acknowledged: the planner PROMPT is reviewed-not-tested and gets its first live exercise in the D exit bar. Binding ratification is the PR merge (PHI-028)."
+    }
   ]
 }
