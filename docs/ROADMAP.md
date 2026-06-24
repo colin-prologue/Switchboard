@@ -12,7 +12,7 @@ specs/ADRs rather than narrating them here.
 | M0 Plan 1 | `sb` engine core (lanes, leases, claims/wait, spawn, seed, query) | **EXECUTED** — 84 tests at landing |
 | M0 Plan 2 | operator surfaces (`brief`/`stamp`/`status`/`notify`); `gate.py` retired | **EXECUTED** (merged via PR #1) — 122 tests |
 | M0 Plan 3-A | worker loop + subagent protocols + `sb release` + `sb block` | **IMPLEMENTED** 2026-06-17 — 140 tests |
-| M0 Plan 3 A-planner | `sb seed --goal` + planner protocol | spec'd in 3-A doc §7; **not built** |
+| M0 Plan 3 A-planner | `sb seed --goal` + planner protocol | **IMPLEMENTED** 2026-06-22 — 192 tests; representation resolved by ADR-007 |
 | M0 Plan 3 A-continuation | research-handoff continuation chain | **IMPLEMENTED** 2026-06-21 — 181 tests |
 | M0 Plan 3-B | guards + quota/liveness | **IMPLEMENTED** 2026-06-18 — 171 tests |
 | M0 Plan 3-C | HDR-010 escalation layer | design sketch; finalize after A |
@@ -48,23 +48,32 @@ post-M0 track.
     human instead of `sb file-result` raising `FileNotFoundError`.
   - *Follow-on:* `max_loop_iterations` is a skill default (200), not in
     `paths.DEFAULT_CONFIG`. Add to config if operator-tunability is wanted.
-- **A-planner** (small follow-on before D): `sb seed --goal` + planner prompt
-  protocol (planning is a task type → writes `plans/<id>.json` + SDR). The loop
-  dispatches a planner identically; only the entry point and SDR/plan emission
-  are new. **The planner MUST emit plan-schema-valid plans** (`schemas/plan.schema.json`,
-  v0.1.0: requires `goal`, `created`, `author.{kind,id}`, and each phase `gate.{type,condition}`;
+- **A-planner** (**IMPLEMENTED** 2026-06-22,
+  [plan](plans/2026-06-22-sb-a-planner.md), 192 tests): `sb seed --goal` +
+  planner prompt protocol (planning is a task type → writes `plans/<id>.json` +
+  SDR). The loop dispatches a planner identically; only the entry point and
+  SDR/plan emission are new. **The planner MUST emit plan-schema-valid plans**
+  (`schemas/plan.schema.json`, v0.1.0: requires `goal`, `created`,
+  `author.{kind,id}`, and each phase `gate.{type,condition}`;
   `additionalProperties:false` throughout) — confirmed strict by the 2026-06-21 spine
-  smoke (a hand-written plan was rejected on these). The planner prompt must carry
+  smoke (a hand-written plan was rejected on these). The planner prompt carries
   the exact schema.
-  - **Open design question (resolve at plan time, likely an AgDR):** how does
-    `sb seed --goal "<goal>"` represent the "plan this goal" unit as a queue task
-    the loop can dispatch? The task schema (v0.2.0) has no plan-task type today.
-    Options to weigh: (a) a convention — a normal task whose `done.verify.kind`
-    is `plan` (or a reserved `source.task_id`) that routes to the planner
-    protocol; (b) a new task field/marker; (c) a dedicated lane/verb. The loop
-    then dispatches the planner identically to any subagent, but the entry point
-    + SDR emission + `plans/<id>.json` write are new. Surfaced 2026-06-21,
-    not yet decided.
+  - **Open design question — RESOLVED by ADR-007 (pending-review):** `sb seed
+    --goal "<goal>"` allocates the next `PLAN-NNN` and enqueues ONE ordinary task
+    (`PLAN-NNN/PH-0/T-1`) whose `done.verify.kind == "plan"` — option (a), the
+    reserved-verify-kind convention, no task-schema change. The loop adds one
+    routing branch (`verify.kind == "plan"` → `planner-protocol.md`). Verification
+    reuses the **standard verifier path** unchanged (the verifier subagent
+    schema-validates the committed plan in the branch worktree) — no engine
+    verification branch, no result-schema change. `seed --goal` enqueues exactly
+    one bootstrap task (no gate); the gate invariant governs the seeded plan it
+    PRODUCES, which a human reviews and expands with the existing `sb seed
+    --plan`. Delivered: `seed.seed_goal`/`allocate_plan_id`, the `--goal`/
+    `--goal-file`/`--plan` CLI (mutually exclusive; `--goal-file` reads a file
+    or stdin for multi-line briefs; `--tier` default opus), the SKILL routing branch,
+    `planner-protocol.md` (new, reviewed-not-tested), and the verifier `kind==plan`
+    branch. The planner PROMPT is the lowest-confidence artifact — reviewed-not-
+    tested, exercised live in D.
 - **A-continuation** (**IMPLEMENTED** 2026-06-21,
   [plan](plans/2026-06-21-sb-continuation.md), 181 tests): research-handoff
   chain. The engine (`sb/spawn.py::spawn_research` — research task + parent

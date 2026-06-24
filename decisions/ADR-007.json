@@ -1,0 +1,39 @@
+{
+  "schema_version": "0.3.0",
+  "id": "ADR-007",
+  "type": "agent",
+  "status": "approved",
+  "confidence": "high",
+  "timestamp": "2026-06-22T00:00:00+00:00",
+  "phase": "plan",
+  "level": "component",
+  "tags": ["planner", "seed", "a-planner", "task-representation", "schema"],
+  "author": {"kind": "model", "id": "claude-opus-4-8", "role": "coder"},
+  "title": "sb seed --goal enqueues one planner task discriminated by done.verify.kind == 'plan' (no task-schema change)",
+  "context": "A-planner needs `sb seed --goal \"<goal>\"` to drop a 'plan this goal' unit into the queue that the existing worker loop can claim and dispatch like any other task. The task schema (v0.2.0) has no plan-task type. The loop currently selects a protocol on ONE axis: `T.context.verifies` present -> verifier-protocol, else task-protocol. A planner is a third protocol but the spec is explicit that 'the loop dispatches a planner identically; only the entry point and SDR/plan emission are new', so the representation must be a normal task the loop already knows how to claim/lease/dispatch/file. The open question (ROADMAP A-planner): convention via an existing field, a new task field/marker, or a dedicated lane/verb.",
+  "options": [
+    {"name": "reserved-verify-kind", "rationale": "`sb seed --goal` allocates the next PLAN-NNN and writes ONE queued task with `done.verify.kind = 'plan'` and `done.verify.ref` = a plan-validation command over `plans/PLAN-NNN.json` (task id `PLAN-NNN/PH-0/T-1`). The loop adds one branch: `verify.kind == 'plan'` -> planner-protocol.md, paralleling the existing `context.verifies` -> verifier branch. `verify.kind` is an explicit EXPANSION JOINT (loose string), so no schema bump. The same field is both the router and the done-condition: done == a plan-schema-valid plan was emitted. Verification reuses the STANDARD verifier path unchanged — on success the engine enqueues a verifier task as it does for any task, and the verifier subagent runs the plan-validation `verify.ref` in the phase-branch worktree (where the planner committed the plan), files pass/fail. Lands at a human GATE; human runs existing `sb seed <plan>` to expand. No auto-expand.", "tradeoff": "The loop now routes protocol on two different fields (`context.verifies` for verifiers, `done.verify.kind` for planners) — a small asymmetry in where the router looks. Acceptable: each discriminator sits on the field that carries its actual meaning (a verifier is defined by what it points at; a planner by its distinct done-condition). A planner task spends one (cheap, mechanical) verifier-subagent pass rather than a free engine-side check — accepted because the engine is git-free and cannot read a plan committed on a branch, so engine-side validation would force embedding the plan in the result (a result-schema bump); reusing the tested verifier path is leaner."},
+    {"name": "new-task-field", "rationale": "Add an explicit `kind`/`task_type` marker to the task schema; the loop routes on it. Self-documenting, no overloading of verify.kind.", "tradeoff": "Forces a task-schema bump (0.2.0 -> 0.3.0) touching every task writer and the validate choke point, for exactly one new task type. Adds a THIRD discrimination axis parallel to `verifies` and `verify.kind` — more ways to special-case a task. Contradicts lean-over-elaborate and the `verifies` precedent of discriminating via existing context/done fields."},
+    {"name": "dedicated-lane-or-verb", "rationale": "A `.tasks/planning` lane and/or a separate `sb plan` verb fully isolates planner work from the normal task flow.", "tradeoff": "Heaviest. A new lane breaks the load-bearing invariant 'directory lane = claim state' (lanes are claim states, not task types). A new verb duplicates seed's machinery and directly contradicts the spec's 'dispatches a planner identically'. Overkill for a small follow-on."}
+  ],
+  "chosen": "reserved-verify-kind",
+  "reasoning": "It is the only option that costs zero schema churn while honoring the spec's 'dispatch identically' constraint. `done.verify.kind` is already the machine done-condition AND an explicit expansion joint; for a planner task the done-condition genuinely IS 'a valid plan exists', so using verify.kind='plan' unifies router and contract rather than overloading. It reuses the loop's existing claim/lease/dispatch/file path untouched and adds exactly one routing branch plus a deterministic plan-validity check — no new lane, no new verb, no schema bump, no verifier subagent. The two-field routing asymmetry is the only cost and is the lean one: each discriminator lives on the field that means it.",
+  "steelman": [
+    {"option": "new-task-field", "strongest_case": "An explicit `task_type` is unambiguous and future-proof: the moment a SECOND non-code task type appears (e.g. a review task, a research task represented as a first-class unit), a single typed field scales cleanly where overloading verify.kind would force more reserved magic strings. If the system is heading toward many task kinds, paying the one schema bump now buys a uniform discriminator and removes the two-field asymmetry the chosen option accepts."},
+    {"option": "dedicated-lane-or-verb", "strongest_case": "Planning is arguably a different KIND of work than execution — it produces a plan, not a code change, and its output feeds `sb seed` rather than a PR. A dedicated `sb plan`/lane makes that boundary explicit and impossible to confuse with execution tasks, and keeps the planner's deterministic 'verify by schema' path from ever being mistaken for code verification. Strong isolation is defensible if planner and worker flows are expected to diverge substantially."}
+  ],
+  "blast_radius": "New engine entry `sb seed --goal` (writes one queued planner task; allocates PLAN-NNN). One routing branch in `.claude/skills/sb-work/SKILL.md` step 6. New `planner-protocol.md` prompt (reviewed-not-tested, exercised live in D). Verification reuses the existing verifier-subagent path with a plan-validation `verify.ref` — NO engine verification branch, NO task-schema change, NO result-schema change. Reversible: if many task kinds emerge, migrate to an explicit `task_type` field with a schema bump; the `verify.kind=='plan'` convention can be read as the marker during migration. Confidence high on the representation; the planner PROMPT quality is the real unknown and is named lower-confidence (D exercises it live, like A's other prompt protocols).",
+  "evidence": [
+    {"kind": "doc", "ref": "docs/specs/2026-06-16-sb-worker-loop-design.md", "result": "§7: 'the loop dispatches a planner identically; only the entry point and SDR/plan emission are new'"},
+    {"kind": "doc", "ref": "schemas/task.schema.json", "result": "done.verify.kind documented as EXPANSION JOINT (loose string)"},
+    {"kind": "doc", "ref": "docs/ROADMAP.md", "result": "A-planner open design question (options a/b/c) — this AgDR resolves it"}
+  ],
+  "feedback": [
+    {
+      "author": {"kind": "human", "id": "colin", "role": "director"},
+      "timestamp": "2026-06-23T00:00:00+00:00",
+      "action": "approve",
+      "note": "Approved at the plan/sb-a-planner gate after reviewing the visual decision explainer. Option A (reserved verify.kind == 'plan', no schema change) accepted; reversibility to an explicit task_type field if many task kinds later emerge was the deciding factor. Open seam acknowledged: the planner PROMPT is reviewed-not-tested and gets its first live exercise in the D exit bar. Binding ratification is the PR merge (PHI-028)."
+    }
+  ]
+}

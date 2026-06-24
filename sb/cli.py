@@ -43,8 +43,15 @@ def main(argv=None):
     p.add_argument("--done", required=True)
 
     p = common(sub.add_parser("seed"))
-    p.add_argument("--plan", required=True)
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--plan", help="path to a plan json to expand into tasks")
+    g.add_argument("--goal", help="raw goal; enqueues one planner task")
+    g.add_argument("--goal-file", dest="goal_file",
+                   help="read the goal from a file ('-' = stdin); enqueues "
+                        "one planner task")
     p.add_argument("--repo-state", default="HEAD")
+    p.add_argument("--tier", default="opus",
+                   help="planner tier for --goal/--goal-file (default opus)")
     p.add_argument("--force", action="store_true")
 
     common(sub.add_parser("requeue-stale"))
@@ -131,6 +138,21 @@ def main(argv=None):
         return 0
 
     if a.cmd == "seed":
+        goal = a.goal
+        if a.goal_file:
+            if a.goal_file == "-":
+                goal = sys.stdin.read().strip()
+            else:
+                with open(a.goal_file, encoding="utf-8") as f:
+                    goal = f.read().strip()
+        if goal is not None:
+            if not goal.strip():
+                print(json.dumps({"held": "empty goal"}), file=sys.stderr)
+                return 2
+            cid = seed.seed_goal(lay, goal, repo_state=a.repo_state,
+                                 tier=a.tier)
+            _out({"seeded": [cid]})
+            return 0
         plan = store.read_json(a.plan)
         try:
             seeded = seed.seed(lay, plan, repo_state=a.repo_state,
