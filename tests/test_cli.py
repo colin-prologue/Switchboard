@@ -145,3 +145,14 @@ def test_cli_seed_empty_goal_file_held(tmp_path):
     empty = tmp_path / "empty.txt"
     empty.write_text("   \n")
     assert cli.main(["seed", "--repo", repo, "--goal-file", str(empty)]) == 2
+
+
+def test_cli_resolve_requeues(lay):
+    from tests.helpers import make_task
+    store.write_task(lay, "paused",
+                     make_task(task_id="PLAN-001/PH-1/T-9", status="paused_for_human"))
+    rc = cli.main(["resolve", "--repo", str(lay.repo), "PLAN-001/PH-1/T-9",
+                   "--rule", "always pin the schema first"])
+    assert rc == 0
+    lane, _ = store.find_task(lay, "PLAN-001/PH-1/T-9")
+    assert lane == "queued"
