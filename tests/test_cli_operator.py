@@ -42,7 +42,7 @@ def test_status_emit_persists_digest(tmp_path, capsys):
     setup_plan(repo)
     capsys.readouterr()
     code, dg = run_json(capsys, "status", "--repo", repo, "--emit")
-    assert code == 0 and dg["schema_version"] == "0.1.0"
+    assert code == 0 and dg["schema_version"] == "0.2.0"
     assert os.path.exists(os.path.join(repo, ".switchboard", "digest.json"))
 
 

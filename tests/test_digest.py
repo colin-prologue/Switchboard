@@ -8,7 +8,7 @@ from tests.helpers import make_agdr, make_task, put_decision
 def test_empty_repo_digest_is_valid_and_quiet(lay):
     cfg = {"lease_ttl_s": 5400}
     d = digest.build_digest(lay, cfg)
-    assert d["schema_version"] == "0.1.0"
+    assert d["schema_version"] == "0.2.0"
     assert d["lanes"] == {"queued": 0, "active": 0, "paused": 0,
                           "done": 0, "failed": 0}
     assert d["gates_ready"] == [] and d["pending_agdrs"] == []
@@ -84,3 +84,22 @@ def test_quota_read_from_file(lay):
                      {"state": "exhausted", "retry_after_s": 600})
     d = digest.build_digest(lay, {})
     assert d["quota"]["state"] == "exhausted"
+
+
+def test_digest_partitions_agdrs_by_escalation_tag(lay):
+    cfg = {}
+    put_decision(lay, make_agdr(rec_id="ADR-201"))                                  # untagged -> flag-async
+    put_decision(lay, make_agdr(rec_id="ADR-202", tags=["escalation:interrupt"]))
+    put_decision(lay, make_agdr(rec_id="ADR-203", tags=["escalation:record-silent"]))
+    dg = digest.build_digest(lay, cfg)
+    assert [a["id"] for a in dg["pending_agdrs"]] == ["ADR-201"]
+    assert [a["id"] for a in dg["interrupt_agdrs"]] == ["ADR-202"]
+    assert [a["id"] for a in dg["record_silent_agdrs"]] == ["ADR-203"]
+
+
+def test_non_pending_agdr_is_not_partitioned(lay):
+    put_decision(lay, make_agdr(rec_id="ADR-204", status="approved",
+                                tags=["escalation:interrupt"]))
+    dg = digest.build_digest(lay, {})
+    assert dg["pending_agdrs"] == [] and dg["interrupt_agdrs"] == []
+    assert dg["record_silent_agdrs"] == []
