@@ -1,0 +1,26 @@
+{
+  "schema_version": "0.3.0",
+  "id": "ADR-008",
+  "type": "agent",
+  "status": "pending-review",
+  "confidence": "high",
+  "timestamp": "2026-06-23T00:00:00+00:00",
+  "phase": "spec",
+  "level": "feature",
+  "tags": ["oversight", "escalation", "agdr", "verification", "leanness"],
+  "author": {"kind": "model", "id": "claude-opus-4-8", "role": "coder"},
+  "title": "Fold the independent tier-judge into the verifier; the author does not self-tier",
+  "context": "HDR-010's amendment requires tier judgment to come from an independent agent (fresh context, model != author, 'same independence rule as the verification lane'). The first C design made this a SEPARATE tier-judge subagent dispatched alongside the verifier at the completion gate. An independent leanness review (2026-06-23) flagged this as two near-identical dispatches reading the same committed diff at the same moment.",
+  "options": [
+    {"name": "separate-tier-judge", "rationale": "A dedicated judge subagent + judge-protocol.md, fully isolated from the verifier.", "tradeoff": "Doubles per-task agent dispatches for any AgDR-emitting task; re-derives the context the verifier already built; a whole new protocol to maintain."},
+    {"name": "fold-into-verifier", "rationale": "The verifier already runs at the gate the design needs (success -> awaiting_verification -> verifier pass -> done) and is already model != author (verifier_tier_for forces it). Tier calibration becomes a secondary section of verifier-protocol.md. Because the verifier is the sole authority and always runs for AgDR-emitting tasks, the author need not self-assess a tier at all (untagged = flag-async, fail-safe).", "tradeoff": "One less degree of isolation (a verifier miscalibrated on correctness could be correlated-miscalibrated on tier); slight prompt-attention load, mitigated by verdict-first/calibration-second ordering."}
+  ],
+  "chosen": "fold-into-verifier",
+  "reasoning": "HDR-010 requires independence FROM THE AUTHOR, which the verifier already satisfies; it does not require independence from the verifier. Correctness and tier-substance are the same deep read of the same diff, so a separate judge re-derives context. Folding deletes judge-protocol.md, halves dispatches, removes the author self-tier/override/feedback machinery, and leaves task-protocol.md untouched. Since this layer is reviewed-not-tested and exercised live in D regardless, the isolation a second dispatch buys is not worth its cost.",
+  "steelman": [
+    {"option": "separate-tier-judge", "strongest_case": "Full isolation means a verifier whose attention is consumed by the correctness verdict cannot drag down tier calibration; if the two jobs ever prove to interfere in practice, a dedicated judge is the clean separation."}
+  ],
+  "blast_radius": "Orchestration-layer only. Adds a section to verifier-protocol.md (reviewed-not-tested); no engine code, no schema change. Reversible: a separate judge can be reintroduced later without undoing this.",
+  "depends_on": ["HDR-010"],
+  "feedback": []
+}

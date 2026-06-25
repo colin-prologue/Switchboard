@@ -1,0 +1,28 @@
+{
+  "schema_version": "0.3.0",
+  "id": "ADR-009",
+  "type": "agent",
+  "status": "pending-review",
+  "confidence": "medium",
+  "timestamp": "2026-06-23T00:10:00+00:00",
+  "phase": "spec",
+  "level": "feature",
+  "tags": ["oversight", "escalation", "notify", "leanness"],
+  "author": {"kind": "model", "id": "claude-opus-4-8", "role": "coder"},
+  "title": "Interrupt-tier is an immediate ping, not a queue block; the phase GATE is the backstop",
+  "context": "HDR-010 defines tier-1 'interrupt' as interrupt-blocking, and its amendment says the judge can 'pause dependents on a call that should have blocked.' Implementing a true queue block requires a third verify disposition (verdict: escalate), a result-schema bump (0.2.0 -> 0.3.0), and an _apply_verdict branch routing the task to paused_for_human. The leanness review quantified the exposure: a successful task sits in awaiting_verification (its dependents cannot claim) until the verifier passes, and the phase GATE already forces the operator to review every pending AgDR before the next phase runs. So a true block only fences same-phase siblings for the window between the AgDR and the gate.",
+  "options": [
+    {"name": "true-block", "rationale": "Route interrupt-tier to paused_for_human, holding the phase open until sb resolve; faithful to HDR-010's literal tier-1.", "tradeoff": "result-schema bump + _apply_verdict branch + block() and fixture updates, to fence only same-phase siblings over a bounded, revertible window."},
+    {"name": "immediate-ping", "rationale": "Interrupt fires an immediate sb notify (now, not at the next digest cycle); the task still proceeds to done. Three tiers become three notify cadences: immediate / digest / gate-only. Zero engine or result-schema change.", "tradeoff": "Softens HDR-010's literal tier-1 from 'blocks the queue' to 'forces immediate attention'; relies on the phase GATE as the backstop and pre-merge revert (HDR-010 tier-2's own escape hatch) for the same-phase-sibling window."}
+  ],
+  "chosen": "immediate-ping",
+  "reasoning": "The dangerous compounding case is already serialized by the verification lane and the phase gate; a true block adds engine + schema surface to cover only same-phase siblings, which HDR-010 tier-2 was explicitly designed to tolerate (work proceeds, overturn bounded by revert). An immediate ping preserves a meaningful three-way distinction (immediate / digest / silent) at zero engine cost. Revisit the true-block only if the phase-gate backstop proves inadequate in practice.",
+  "steelman": [
+    {"option": "true-block", "strongest_case": "A worker that proceeded on a call it should have stopped on can compound real damage among same-phase siblings before the gate; only a hard pause GUARANTEES nothing further runs on that path, which is what HDR-010 literally asked for."}
+  ],
+  "blast_radius": "Notify/digest routing only; no engine task-routing or schema change. Reversible: the true-block path can be added later behind the same tag if needed.",
+  "depends_on": ["HDR-010", "ADR-008"],
+  "feedback": [
+    {"author": {"kind": "human", "id": "colin", "role": "director"}, "timestamp": "2026-06-23T00:12:00+00:00", "action": "approve", "note": "Chose immediate-ping over true-block in the C design session (2026-06-23): the phase gate is the real backstop and the engine/schema cost of a true block is not worth fencing only same-phase siblings. Formal approval at the gate."}
+  ]
+}
