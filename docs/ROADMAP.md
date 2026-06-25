@@ -15,7 +15,7 @@ specs/ADRs rather than narrating them here.
 | M0 Plan 3 A-planner | `sb seed --goal` + planner protocol | **IMPLEMENTED** 2026-06-22 — 192 tests; representation resolved by ADR-007 |
 | M0 Plan 3 A-continuation | research-handoff continuation chain | **IMPLEMENTED** 2026-06-21 — 181 tests |
 | M0 Plan 3-B | guards + quota/liveness | **IMPLEMENTED** 2026-06-18 — 171 tests |
-| M0 Plan 3-C | HDR-010 escalation layer | design sketch; finalize after A |
+| M0 Plan 3-C | HDR-010 escalation layer (tier calibration + `sb resolve`) | **IMPLEMENTED** 2026-06-24 — 208 tests; ADR-008/009/010 |
 | M0 Plan 3-D | M0 exit bar (acceptance) | **not built** |
 
 ## Plan 3 — judgment layer (decomposed into four sub-plans)
@@ -102,13 +102,27 @@ post-M0 track.
   v1 `rabbit_guard.py` deleted; ADR-001/002/003 recorded (pending-review). Plan
   carried 2 errata commits (guard test/logic bugs caught by the implementer
   subagent's spec-compliance refusal — the two-stage review working as designed).
-- **C — HDR-010 escalation layer** (depends on A; uses Plan 2 notify). three-tier
-  interrupt/flag-async/record-silent routing; independent fresh-context agent
-  judges AgDR tier assignments (self-assessment is bootstrap-only). Open Qs
-  (finalize now that A is real): when the tier judge runs (per-AgDR vs batched),
-  bootstrap handoff.
-  - **Intervention-learning loop** (director-directed 2026-06-19; ADR-004,
-    proposed): when the guard hard-stops a thrashing agent and a human resolves
+- **C — HDR-010 escalation layer** (**IMPLEMENTED** 2026-06-24,
+  [spec](specs/2026-06-23-sb-escalation-design.md) /
+  [plan](plans/2026-06-23-sb-escalation.md), 208 tests; depends on A, uses Plan 2
+  notify). three-tier interrupt/flag-async/record-silent routing. A 2026-06-23
+  independent leanness review **collapsed the separate tier-judge into the
+  verifier** (already model≠author via `verifier_tier_for`, so it satisfies
+  HDR-010's independence) — tier calibration is a `verifier-protocol.md` section,
+  not a second dispatch; the author no longer self-tiers (untagged = flag-async,
+  fail-safe). Tier rides the `tags` expansion joint (`escalation:interrupt` /
+  `escalation:record-silent`), **no schema bump** (ADR-010). Interrupt = an
+  immediate `sb notify`, **not** a queue block; the phase GATE is the backstop
+  (ADR-009, director-chosen). Delivered: `sb/digest.py` 3-bucket partition +
+  `sb/notify.py` interrupt-ping (TDD); the verifier calibration section + the
+  worker's immediate-notify wire (reviewed-not-tested, live in D); ADR-008/009/010
+  (pending-review). **Plan errata (review caught, fixed in-branch):** the verifier
+  calibration was first placed outside the dispatch-prompt blockquote and conflicted
+  with step 4 (moved to step 5 inside the prompt, `11c1661`); `sb resolve` first
+  accepted phase GATE tasks — a gate-bypass — now rejected (`f29cce0`).
+  - **Intervention-learning loop** — **IMPLEMENTED** as the `sb resolve` verb
+    (Phase 2; director-directed 2026-06-19; ADR-004): when the guard hard-stops a
+    thrashing agent and a human resolves
     the resulting paused-for-human task, capture the resolution as a tagged
     decision record so it flows into the existing `sb query` grounding and helps
     future similar tasks avoid the same dead-end. Lean MVP reuses the decision
