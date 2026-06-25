@@ -91,9 +91,10 @@ def test_digest_partitions_agdrs_by_escalation_tag(lay):
     put_decision(lay, make_agdr(rec_id="ADR-201"))                                  # untagged -> flag-async
     put_decision(lay, make_agdr(rec_id="ADR-202", tags=["escalation:interrupt"]))
     put_decision(lay, make_agdr(rec_id="ADR-203", tags=["escalation:record-silent"]))
+    put_decision(lay, make_agdr(rec_id="ADR-205", tags=["caching", "escalation:interrupt"]))
     dg = digest.build_digest(lay, cfg)
     assert [a["id"] for a in dg["pending_agdrs"]] == ["ADR-201"]
-    assert [a["id"] for a in dg["interrupt_agdrs"]] == ["ADR-202"]
+    assert [a["id"] for a in dg["interrupt_agdrs"]] == ["ADR-202", "ADR-205"]
     assert [a["id"] for a in dg["record_silent_agdrs"]] == ["ADR-203"]
 
 
