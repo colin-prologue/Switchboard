@@ -56,6 +56,25 @@ with this verdict carried into the retry prompt. The engine enforces this inside
 > 4. Do not fix the work, do not commit, do not run any `sb` command — the worker
 >    files your result and the engine applies the verdict.
 
+## After the verdict — calibrate AgDRs (HDR-010)
+
+This runs ONLY after you have decided the pass/fail verdict above; the verdict is
+primary, this is secondary. If the task under verification listed AgDRs in its
+result `decisions_emitted`, read each one in `decisions/<id>.json` and judge its
+escalation tier by substance — confidence × blast-radius × reversibility:
+
+- **interrupt** — a contestable call the author should arguably have stopped on
+  (touches a frozen contract / security / a hard-to-reverse path, yet proceeded).
+  Add the tag `escalation:interrupt` to the record's `tags` array.
+- **record-silent** — high confidence, local blast, clearly reversible: routine.
+  Add the tag `escalation:record-silent`.
+- **flag-async** — anything in between (the default). Add **no** escalation tag.
+
+Edit the record JSON in place (append the tag to `tags`; do not remove existing
+tags), then `git add decisions/<id>.json` and include it in your commit on this
+branch. Do NOT calibrate any AgDR you authored yourself (no self-judging). If you
+are unsure, leave it untagged (flag-async) — the operator will still see it.
+
 ## Notes for the worker filling this template
 
 - Resolve `{target.*}` by reading the task being verified (`T.context.verifies`)
