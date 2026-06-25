@@ -29,6 +29,22 @@ def _load_decisions(lay):
     return out
 
 
+def _escalation_tier(decision):
+    tags = decision.get("tags") or []
+    if "escalation:interrupt" in tags:
+        return "interrupt"
+    if "escalation:record-silent" in tags:
+        return "record-silent"
+    return "flag-async"
+
+
+def _agdr_view(d):
+    return {"id": d.get("id"), "title": d.get("title"),
+            "confidence": d.get("confidence"),
+            "blast_radius": d.get("blast_radius"),
+            "provenance": d.get("provenance", {})}
+
+
 def build_digest(lay, cfg, now=None):
     now = time.time() if now is None else now
     ttl = cfg.get("lease_ttl_s", 5400)
@@ -69,13 +85,14 @@ def build_digest(lay, cfg, now=None):
             paused_for_human.append({"id": t["id"],
                                      "reason": t.get("failure", {}).get("reason", "")})
 
-    pending_agdrs = [
-        {"id": d.get("id"), "title": d.get("title"),
-         "confidence": d.get("confidence"),
-         "blast_radius": d.get("blast_radius"),
-         "provenance": d.get("provenance", {})}
-        for d in _load_decisions(lay)
-        if d.get("status") == "pending-review"]
+    pending = [d for d in _load_decisions(lay)
+               if d.get("status") == "pending-review"]
+    interrupt_agdrs = [_agdr_view(d) for d in pending
+                       if _escalation_tier(d) == "interrupt"]
+    record_silent_agdrs = [_agdr_view(d) for d in pending
+                           if _escalation_tier(d) == "record-silent"]
+    pending_agdrs = [_agdr_view(d) for d in pending
+                     if _escalation_tier(d) == "flag-async"]
 
     # ADVISORY status hint only (HDR-011): a deterministic detector (Plan 3
     # PostToolUse hook) writes this token-free on a rate-limit signal; the
@@ -84,12 +101,14 @@ def build_digest(lay, cfg, now=None):
     quota = store.read_json(qpath) if os.path.exists(qpath) else {"state": "ok"}
 
     digest = {
-        "schema_version": "0.1.0",
+        "schema_version": "0.2.0",
         "generated_at": now_iso(),
         "lanes": lanes,
         "gates_ready": gates_ready,
         "paused_for_human": paused_for_human,
         "pending_agdrs": pending_agdrs,
+        "interrupt_agdrs": interrupt_agdrs,
+        "record_silent_agdrs": record_silent_agdrs,
         "stale_workers": stale_workers,
         "stale_active": stale_active,
         "quota": quota,

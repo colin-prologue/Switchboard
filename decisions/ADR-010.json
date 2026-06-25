@@ -1,0 +1,28 @@
+{
+  "schema_version": "0.3.0",
+  "id": "ADR-010",
+  "type": "agent",
+  "status": "approved",
+  "confidence": "high",
+  "timestamp": "2026-06-23T00:20:00+00:00",
+  "phase": "spec",
+  "level": "feature",
+  "tags": ["oversight", "escalation", "schema", "representation", "leanness"],
+  "author": {"kind": "model", "id": "claude-opus-4-8", "role": "coder"},
+  "title": "Represent the escalation tier via the tags expansion joint, not a first-class schema field",
+  "context": "Routing needs a persisted marker distinguishing flag-async from record-silent: both are pending-review AgDRs on a done task, and confidence cannot separate them (HDR-010 tier = confidence x blast_radius x reversibility, not confidence alone). The question is whether to add a first-class `tier` enum to the decision record (forcing a 0.3.0 -> 0.4.0 bump, since additionalProperties is false at root) or to encode it in the existing `tags` array, which the schema declares an EXPANSION JOINT ('loose by design, grows without a bump').",
+  "options": [
+    {"name": "tier-field", "rationale": "A typed `tier` enum on the record; unambiguous, self-documenting.", "tradeoff": "Forces a deliberate decision-schema version bump and a migration path for every consumer, for a value the schema already lets us carry loosely."},
+    {"name": "tags-convention", "rationale": "The verifier writes `escalation:interrupt` / `escalation:record-silent` onto `tags`; untagged = flag-async. No new field, no schema bump. Consistent with ADR-007, which likewise chose a no-schema-change convention.", "tradeoff": "Routing parses a tag convention rather than a typed enum; the controlled vocabulary lives in the spec and the verifier protocol, not the schema."}
+  ],
+  "chosen": "tags-convention",
+  "reasoning": "The decision schema's tags field exists precisely so routing-adjacent metadata can grow without a versioned contract change; using it here avoids a bump and mirrors the ADR-007 precedent for representation calls in this project. Promote to a first-class field only if the convention proves insufficient (e.g. the three-way distinction cannot be reconstructed from tags) - deferred until proven necessary.",
+  "steelman": [
+    {"option": "tier-field", "strongest_case": "A typed enum is harder to typo and self-documents the contract; the schema comment itself frames additionalProperties:false as the sanctioned way to make a new field a 'versioned, deliberate act', so a tier field is arguably the disciplined path rather than overloading tags."}
+  ],
+  "blast_radius": "Decision-record convention + the digest read-side partition (escalation: tag -> bucket). No schema bump. Reversible/extensible: a typed field can supersede the tag later via a deliberate bump.",
+  "depends_on": ["HDR-010", "ADR-007"],
+  "feedback": [
+    {"author": {"kind": "human", "id": "colin", "role": "director"}, "timestamp": "2026-06-24T02:00:00+00:00", "action": "approve", "note": "Approved at the Plan 3-C gate (PR #5 director stamp). Tier via the tags expansion joint confirmed — no schema bump, consistent with the ADR-007 no-schema-change precedent; promote to a typed field only if the convention proves insufficient."}
+  ]
+}

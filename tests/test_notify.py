@@ -68,6 +68,35 @@ def test_channels_resolve_known_and_default():
     assert channels.resolve("nope") is channels.stdout
 
 
+def _dg_with(**buckets):
+    base = {"gates_ready": [], "paused_for_human": [], "pending_agdrs": [],
+            "interrupt_agdrs": [], "record_silent_agdrs": [],
+            "stale_workers": [], "quota": {"state": "ok"}}
+    base.update(buckets)
+    return base
+
+
+def test_interrupt_agdr_fires_notification():
+    dg = _dg_with(interrupt_agdrs=[{"id": "ADR-202", "title": "froze a contract",
+                                    "confidence": "low"}])
+    events = notify.collect_events(dg, seen=set())
+    assert any(e["kind"] == "interrupt_agdr" and "ADR-202" in e["body"] for e in events)
+
+
+def test_record_silent_agdr_never_fires():
+    dg = _dg_with(record_silent_agdrs=[{"id": "ADR-203", "title": "renamed a local",
+                                        "confidence": "high"}])
+    events = notify.collect_events(dg, seen=set())
+    assert events == []
+
+
+def test_flag_async_agdr_still_fires():
+    dg = _dg_with(pending_agdrs=[{"id": "ADR-201", "title": "chose snapshots",
+                                  "confidence": "medium"}])
+    events = notify.collect_events(dg, seen=set())
+    assert any(e["kind"] == "pending_agdr" for e in events)
+
+
 def test_macos_channel_degrades_when_osascript_missing(monkeypatch):
     # check=False swallows a non-zero exit but NOT a missing-binary OSError;
     # the channel must still degrade to a no-op (plan invariant: never raise),

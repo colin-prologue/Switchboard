@@ -7,8 +7,8 @@ import os
 import sys
 
 from sb import (brief as brief_mod, channels, claims, digest as digest_mod,
-                notify as notify_mod, paths, query, results, seed, spawn,
-                stamp as stamp_mod, store)
+                notify as notify_mod, paths, query, resolve, results, seed,
+                spawn, stamp as stamp_mod, store)
 
 
 def _out(obj):
@@ -62,6 +62,12 @@ def main(argv=None):
     p = common(sub.add_parser("block"))
     p.add_argument("task_id")
     p.add_argument("--reason", default="subagent returned no result file")
+
+    p = common(sub.add_parser("resolve"))
+    p.add_argument("task_id")
+    p.add_argument("--cause", default=None)
+    p.add_argument("--fix", default=None)
+    p.add_argument("--rule", default=None)
 
     p = common(sub.add_parser("query"))
     p.add_argument("--text", default=None)
@@ -175,6 +181,12 @@ def main(argv=None):
     if a.cmd == "block":
         dest = results.block(lay, cfg, a.task_id, a.reason)
         _out({"task_id": a.task_id, "lane": dest})
+        return 0
+
+    if a.cmd == "resolve":
+        rec_id = resolve.resolve(lay, cfg, a.task_id,
+                                 cause=a.cause, fix=a.fix, rule=a.rule)
+        _out({"task_id": a.task_id, "lane": "queued", "record": rec_id})
         return 0
 
     if a.cmd == "query":

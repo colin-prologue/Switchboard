@@ -102,6 +102,13 @@ Repeat until the operator stops the session:
    - A `paused_for_research` result needs **no special handling** — just
      `sb file-result <T.id>` as normal. The engine spawns the research task and
      re-enqueues this task as a continuation (ADR-005); `OUTCOME=queued`.
+   - **After filing a verifier `pass`:** run `sb notify` once (the `notify` verb
+     takes no `--worker-id`; it reads the digest from disk).
+     If the verifier tagged any AgDR `escalation:interrupt` (HDR-010 tier-1),
+     this surfaces it to the operator now instead of at the next periodic monitor
+     digest. Running it unconditionally is safe — `sb notify` is edge-triggered and
+     idempotent (it fires each new item exactly once). flag-async and record-silent
+     need no action here; the periodic monitor digest carries them.
    - **If the subagent returned with NO valid result file** at `$RESULT_PATH`
      (a guard hook forced it to stop, or it crashed), do **not** leave the task
      wedged:
