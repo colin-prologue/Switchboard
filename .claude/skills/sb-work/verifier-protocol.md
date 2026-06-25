@@ -53,27 +53,24 @@ with this verdict carried into the retry prompt. The engine enforces this inside
 >      `fail`, exactly what is missing or wrong (this text is carried into the
 >      author's retry prompt, so make it actionable).
 >    - `evidence`: e.g. `[{kind:"test", ref:"<cmd>", result:"pass|fail"}]`.
-> 4. Do not fix the work, do not commit, do not run any `sb` command — the worker
->    files your result and the engine applies the verdict.
-
-## After the verdict — calibrate AgDRs (HDR-010)
-
-This runs ONLY after you have decided the pass/fail verdict above; the verdict is
-primary, this is secondary. If the task under verification listed AgDRs in its
-result `decisions_emitted`, read each one in `decisions/<id>.json` and judge its
-escalation tier by substance — confidence × blast-radius × reversibility:
-
-- **interrupt** — a contestable call the author should arguably have stopped on
-  (touches a frozen contract / security / a hard-to-reverse path, yet proceeded).
-  Add the tag `escalation:interrupt` to the record's `tags` array.
-- **record-silent** — high confidence, local blast, clearly reversible: routine.
-  Add the tag `escalation:record-silent`.
-- **flag-async** — anything in between (the default). Add **no** escalation tag.
-
-Edit the record JSON in place (append the tag to `tags`; do not remove existing
-tags), then `git add decisions/<id>.json` and include it in your commit on this
-branch. Do NOT calibrate any AgDR you authored yourself (no self-judging). If you
-are unsure, leave it untagged (flag-async) — the operator will still see it.
+> 4. Do not fix the work and do not commit the work under verification, and do
+>    not run any `sb` command — the worker files your result and the engine
+>    applies the verdict. (The sole exception is the AgDR tag in step 5.)
+> 5. **Calibrate any AgDRs (HDR-010) — only after the verdict above; the verdict
+>    is primary, this is secondary.** If the task listed AgDRs in its result
+>    `decisions_emitted`, read each `decisions/<id>.json` in your worktree and
+>    judge its escalation tier by substance (confidence × blast-radius ×
+>    reversibility):
+>    - **interrupt** — a contestable call the author should arguably have stopped
+>      on (frozen contract / security / hard-to-reverse), yet proceeded: append
+>      `escalation:interrupt` to the record's `tags`.
+>    - **record-silent** — high confidence, local blast, clearly reversible
+>      (routine): append `escalation:record-silent`.
+>    - **flag-async** — anything in between (the default): add NO escalation tag.
+>    Append to `tags` (never remove existing tags); do NOT calibrate an AgDR you
+>    authored yourself; if unsure, leave it untagged (flag-async) — the operator
+>    still sees it. This AgDR tag edit is the ONLY thing you commit: `git add
+>    decisions/<id>.json` and commit it on `{branch}`.
 
 ## Notes for the worker filling this template
 
