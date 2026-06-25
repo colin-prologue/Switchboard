@@ -15,7 +15,7 @@ specs/ADRs rather than narrating them here.
 | M0 Plan 3 A-planner | `sb seed --goal` + planner protocol | **IMPLEMENTED** 2026-06-22 — 192 tests; representation resolved by ADR-007 |
 | M0 Plan 3 A-continuation | research-handoff continuation chain | **IMPLEMENTED** 2026-06-21 — 181 tests |
 | M0 Plan 3-B | guards + quota/liveness | **IMPLEMENTED** 2026-06-18 — 171 tests |
-| M0 Plan 3-C | HDR-010 escalation layer (tier calibration + `sb resolve`) | **IMPLEMENTED** 2026-06-24 — 208 tests; ADR-008/009/010 |
+| M0 Plan 3-C | HDR-010 escalation layer (tier calibration + `sb resolve`) | **IMPLEMENTED + MERGED** (PR #5, 2026-06-24) — 209 tests; ADR-008/009/010 approved |
 | M0 Plan 3-D | M0 exit bar (acceptance) | **not built** |
 
 ## Plan 3 — judgment layer (decomposed into four sub-plans)
