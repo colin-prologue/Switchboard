@@ -2,7 +2,7 @@
   "schema_version": "0.3.0",
   "id": "ADR-008",
   "type": "agent",
-  "status": "pending-review",
+  "status": "approved",
   "confidence": "high",
   "timestamp": "2026-06-23T00:00:00+00:00",
   "phase": "spec",
@@ -22,5 +22,7 @@
   ],
   "blast_radius": "Orchestration-layer only. Adds a section to verifier-protocol.md (reviewed-not-tested); no engine code, no schema change. Reversible: a separate judge can be reintroduced later without undoing this.",
   "depends_on": ["HDR-010"],
-  "feedback": []
+  "feedback": [
+    {"author": {"kind": "human", "id": "colin", "role": "director"}, "timestamp": "2026-06-24T02:00:00+00:00", "action": "approve", "note": "Approved at the Plan 3-C gate (PR #5 director stamp). Fold-into-verifier confirmed — the verifier already satisfies HDR-010's independence (verifier_tier_for forces model != author); the leaner single-dispatch shape is the right call."}
+  ]
 }

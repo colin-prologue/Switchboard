@@ -2,7 +2,7 @@
   "schema_version": "0.3.0",
   "id": "ADR-009",
   "type": "agent",
-  "status": "pending-review",
+  "status": "approved",
   "confidence": "medium",
   "timestamp": "2026-06-23T00:10:00+00:00",
   "phase": "spec",
@@ -23,6 +23,7 @@
   "blast_radius": "Notify/digest routing only; no engine task-routing or schema change. Reversible: the true-block path can be added later behind the same tag if needed.",
   "depends_on": ["HDR-010", "ADR-008"],
   "feedback": [
-    {"author": {"kind": "human", "id": "colin", "role": "director"}, "timestamp": "2026-06-23T00:12:00+00:00", "action": "approve", "note": "Chose immediate-ping over true-block in the C design session (2026-06-23): the phase gate is the real backstop and the engine/schema cost of a true block is not worth fencing only same-phase siblings. Formal approval at the gate."}
+    {"author": {"kind": "human", "id": "colin", "role": "director"}, "timestamp": "2026-06-23T00:12:00+00:00", "action": "approve", "note": "Chose immediate-ping over true-block in the C design session (2026-06-23): the phase gate is the real backstop and the engine/schema cost of a true block is not worth fencing only same-phase siblings. Formal approval at the gate."},
+    {"author": {"kind": "human", "id": "colin", "role": "director"}, "timestamp": "2026-06-24T02:00:00+00:00", "action": "approve", "note": "Formal approval at the Plan 3-C gate (PR #5 director stamp). Re-affirmed after re-reading the tradeoff: tier-1 softens to an immediate ping, the phase GATE is the accepted backstop, same-phase-sibling exposure is bounded and revertible pre-merge."}
   ]
 }

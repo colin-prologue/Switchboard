@@ -2,7 +2,7 @@
   "schema_version": "0.3.0",
   "id": "ADR-010",
   "type": "agent",
-  "status": "pending-review",
+  "status": "approved",
   "confidence": "high",
   "timestamp": "2026-06-23T00:20:00+00:00",
   "phase": "spec",
@@ -22,5 +22,7 @@
   ],
   "blast_radius": "Decision-record convention + the digest read-side partition (escalation: tag -> bucket). No schema bump. Reversible/extensible: a typed field can supersede the tag later via a deliberate bump.",
   "depends_on": ["HDR-010", "ADR-007"],
-  "feedback": []
+  "feedback": [
+    {"author": {"kind": "human", "id": "colin", "role": "director"}, "timestamp": "2026-06-24T02:00:00+00:00", "action": "approve", "note": "Approved at the Plan 3-C gate (PR #5 director stamp). Tier via the tags expansion joint confirmed — no schema bump, consistent with the ADR-007 no-schema-change precedent; promote to a typed field only if the convention proves insufficient."}
+  ]
 }
