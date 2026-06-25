@@ -42,6 +42,11 @@ def _all_keys(dg):
                     "AgDR pending review",
                     f"{a['id']}: {a.get('title') or ''} "
                     f"({a.get('confidence') or '?'} confidence)"))
+    for a in dg.get("interrupt_agdrs", []):
+        out.append((_key("interrupt_agdr", a["id"]), "interrupt_agdr",
+                    "AgDR needs immediate review",
+                    f"{a['id']}: {a.get('title') or ''} "
+                    f"({a.get('confidence') or '?'} confidence)"))
     for w in dg.get("stale_workers", []):
         out.append((_key("fleet_stalled", w["worker_id"]), "fleet_stalled",
                     "Fleet worker stalled",
