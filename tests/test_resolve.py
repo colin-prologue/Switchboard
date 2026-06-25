@@ -34,6 +34,19 @@ def test_resolve_rejects_non_paused(lay):
         resolve.resolve(lay, {}, "PLAN-001/PH-1/T-2")
 
 
+def test_resolve_carries_embedded_result_into_prior_attempts(lay):
+    t = make_task(task_id="PLAN-001/PH-1/T-3", status="paused_for_human")
+    t["attempts"] = 1
+    t["result"] = {"schema_version": "0.2.0", "outcome": "blocked",
+                   "summary": "guard-forced stop: repeat-call tripwire"}
+    store.write_task(lay, "paused", t)
+    resolve.resolve(lay, {}, "PLAN-001/PH-1/T-3")
+    _, task = store.find_task(lay, "PLAN-001/PH-1/T-3")
+    assert "result" not in task                                   # consumed, not left stale
+    assert task["context"]["prior_attempts"][-1]["summary"].startswith("guard-forced stop")
+    assert task["attempts"] == 1                                  # preserved, NOT incremented
+
+
 def test_resolve_writes_optional_record(lay):
     _paused(lay)
     rec_id = resolve.resolve(lay, {"operator": "colin"}, "PLAN-001/PH-1/T-1",

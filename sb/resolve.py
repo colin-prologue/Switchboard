@@ -52,6 +52,15 @@ def resolve(lay, cfg, task_id, cause=None, fix=None, rule=None):
     if cause or fix or rule:
         rec_id = _resolution_record(lay, cfg, task, cause, fix, rule)
 
+    # Carry any embedded result (e.g. the synthesized `blocked` result from
+    # `sb block`) into prior_attempts so the retry is grounded in the prior
+    # failure — the task protocol renders prior_attempts. Mirrors
+    # _requeue_or_fail, but attempts are NOT incremented (a human unblocked a
+    # wedge, not a new failure).
+    if "result" in task:
+        task.setdefault("context", {}).setdefault("prior_attempts", []) \
+            .append(task.pop("result"))
+
     # Re-queue for a grounded retry. attempts preserved (human unblocked a wedge,
     # not a new failure). write-before-move: finalize the body BEFORE the rename
     # into the claimable queued lane (ghost-task invariant).
