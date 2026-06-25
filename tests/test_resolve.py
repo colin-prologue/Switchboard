@@ -21,6 +21,13 @@ def test_resolve_requeues_paused_task(lay):
     assert "claim" not in task
 
 
+def test_resolve_rejects_gate(lay):
+    store.write_task(lay, "paused",
+                     make_task(task_id="PLAN-001/PH-1/GATE", status="paused_for_human"))
+    with pytest.raises(ValueError):
+        resolve.resolve(lay, {}, "PLAN-001/PH-1/GATE")
+
+
 def test_resolve_rejects_non_paused(lay):
     store.write_task(lay, "queued", make_task(task_id="PLAN-001/PH-1/T-2"))
     with pytest.raises(ValueError):

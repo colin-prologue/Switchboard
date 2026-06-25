@@ -10,29 +10,17 @@ a structured write on every un-pause re-trains the rubber-stamping HDR-010 fight
 import datetime as dt
 import os
 
-from sb import leases, store, validate
+from sb import leases, stamp, store, validate
 
 
 def now_iso():
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def _next_decision_id(lay, prefix):
-    n = 0
-    if os.path.isdir(lay.decisions):
-        for f in os.listdir(lay.decisions):
-            if f.startswith(prefix + "-") and f.endswith(".json"):
-                try:
-                    n = max(n, int(f[len(prefix) + 1:-5]))
-                except ValueError:
-                    continue
-    return f"{prefix}-{n + 1:03d}"
-
-
 def _resolution_record(lay, cfg, task, cause, fix, rule):
     rec = {
         "schema_version": "0.3.0",
-        "id": _next_decision_id(lay, "HDR"),
+        "id": stamp.next_hdr_id(lay),
         "type": "human",
         "status": "approved",
         "timestamp": now_iso(),
@@ -51,6 +39,9 @@ def _resolution_record(lay, cfg, task, cause, fix, rule):
 
 
 def resolve(lay, cfg, task_id, cause=None, fix=None, rule=None):
+    if task_id.endswith("/GATE"):
+        raise ValueError(f"{task_id} is a phase GATE — complete it with `sb stamp`, "
+                         f"not resolve; resolve must never re-queue a gate")
     lane, task = store.find_task(lay, task_id)
     if lane != "paused" or task.get("status") != "paused_for_human":
         where = f"lane={lane}, status={task.get('status') if task else None}"
