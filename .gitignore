@@ -1,7 +1,7 @@
 .DS_Store
-.claude/settings.local.json
-.switchboard/
-.venv/
 __pycache__/
+*.py[cod]
+.venv/
+.env
 *.egg-info/
-.claude/scheduled_tasks.lock
+.pytest_cache/
