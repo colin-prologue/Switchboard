@@ -43,7 +43,11 @@ the core's codex block): `command`, `max_turns`, `max_budget_usd`, `turn_timeout
 `read_timeout_ms`, `stall_timeout_ms`.
 
 **Win over the Codex path:** `--max-budget-usd` gives an always-on orchestrator a
-hard per-run cost stop the original lacks.
+hard per-run cost stop the original lacks. Budget is enforced at two layers:
+the flag caps each `claude -p` invocation, and the worker additionally tracks
+the cumulative cost across a session's turns — when the sum reaches
+`max_budget_usd` the worker ends the session normally instead of starting
+another turn (the session cap in §4 then bounds total re-dispatch spend).
 
 ---
 

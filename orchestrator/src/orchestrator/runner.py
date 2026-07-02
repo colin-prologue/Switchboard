@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import signal
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,38 @@ from .types import AgentEvent, ClaudeConfig, EventCallback, TurnResult
 MAX_LINE_BYTES = 10 * 1024 * 1024  # core §10.1
 STDERR_TAIL_CHARS = 500
 NOTIFICATION_TEXT_CHARS = 200
+
+GUARD_PATH = Path(__file__).with_name("guard.py")
+GUARD_MATCHER = "Write|Edit|MultiEdit|NotebookEdit"
+
+
+def _write_guard_settings(workspace: Path) -> Path:
+    """Materialize the PreToolUse containment-guard settings (SPEC.md §1
+    "sandbox/safety invariants -> PreToolUse hooks vetoing tool calls outside
+    the per-issue workspace"). The file lives NEXT TO the workspace — never
+    inside it — so the clone stays clean and the agent cannot commit it.
+    """
+    settings = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": GUARD_MATCHER,
+                    "hooks": [
+                        {
+                            # -I (isolated): keeps the script's directory off
+                            # sys.path, where our types.py would shadow the
+                            # stdlib `types` module.
+                            "type": "command",
+                            "command": f"python3 -I {shlex.quote(str(GUARD_PATH))}",
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    path = workspace.parent / f".{workspace.name}.claude-settings.json"
+    path.write_text(json.dumps(settings))
+    return path
 
 
 def _now() -> datetime:
@@ -78,13 +111,16 @@ class ClaudeRunner:
     def __init__(self, cfg: ClaudeConfig) -> None:
         self.cfg = cfg
 
-    def _build_command(self, resume_session_id: str | None) -> str:
+    def _build_command(self, resume_session_id: str | None,
+                       settings_path: Path | None = None) -> str:
         cmd = self.cfg.command
         cmd += f" --max-turns {self.cfg.max_turns}"
         if self.cfg.max_budget_usd is not None:
             cmd += f" --max-budget-usd {self.cfg.max_budget_usd}"
         if resume_session_id:
             cmd += f" --resume {resume_session_id}"
+        if settings_path is not None:
+            cmd += f" --settings {shlex.quote(str(settings_path))}"
         return cmd
 
     async def run_turn(
@@ -98,7 +134,8 @@ class ClaudeRunner:
         if not workspace.is_dir():
             raise ValueError(f"workspace does not exist or is not a directory: {workspace}")
 
-        command = self._build_command(resume_session_id)
+        settings_path = _write_guard_settings(workspace)
+        command = self._build_command(resume_session_id, settings_path)
 
         def emit(event: str, payload: dict, pid: int | None, usage: dict | None = None) -> None:
             on_event(

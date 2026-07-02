@@ -42,9 +42,12 @@ agent:
 
 # Pass-through execution block for the Claude adapter (see spec/SPEC.md §1).
 # --verbose is required by the CLI for stream-json in -p mode. Documented
-# permission posture (core §10.5): file edits auto-accepted; git/gh commands
-# allowed; everything else falls to the non-interactive default, whose denial
-# fails the attempt (user-input-required = hard failure).
+# permission posture (core §10.5): file edits auto-accepted (bounded by the
+# runner-injected PreToolUse workspace-containment guard); git/gh commands
+# allowed; everything else falls to the non-interactive default — the denial
+# surfaces to the agent, and a session that cannot finish because of it ends
+# in a non-success result, which fails the attempt (user-input-required is
+# never left stalling).
 claude:
   command: "claude -p --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\""
   max_turns: 20

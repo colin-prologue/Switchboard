@@ -85,10 +85,20 @@ def load_workflow(path: Path) -> WorkflowDefinition:
 # --- path/value coercion helpers (core §6.1) ---------------------------------
 
 def _expand_path(value: str) -> str:
-    """Apply `~` and `$VAR` expansion to a filesystem path value (core §6.1)."""
-    value = resolve_env_indirection(value)
-    value = os.path.expanduser(value)
-    return value
+    """Apply `~` and `$VAR` expansion to a filesystem path value (core §6.1).
+
+    Supports embedded references (e.g. `$HOME/workspaces`), not just
+    whole-value `$NAME`. An unresolvable reference is a validation error —
+    never a silent empty string (which would quietly relocate the workspace
+    root into the workflow directory).
+    """
+    value = os.path.expandvars(value)
+    if "$" in value:
+        raise WorkflowError(
+            "workflow_parse_error",
+            f"unresolved environment reference in path value {value!r}",
+        )
+    return os.path.expanduser(value)
 
 
 def _normalize_state_list(values: Any) -> list[str]:
@@ -327,3 +337,9 @@ def validate_dispatch(cfg: Config) -> None:
     claude_cfg = cfg.claude()
     if not claude_cfg.command.strip():
         raise WorkflowError("workflow_parse_error", "claude.command must be non-empty")
+
+    # Force typed-getter validation now so invalid agent/hook/workspace values
+    # fail startup (§6.3) instead of surfacing as per-tick errors forever.
+    cfg.agent()
+    cfg.hooks()
+    cfg.workspace_root()

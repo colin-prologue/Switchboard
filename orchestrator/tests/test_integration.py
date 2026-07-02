@@ -59,6 +59,15 @@ class FakeTracker:
 
     async def add_issue_comment(self, issue_id, body):
         self.comments.append((issue_id, body))
+        # Mimic GitHub: commenting bumps the issue's updatedAt. The parking
+        # marker must survive this (audit finding #1 regression guard).
+        bump = datetime.now(UTC)
+        for coll in (self.states, ):
+            if issue_id in coll:
+                coll[issue_id].updated_at = bump
+        for issue in self.candidates:
+            if issue.id == issue_id:
+                issue.updated_at = bump
 
 
 class FakeRunner:
@@ -253,6 +262,13 @@ async def test_session_cap_parks_issue(harness):
     assert "node-1" not in orch.retry_attempts
 
     await orch._tick()                                # still parked: no re-dispatch
+    assert orch.sessions_per_issue.get("node-1", 0) == 2
+    assert len(tracker.comments) == 1
+
+    # The parking comment itself bumped updatedAt (FakeTracker mimics GitHub);
+    # the issue must STAY parked — the marker is the post-comment value.
+    await orch._tick()
+    assert "node-1" in orch.parked
     assert orch.sessions_per_issue.get("node-1", 0) == 2
     assert len(tracker.comments) == 1
 

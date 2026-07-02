@@ -97,6 +97,7 @@ class Orchestrator:
         self.parked: dict[str, str] = {}  # issue_id -> updated_at iso at park time
 
         self._stopping = False
+        self._workflow_broken: str | None = None  # §5.5 dispatch block reason
         self._tick_wakeup: asyncio.Event = asyncio.Event()
 
     # -- component wiring (rebuilt on workflow reload) -------------------------
@@ -120,9 +121,13 @@ class Orchestrator:
         except (WorkflowError, OSError) as exc:
             if initial:
                 raise
-            # §6.2: invalid reload keeps last known good config, operator-visible
-            log("workflow reload invalid; keeping last good config", error=str(exc))
+            # §6.2: invalid reload keeps last known good config for
+            # reconciliation, but §5.5 blocks NEW dispatches until fixed.
+            self._workflow_broken = str(exc)
+            log("workflow reload invalid; keeping last good config, "
+                "dispatch blocked until fixed", error=str(exc))
             return
+        self._workflow_broken = None
         if self._workflow_mtime is not None and mtime == self._workflow_mtime:
             return
         self._defn, self._cfg, self._workflow_mtime = defn, cfg, mtime
@@ -134,7 +139,9 @@ class Orchestrator:
             if self.workflow_path.stat().st_mtime != self._workflow_mtime:
                 self._load_workflow(initial=False)
         except OSError as exc:
-            log("workflow stat failed; keeping last good config", error=str(exc))
+            self._workflow_broken = str(exc)
+            log("workflow stat failed; keeping last good config, "
+                "dispatch blocked until fixed", error=str(exc))
 
     # -- service lifecycle (core §16.1) -----------------------------------------
 
@@ -189,6 +196,13 @@ class Orchestrator:
     async def _tick(self) -> None:
         self._maybe_reload()
         await self._reconcile_running()
+
+        if self._workflow_broken is not None:
+            # §5.5: workflow file read/YAML errors block new dispatches until
+            # fixed (reconciliation above stays active on last-good config).
+            log("workflow broken; skipping dispatch this tick",
+                error=self._workflow_broken)
+            return
 
         cfg = self._cfg
         assert cfg is not None
@@ -521,9 +535,16 @@ class Orchestrator:
         )
         try:
             await tracker.add_issue_comment(issue.id, body)
+            # Our own comment bumps updatedAt; re-fetch so the park marker is
+            # the POST-comment value — otherwise the next poll would see the
+            # bump, unpark, and loop the cap forever (the exact failure this
+            # extension exists to prevent).
+            refreshed = await tracker.fetch_issue_states_by_ids([issue.id])
+            if refreshed and refreshed[0].updated_at:
+                self.parked[issue.id] = refreshed[0].updated_at.isoformat()
         except TrackerError as exc:
-            log("parking comment failed (issue stays parked)", issue_id=issue.id,
-                error=str(exc))
+            log("parking comment/marker refresh failed (issue stays parked "
+                "on pre-comment marker)", issue_id=issue.id, error=str(exc))
 
     # -- agent events (core §10.4 consumer, §13.5 accounting) -------------------------
 

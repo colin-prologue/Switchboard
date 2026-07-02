@@ -12,6 +12,7 @@ dependency-free (stdlib only).
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -184,5 +185,8 @@ def resolve_env_indirection(value: str) -> str:
 
 
 def sanitize_workspace_key(identifier: str) -> str:
-    """Core §4.2 / §9.5 invariant 3: only [A-Za-z0-9._-], others -> '_'."""
-    return "".join(c if c.isalnum() or c in "._-" else "_" for c in identifier)
+    """Core §4.2 / §9.5 invariant 3: only [A-Za-z0-9._-], others -> '_'.
+
+    Explicit ASCII class — str.isalnum() would admit all Unicode letters.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", identifier)
