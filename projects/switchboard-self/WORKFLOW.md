@@ -44,12 +44,21 @@ agent:
 # --verbose is required by the CLI for stream-json in -p mode. Documented
 # permission posture (core §10.5): file edits auto-accepted (bounded by the
 # runner-injected PreToolUse workspace-containment guard); git/gh commands
-# allowed; everything else falls to the non-interactive default — the denial
-# surfaces to the agent, and a session that cannot finish because of it ends
-# in a non-success result, which fails the attempt (user-input-required is
-# never left stalling).
+# allowed; pytest allowed only via the two pinned `uv run --project
+# orchestrator` prefixes below (relative path anchors it to the workspace
+# clone's own orchestrator project — string-match rules mean an absolute
+# path or another project dir does not match, and compound commands like
+# `cd X && ...` are split and denied on the unlisted part); everything else
+# falls to the non-interactive default — the denial surfaces to the agent,
+# and a session that cannot finish because of it ends in a non-success
+# result, which fails the attempt (user-input-required is never left
+# stalling). Residual risk accepted: pytest executes repo code (conftest,
+# plugins), so a worker can run arbitrary code it first commits to its own
+# branch — that lands in the reviewable diff, and file writes remain
+# bounded by the containment guard. OS-level subprocess sandboxing is
+# deferred (candidate ticket).
 claude:
-  command: "claude -p --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\""
+  command: "claude -p --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
   max_turns: 20
   max_budget_usd: 5
   turn_timeout_ms: 3600000
@@ -83,7 +92,13 @@ before_run hook prepared it). Run only inside this workspace.
    definition of done and the non-goals are hard boundaries. Do not exceed scope.
 4. **Implement** on the current branch. Keep commits scoped and conventional.
 5. **Verify** against the acceptance criteria before handing off. Run the repo's
-   checks/tests. Do not hand off red.
+   checks/tests. Do not hand off red. Your permission allowlist admits exactly
+   two test invocations, run from the workspace root:
+   `uv run --project orchestrator python -m pytest <paths> -q` or
+   `uv run --project orchestrator pytest <paths> -q`. Other commands (bare
+   `pytest`, `python3`, `cd <dir> && ...` chains) will be denied — do not
+   retry variants; if a criterion genuinely needs a command outside this
+   list, say so in the PR/comments instead of burning turns.
 6. **Hand off, don't self-merge.** Commit, push the branch, open a PR with `gh`
    linking this issue, attach evidence of the criteria passing, then move the
    issue's `status:` label to the handoff state defined in `METHODOLOGY.md`
