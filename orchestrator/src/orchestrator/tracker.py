@@ -1,0 +1,310 @@
+"""GitHub Issues tracker adapter.
+
+implements: core §11 (Issue Tracker Integration Contract)
+overridden by: spec/SPEC.md §2 (Tracker binding — Linear -> GitHub Issues)
+
+Binding summary (SPEC.md §2):
+- tracker.kind == "github"; one process == one repo (tracker.repo "owner/name").
+- Workflow STATE has no first-class GitHub equivalent (issues are only
+  open/closed), so it is modeled as `status:<name>` labels. A `status:in-progress`
+  label normalizes to state "in progress" ("-" -> " ").
+- Issue closed -> terminal state "closed"; status:* labels are otherwise
+  non-terminal and only meaningful while the issue is open.
+- `blocked_by` is read from GitHub's native issue-dependencies GraphQL
+  connection: `blockedBy(first:N){ nodes { id number state } }`.
+- `issue.identifier` is the issue NUMBER as a string (not a node id).
+
+Query construction is kept isolated as module-level GraphQL string constants
+(core §11.2 note: "Keep query construction isolated and test the exact query
+fields/types REQUIRED by this specification").
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+import httpx
+
+from orchestrator.types import BlockerRef, Issue, TrackerConfig, TrackerError
+
+# --- GraphQL query/mutation constants (core §11.2) --------------------------
+
+_ISSUE_FIELDS = """
+    id
+    number
+    title
+    body
+    url
+    state
+    createdAt
+    updatedAt
+    labels(first: 50) {
+      nodes { name }
+    }
+    blockedBy(first: 20) {
+      nodes { id number state }
+    }
+"""
+
+_ISSUE_FIELDS_NO_BLOCKERS = """
+    id
+    number
+    title
+    body
+    url
+    state
+    createdAt
+    updatedAt
+    labels(first: 50) {
+      nodes { name }
+    }
+"""
+
+# fetch_candidate_issues / fetch_issues_by_states: paginated repository issues.
+CANDIDATE_ISSUES_QUERY = f"""
+query($owner: String!, $name: String!, $states: [IssueState!]!, $after: String) {{
+  repository(owner: $owner, name: $name) {{
+    issues(first: 50, after: $after, states: $states, orderBy: {{field: CREATED_AT, direction: ASC}}) {{
+      nodes {{
+        {_ISSUE_FIELDS}
+      }}
+      pageInfo {{ hasNextPage endCursor }}
+    }}
+  }}
+}}
+"""
+
+# fetch_issues_by_states terminal cleanup: closed issues, no blockedBy needed.
+CLOSED_ISSUES_QUERY = f"""
+query($owner: String!, $name: String!, $after: String) {{
+  repository(owner: $owner, name: $name) {{
+    issues(first: 50, after: $after, states: [CLOSED], orderBy: {{field: CREATED_AT, direction: ASC}}) {{
+      nodes {{
+        {_ISSUE_FIELDS_NO_BLOCKERS}
+      }}
+      pageInfo {{ hasNextPage endCursor }}
+    }}
+  }}
+}}
+"""
+
+# fetch_issue_states_by_ids: reconciliation by node id.
+ISSUES_BY_IDS_QUERY = f"""
+query($ids: [ID!]!) {{
+  nodes(ids: $ids) {{
+    ... on Issue {{
+      {_ISSUE_FIELDS}
+    }}
+  }}
+}}
+"""
+
+# add_issue_comment: owned Switchboard extension (parking notification).
+ADD_COMMENT_MUTATION = """
+mutation($subjectId: ID!, $body: String!) {
+  addComment(input: {subjectId: $subjectId, body: $body}) {
+    commentEdge { node { id } }
+  }
+}
+"""
+
+
+class GitHubTracker:
+    """Tracker adapter bound to GitHub Issues (SPEC.md §2).
+
+    implements: core §11.1 (required operations) / overridden by: SPEC.md §2
+    """
+
+    def __init__(self, cfg: TrackerConfig, client: httpx.AsyncClient | None = None) -> None:
+        self._cfg = cfg
+        self._owned_client = client is None
+        # core §11.2: network timeout 30000 ms.
+        self._client = client or httpx.AsyncClient(timeout=30.0)
+
+    async def aclose(self) -> None:
+        if self._owned_client:
+            await self._client.aclose()
+
+    # --- required operations (core §11.1) ------------------------------------
+
+    async def fetch_candidate_issues(self) -> list[Issue]:
+        """Open issues in the repo, filtered to `cfg.active_states` post-normalization.
+
+        implements: core §11.1(1) / overridden by: SPEC.md §2 (repo instead of
+        project_slug; state from status:* labels instead of first-class state)
+        """
+        owner, name = self._split_repo()
+        raw_issues = await self._paginate(
+            CANDIDATE_ISSUES_QUERY, {"owner": owner, "name": name, "states": ["OPEN"]}
+        )
+        issues = [self._normalize_issue(raw) for raw in raw_issues]
+        active = set(self._cfg.active_states)
+        return [issue for issue in issues if issue.state in active]
+
+    async def fetch_issues_by_states(self, state_names: list[str]) -> list[Issue]:
+        """Startup terminal cleanup lookup.
+
+        implements: core §11.1(2) / overridden by: SPEC.md §2
+
+        GitHub has no server-side form for arbitrary named states — only
+        open/closed. In this binding, "terminal" == GitHub CLOSED. If any of
+        `state_names` is the terminal "closed" state, this queries CLOSED
+        issues; any other requested state names have no GitHub-side query and
+        are simply not represented (they cannot be closed-backed). An empty
+        request list makes zero API calls (core §17.3).
+        """
+        if not state_names:
+            return []
+        if "closed" not in state_names:
+            return []
+        owner, name = self._split_repo()
+        raw_issues = await self._paginate(CLOSED_ISSUES_QUERY, {"owner": owner, "name": name})
+        return [self._normalize_issue(raw) for raw in raw_issues]
+
+    async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
+        """Active-run reconciliation by GraphQL node id.
+
+        implements: core §11.1(3) / overridden by: SPEC.md §2 (variable type
+        `[ID!]!` rather than core §11.2's Linear `[ID!]`)
+        """
+        if not issue_ids:
+            return []
+        data = await self._request(ISSUES_BY_IDS_QUERY, {"ids": issue_ids})
+        nodes = data.get("nodes")
+        if nodes is None:
+            raise TrackerError("github_unknown_payload", "missing 'nodes' in response data")
+        issues = []
+        for node in nodes:
+            if node is None:  # deleted/inaccessible issue
+                continue
+            issues.append(self._normalize_issue(node))
+        return issues
+
+    # --- owned extension (SPEC.md §4: caps as diagnostic checkpoints) -------
+
+    async def add_issue_comment(self, issue_id: str, body: str) -> None:
+        """Post a parking-notification comment on an issue.
+
+        overridden by: SPEC.md §4 owned extension (not part of core §11.1;
+        core §11.5 keeps tracker writes out of the orchestrator in general,
+        but the "park issue, notify once" behavior is an owned Switchboard
+        extension that needs a single write path).
+        """
+        await self._request(ADD_COMMENT_MUTATION, {"subjectId": issue_id, "body": body})
+
+    # --- pagination -----------------------------------------------------------
+
+    async def _paginate(self, query: str, variables: dict[str, Any]) -> list[dict[str, Any]]:
+        """Follow `pageInfo` across pages, preserving order (core §11.2)."""
+        results: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            page_vars = dict(variables, after=after)
+            data = await self._request(query, page_vars)
+            repository = data.get("repository")
+            if repository is None or "issues" not in repository:
+                raise TrackerError("github_unknown_payload", "missing 'repository.issues' in response data")
+            issues_conn = repository["issues"]
+            nodes = issues_conn.get("nodes")
+            page_info = issues_conn.get("pageInfo")
+            if nodes is None or page_info is None:
+                raise TrackerError("github_unknown_payload", "missing issues nodes/pageInfo")
+            results.extend(nodes)
+            has_next = page_info.get("hasNextPage")
+            end_cursor = page_info.get("endCursor")
+            if not has_next:
+                break
+            if end_cursor is None:
+                raise TrackerError("github_missing_end_cursor", "hasNextPage true but endCursor missing")
+            after = end_cursor
+        return results
+
+    # --- transport --------------------------------------------------------------
+
+    async def _request(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        """POST one GraphQL request; return the `data` object or raise TrackerError.
+
+        Never logs or includes the token in error messages (core §11.4).
+        """
+        headers = {"Authorization": f"Bearer {self._cfg.api_key}"}
+        try:
+            response = await self._client.post(
+                self._cfg.endpoint,
+                json={"query": query, "variables": variables},
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise TrackerError("github_api_request", f"transport error: {exc.__class__.__name__}") from exc
+
+        if response.status_code != 200:
+            raise TrackerError("github_api_status", f"unexpected status {response.status_code}")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise TrackerError("github_unknown_payload", "response body is not valid JSON") from exc
+
+        if not isinstance(payload, dict):
+            raise TrackerError("github_unknown_payload", "response body is not a JSON object")
+
+        errors = payload.get("errors")
+        if errors:
+            raise TrackerError("github_graphql_errors", f"{len(errors)} graphql error(s)")
+
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise TrackerError("github_unknown_payload", "response missing 'data' object")
+
+        return data
+
+    def _split_repo(self) -> tuple[str, str]:
+        owner, _, name = self._cfg.repo.partition("/")
+        return owner, name
+
+    # --- normalization (core §11.3 + SPEC.md §2) -------------------------------
+
+    @staticmethod
+    def _normalize_issue(raw: dict[str, Any]) -> Issue:
+        gh_state = raw.get("state")
+        label_nodes = (raw.get("labels") or {}).get("nodes") or []
+        labels = [n["name"].strip().lower() for n in label_nodes]
+
+        if gh_state == "CLOSED":
+            state = "closed"
+        else:
+            status_labels = sorted(l for l in labels if l.startswith("status:"))
+            if status_labels:
+                state = status_labels[0][len("status:") :].replace("-", " ")
+            else:
+                state = "none"
+
+        blocked_by = [
+            BlockerRef(
+                id=node.get("id"),
+                identifier=str(node["number"]) if node.get("number") is not None else None,
+                state="closed" if node.get("state") == "CLOSED" else "open",
+            )
+            for node in ((raw.get("blockedBy") or {}).get("nodes") or [])
+        ]
+
+        return Issue(
+            id=raw["id"],
+            identifier=str(raw["number"]),
+            title=raw.get("title") or "",
+            description=raw.get("body"),
+            priority=None,
+            state=state,
+            branch_name=None,
+            url=raw.get("url"),
+            labels=labels,
+            blocked_by=blocked_by,
+            created_at=_parse_iso8601(raw.get("createdAt")),
+            updated_at=_parse_iso8601(raw.get("updatedAt")),
+        )
+
+
+def _parse_iso8601(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    return datetime.fromisoformat(value)

@@ -34,10 +34,19 @@ agent:
   max_concurrent_agents: {{MAX_AGENTS}}
   max_turns: 20
   max_retry_backoff_ms: 300000
+  # Owned extension (spec/SPEC.md §4): worker sessions allowed per issue per
+  # process lifetime before the orchestrator parks the issue (one notification
+  # comment, workspace + logs preserved, no re-dispatch until the issue is
+  # updated by a human). Caps are diagnostic checkpoints, not kill switches.
+  max_sessions_per_issue: 3
 
-# Pass-through execution block for the Claude adapter (see SPEC.adapters.md §1).
+# Pass-through execution block for the Claude adapter (see spec/SPEC.md §1).
+# --verbose is required by the CLI for stream-json in -p mode. Documented
+# permission posture (core §10.5): file edits auto-accepted; git/gh commands
+# allowed; everything else falls to the non-interactive default, whose denial
+# fails the attempt (user-input-required = hard failure).
 claude:
-  command: "claude -p --output-format stream-json"
+  command: "claude -p --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\""
   max_turns: 20
   max_budget_usd: 5
   turn_timeout_ms: 3600000

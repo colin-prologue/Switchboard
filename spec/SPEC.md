@@ -98,3 +98,13 @@ These are ours, layered on top, not in the original Symphony spec:
 - **Decision-corpus MCP** (later phase) — a tool the agent queries before
   architecture decisions and writes ADRs into; the cross-task memory that keeps
   parallel agents convergent.
+- **Session cap + parking** (`agent.max_sessions_per_issue`, default 3) — the
+  core's continuation loop re-dispatches an active issue indefinitely; with a
+  paid execution adapter that is an unbounded-spend path. After N worker
+  sessions on one issue in a process lifetime, the orchestrator *parks* it:
+  claim released, workspace and logs preserved, one notification comment posted
+  on the issue, and no re-dispatch until the issue's `updated_at` changes
+  (i.e., a human touched it). Caps are diagnostic checkpoints, not kill
+  switches. The parking comment is the single deliberate exception to the core
+  §11.5 orchestrator-never-writes-the-tracker boundary; nothing else is alive
+  to notify the human at that point.
