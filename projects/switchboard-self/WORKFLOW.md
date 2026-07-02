@@ -7,7 +7,7 @@
 
 tracker:
   kind: github
-  repo: "{{REPO}}"
+  repo: "colin-prologue/Switchboard"
   api_key: $GITHUB_TOKEN
   active_states: ["todo", "in progress"]
   terminal_states: ["done", "closed", "cancelled"]
@@ -17,7 +17,7 @@ polling:
 
 workspace:
   # Per-project root: GitHub issue numbers collide across repos, so namespace by slug.
-  root: "{{WORKSPACE_ROOT}}"
+  root: "/Users/colindwan/Developer/switchboard-workspaces/switchboard-self"
 
 hooks:
   # Hooks run with cwd == the per-issue workspace dir. They derive the issue
@@ -31,7 +31,7 @@ hooks:
   timeout_ms: 120000
 
 agent:
-  max_concurrent_agents: {{MAX_AGENTS}}
+  max_concurrent_agents: 4
   max_turns: 20
   max_retry_backoff_ms: 300000
   # Owned extension (spec/SPEC.md §4): worker sessions allowed per issue per
@@ -58,7 +58,7 @@ claude:
 ---
 
 You are a Switchboard engineering agent working a single GitHub issue from the
-repository `{{REPO}}`. Your workspace is already a clean clone of that repo,
+repository `colin-prologue/Switchboard`. Your workspace is already a clean clone of that repo,
 checked out on branch `switchboard/issue-{{ issue.identifier }}` (the
 before_run hook prepared it). Run only inside this workspace.
 
@@ -76,7 +76,7 @@ before_run hook prepared it). Run only inside this workspace.
    it defines. If it is absent, treat this as a Symphony-light ticket: implement,
    open a PR, hand off to review.
 2. **Load product intent if referenced.** If the issue body contains a
-   `parent-intent: <slug>` line, read `{{CONVENTION_ROOT}}.switchboard/intents/<slug>.md`
+   `parent-intent: <slug>` line, read `self/.switchboard/intents/<slug>.md`
    and treat its constraints (NFRs, environment, failure-branch policy) as binding.
    Do not re-derive or inline them.
 3. **Honor the contract in the issue body.** The acceptance criteria are your
@@ -90,5 +90,5 @@ before_run hook prepared it). Run only inside this workspace.
    (default `status:human-review`). Stop there. A human merges.
 
 <!-- PHASE 4: before choosing any architecture, query the decision-corpus MCP for
-relevant prior ADRs, and record a new ADR into {{CONVENTION_ROOT}}.decisions/ whose
+relevant prior ADRs, and record a new ADR into self/.decisions/ whose
 "forces" are the product-intent constraints. Enable once the corpus tool is installed. -->
