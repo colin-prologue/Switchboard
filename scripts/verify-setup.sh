@@ -76,8 +76,10 @@ for env in projects/*/project.env; do
   PROJ_COUNT=$((PROJ_COUNT+1))
   slug="$(basename "$(dirname "$env")")"
   wf="projects/$slug/WORKFLOW.md"
-  if [ -f "$wf" ] && grep -q '{{' "$wf"; then
-    fail "$slug: WORKFLOW.md has unsubstituted {{placeholders}}"
+  # Only ALL-CAPS scaffold placeholders are failures; lowercase {{ issue.* }}
+  # are legitimate Liquid template variables rendered at dispatch time.
+  if [ -f "$wf" ] && grep -qE '\{\{[A-Z_]+\}\}' "$wf"; then
+    fail "$slug: WORKFLOW.md has unsubstituted {{PLACEHOLDERS}}"
   else
     ok "project '$slug' registered"
   fi
