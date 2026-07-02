@@ -5,6 +5,9 @@ configuration on top of a vendored [Symphony](https://github.com/openai/symphony
 orchestrator** (a one-time copy, now owned — see `spec/PROVENANCE.md`), targeting
 **Claude** (execution) and **GitHub Issues** (tracker).
 
+**New here / setting up? Follow [`SETUP.md`](SETUP.md) top to bottom, and run
+`bash scripts/verify-setup.sh` at any point to see which stage you're on.**
+
 There is no Switchboard runtime. There is:
 
 - **One installed runtime** — the Symphony-derived orchestrator + the Claude

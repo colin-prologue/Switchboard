@@ -6,7 +6,7 @@
 #
 # Usage:
 #   scripts/register-project.sh --slug acme-api --repo acme/api [--base main]
-#                               [--max-agents 4] [--workspace-base /srv/switchboard/workspaces]
+#                               [--max-agents 4] [--workspace-base ~/Developer/switchboard-workspaces]
 #                               [--convention-root <dir>] [--self]
 #
 # --convention-root <dir>  Root a project's .switchboard/ and .decisions/ under <dir>
@@ -19,7 +19,7 @@ set -euo pipefail
 SB_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SLUG="" REPO="" BASE="main" MAX_AGENTS="4" CONVENTION_ROOT=""
-WORKSPACE_BASE="${SB_WORKSPACE_BASE:-/srv/switchboard/workspaces}"
+WORKSPACE_BASE="${SB_WORKSPACE_BASE:-$HOME/Developer/switchboard-workspaces}"
 
 while [ $# -gt 0 ]; do
   case "$1" in

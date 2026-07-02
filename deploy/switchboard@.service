@@ -1,0 +1,21 @@
+# systemd template unit for running one Switchboard project process per instance:
+#   systemctl enable --now switchboard@<slug>
+# Documentation-grade: adjust User/paths for the target devbox (Linux). On macOS
+# we launch scripts/run-project.sh manually or via launchd.
+[Unit]
+Description=Switchboard orchestrator for project %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=switchboard
+WorkingDirectory=/opt/switchboard
+# Provide GITHUB_TOKEN + SB_ORCHESTRATOR_CMD (and any overrides) here:
+EnvironmentFile=/etc/switchboard/%i.env
+ExecStart=/opt/switchboard/scripts/run-project.sh %i
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
