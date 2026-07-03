@@ -132,6 +132,12 @@ class WorkspaceManager:
             await self._kill_process_group(proc)
             log("hook.timeout", hook=hook_name, issue_identifier=identifier, timeout_ms=self.hooks.timeout_ms)
             raise HookError(f"{hook_name} hook timed out after {self.hooks.timeout_ms}ms")
+        except asyncio.CancelledError:
+            # hard-cancelled mid-hook (e.g. shutdown teardown grace expired):
+            # the subprocess must not outlive the await that supervises it
+            await self._kill_process_group(proc)
+            log("hook.cancelled", hook=hook_name, issue_identifier=identifier)
+            raise
 
         if proc.returncode != 0:
             log(

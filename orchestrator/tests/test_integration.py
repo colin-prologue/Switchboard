@@ -13,6 +13,10 @@ extension per SPEC.md §4), not just happy paths:
 - session-cap exhaustion parks the issue: claim released, ONE comment posted,
   workspace preserved, no re-dispatch until updated_at changes
 - restart recovery: startup terminal sweep removes stale workspaces
+- a wedged after_run hook cannot freeze the poll loop: _terminate hands the
+  worker await to a background teardown task that reports back (retry/claim/
+  cleanup) only after the worker fully exits; the claim stays held meanwhile
+- shutdown is bounded by SHUTDOWN_TEARDOWN_GRACE_MS even with a wedged hook
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ import pytest
 import orchestrator.scheduler as scheduler_mod
 from orchestrator.scheduler import Orchestrator
 from orchestrator.types import BlockerRef, Issue, TurnResult
+from orchestrator.workspace import WorkspaceManager
 
 UTC = timezone.utc
 
@@ -206,10 +211,11 @@ async def test_terminal_reconcile_cancels_and_cleans_workspace(harness):
 
     tracker.states = {"node-1": make_issue(1, "closed")}
     await orch._reconcile_running()
-    assert "node-1" not in orch.running
-    assert "node-1" not in orch.claimed
+    assert "node-1" not in orch.running   # authority taken immediately
+    # teardown (worker await + cleanup) reports back asynchronously
+    await wait_for(lambda: not wsdir.exists())  # terminal -> cleaned (§8.5)
+    await wait_for(lambda: "node-1" not in orch.claimed)
     assert "node-1" not in orch.retry_attempts
-    assert not wsdir.exists()  # terminal -> workspace cleaned (§8.5)
 
 
 async def test_nonactive_reconcile_cancels_without_cleanup(harness):
@@ -227,8 +233,10 @@ async def test_nonactive_reconcile_cancels_without_cleanup(harness):
     assert wsdir.is_dir()  # workspace preserved (§8.5 non-active branch)
 
 
-async def test_stall_detection_terminates_and_retries(harness):
+async def test_stall_detection_terminates_and_retries(harness, monkeypatch):
     orch, tracker, runner, _ = harness
+    # keep the retry entry observable (capped at 500ms) once teardown lands
+    monkeypatch.setattr(scheduler_mod, "FAILURE_BASE_BACKOFF_MS", 10000)
     runner.hold = True
     tracker.candidates = [make_issue(1)]
     tracker.states = {"node-1": make_issue(1)}
@@ -245,8 +253,9 @@ async def test_stall_detection_terminates_and_retries(harness):
 
     await orch._reconcile_running()
     assert "node-1" not in orch.running
-    assert "node-1" in orch.retry_attempts  # §8.5: stall -> terminate + retry
     assert "node-1" in orch.claimed
+    # §8.5: stall -> terminate + retry, scheduled once teardown reports back
+    await wait_for(lambda: "node-1" in orch.retry_attempts)
 
 
 async def test_session_cap_parks_issue(harness):
@@ -305,6 +314,113 @@ async def test_active_to_active_state_change_ends_session(tmp_path, monkeypatch)
                    and "node-1" not in orch.claimed)
     assert len(runner.turns) == 1      # no continuation turns after the relabel
     assert runner.turns[0][1] is None  # and that turn was a fresh session
+
+
+def _wedged_after_run(monkeypatch):
+    """Patch WorkspaceManager.run_after_run with a hook that blocks until
+    released, standing in for a wedged after_run script (which the real
+    _run_hook would only abandon at hooks.timeout_ms — 120s in production)."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def wedged(self, ws):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(WorkspaceManager, "run_after_run", wedged)
+    return started, release
+
+
+async def test_stall_terminate_with_wedged_after_run_does_not_block_tick(
+        harness, monkeypatch):
+    """Regression: _terminate awaited the cancelled worker inline, so the
+    after_run hook in its `finally` froze the poll loop for up to
+    hooks.timeout_ms per stalled worker. Termination must return immediately;
+    retry is scheduled only after the worker fully exits, and the claim is
+    held throughout so the issue cannot be re-dispatched into a workspace
+    whose after_run is still running."""
+    orch, tracker, runner, _ = harness
+    # keep the retry entry observable once it appears (capped at 500ms by
+    # max_retry_backoff_ms) instead of the harness's 30ms
+    monkeypatch.setattr(scheduler_mod, "FAILURE_BASE_BACKOFF_MS", 10000)
+    hook_started, hook_release = _wedged_after_run(monkeypatch)
+    runner.hold = True
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1)}
+    await orch._tick()
+    await wait_for(lambda: runner.turns)    # worker genuinely inside run_turn
+    orch.running["node-1"].started_at = datetime.now(UTC) - timedelta(hours=1)
+
+    wf = orch.workflow_path
+    wf.write_text(wf.read_text().replace("stall_timeout_ms: 0",
+                                         "stall_timeout_ms: 1000"))
+    orch._workflow_mtime = None
+    orch._load_workflow(initial=False)
+
+    loop = asyncio.get_event_loop()
+    t0 = loop.time()
+    # bounded so a regression fails instead of hanging the suite
+    await asyncio.wait_for(orch._reconcile_running(), timeout=5.0)
+    assert loop.time() - t0 < 0.5           # the tick is not held hostage
+    assert "node-1" not in orch.running     # authority taken immediately
+    await wait_for(hook_started.is_set)     # worker is wedged in after_run
+
+    # teardown in flight: claim held, retry not yet scheduled
+    assert "node-1" in orch.claimed
+    assert "node-1" not in orch.retry_attempts
+    await orch._tick()                      # a full tick also completes...
+    assert "node-1" not in orch.running     # ...without re-dispatching
+
+    tracker.candidates = []                 # quiesce the eventual retry
+    hook_release.set()
+    await wait_for(lambda: "node-1" in orch.retry_attempts)  # reported back
+
+
+async def test_terminal_cleanup_waits_for_wedged_after_run(harness, monkeypatch):
+    """Terminal reconciliation must not rmtree the workspace while the
+    worker's after_run hook is still running in it — cleanup happens in the
+    background teardown task after the worker exits."""
+    orch, tracker, runner, ws_root = harness
+    hook_started, hook_release = _wedged_after_run(monkeypatch)
+    runner.hold = True
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1)}
+    await orch._tick()
+    wsdir = ws_root / "1"
+    await wait_for(lambda: wsdir.is_dir())
+
+    tracker.states = {"node-1": make_issue(1, "closed")}
+    loop = asyncio.get_event_loop()
+    t0 = loop.time()
+    # bounded so a regression fails instead of hanging the suite
+    await asyncio.wait_for(orch._reconcile_running(), timeout=5.0)
+    assert loop.time() - t0 < 0.5
+    assert "node-1" not in orch.running
+    await wait_for(hook_started.is_set)
+    assert wsdir.is_dir()                   # cleanup must not race the hook
+
+    hook_release.set()
+    await wait_for(lambda: not wsdir.exists())
+    await wait_for(lambda: "node-1" not in orch.claimed)
+    assert "node-1" not in orch.retry_attempts
+
+
+async def test_shutdown_bounded_despite_wedged_after_run(harness, monkeypatch):
+    """SIGTERM shutdown drains workers (whose `finally` runs after_run) for at
+    most the teardown grace, then hard-cancels the stragglers."""
+    orch, tracker, runner, _ = harness
+    monkeypatch.setattr(scheduler_mod, "SHUTDOWN_TEARDOWN_GRACE_MS", 200,
+                        raising=False)
+    _hook_started, _never_released = _wedged_after_run(monkeypatch)
+    runner.hold = True
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1)}
+    await orch._tick()
+    assert "node-1" in orch.running
+    await wait_for(lambda: runner.turns)    # worker genuinely inside run_turn
+
+    await asyncio.wait_for(orch.shutdown(), timeout=2.0)  # not 120s
+    await wait_for(lambda: not orch.running)
 
 
 async def test_startup_terminal_sweep_removes_stale_workspaces(harness):
