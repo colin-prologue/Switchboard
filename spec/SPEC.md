@@ -33,10 +33,10 @@ not exact JSON names. We implement that over the Claude CLI.
 | continuation turn (reuse thread)    | `claude -p --resume <session_id>` (same workspace)                              |
 | turn completed / failed             | terminal `result` message; map `result.subtype` → Succeeded / Failed            |
 | `max_turns`                         | `--max-turns`                                                                   |
-| approval / auto-approve             | non-interactive permission mode + `--allowedTools`; unresolved permission request → fail the attempt (core's "user-input-required = hard failure") |
+| approval / auto-approve             | non-interactive permission mode + `--allowedTools`; a denial is surfaced to the agent (not an attempt-killer) — a session that cannot finish because of one ends in a non-success `result`, which fails the attempt. Never blocks on user input (core §10.5). Ratified 2026-07-03 (AgDR-004 addendum): this soft semantic is what shipped and was validated (PRs #13/#17). |
 | sandbox / safety invariants         | **PreToolUse hooks** vetoing tool calls outside the per-issue workspace (stronger than advisory sandbox) |
-| token accounting                    | `result` message `usage` + `total_cost_usd`; add `--max-budget-usd` as a hard per-run cost ceiling |
-| client-side tracker tool            | the agent's `gh` tooling; the token never enters the workspace                  |
+| cost accounting                     | `result` message `total_cost_usd` drives budget enforcement; `--max-budget-usd` as a hard per-run cost ceiling |
+| client-side tracker tool            | the agent's `gh` tooling; the token is never **written** into the workspace (clone auth via `gh auth setup-git`). The agent process does inherit the orchestrator's environment — Bash-level access to `$GITHUB_TOKEN` is inside the documented v1 guard scope (AgDR-004). |
 
 The front-matter execution block is named **`claude:`** (pass-through, same role as
 the core's codex block): `command`, `max_turns`, `max_budget_usd`, `turn_timeout_ms`,
@@ -65,7 +65,7 @@ Normalized outputs must match the core's issue domain model.
 | workflow **state** (first-class)    | **status label** convention `status:<name>` (GitHub issues are only open/closed)|
 | `active_states`                     | `["triage", "todo", "in progress"]` → labels `status:triage`, `status:todo`, `status:in-progress` |
 | terminal states                     | issue **closed** → terminal; `status:*` gate labels are non-active              |
-| `blocked_by` (Linear `blocks`)      | GitHub **native issue dependencies** (blocked-by) + sub-issues, read via GraphQL|
+| `blocked_by` (Linear `blocks`)      | GitHub **native issue dependencies** (blocked-by), read via GraphQL (`blockedBy` connection) |
 | `issue.identifier`                  | the issue **number** (workspace root is per-project, so numbers don't collide)  |
 | tracker **writes**                  | done by the **agent** via `gh` (move label, comment, link PR), not the orchestrator |
 
@@ -77,7 +77,8 @@ handoff state — the human gate is enforced by state, costing zero orchestrator
 code. See `methodology/METHODOLOGY.md`.
 
 **EMU note:** native issue dependencies are recent; if cross-repo blocked-by is
-restricted in your org, fall back to sub-issues or a `status:blocked` label.
+restricted in your org, fall back to a `status:blocked` label (non-active, so
+it gates dispatch by state — no adapter support required).
 
 ---
 
@@ -121,9 +122,12 @@ These are ours, layered on top, not in the original Symphony spec:
   core's continuation loop re-dispatches an active issue indefinitely; with a
   paid execution adapter that is an unbounded-spend path. After N worker
   sessions on one issue in a process lifetime, the orchestrator *parks* it:
-  claim released, workspace and logs preserved, one notification comment posted
-  on the issue, and no re-dispatch until the issue's `updated_at` changes
-  (i.e., a human touched it). Caps are diagnostic checkpoints, not kill
-  switches. The parking comment is the single deliberate exception to the core
-  §11.5 orchestrator-never-writes-the-tracker boundary; nothing else is alive
-  to notify the human at that point.
+  claim released, workspace preserved (plus the `after_run` run log beside
+  it), one notification comment posted on the issue, and no re-dispatch until
+  the issue's `updated_at` changes (i.e., a human touched it). Caps are
+  diagnostic checkpoints, not kill switches. The parking comment is the single
+  deliberate exception to the core §11.5 orchestrator-never-writes-the-tracker
+  boundary; nothing else is alive to notify the human at that point. Both the
+  parked set and the per-issue counter are in-memory: a process restart
+  re-grants the FULL cap to a previously parked issue, not one bonus session
+  (AgDR-002 addendum).

@@ -20,3 +20,23 @@
 - **Weakest point:** parked-state is in-memory; a process restart forgets it
   and will burn one more session before re-parking. Accepted for v1
   (restart recovery is tracker-driven by design, core §14.3).
+
+## Addendum (2026-07-03, adversarial audit)
+
+- **Blast-radius correction:** the original weakest-point claim ("one more
+  session") was 3× optimistic. `sessions_per_issue` is in-memory alongside
+  `parked`, so a restart re-grants the FULL cap (default 3) to a previously
+  parked issue before it re-parks. The risk stays accepted for v1, but at its
+  actual size: worst-case restart cost per parked issue ≈ cap × per-session
+  budget, not one session.
+- **Cap is always-on:** `max_sessions_per_issue <= 0` (or non-int) coerces to
+  the default rather than disabling parking — an unbounded-spend
+  configuration cannot be expressed. (Previously the scheduler carried a
+  dead "cap disabled" branch that config coercion made unreachable.)
+- **Park race closed:** the orchestrator now holds the issue's claim while
+  the parking comment posts and the post-comment `updated_at` marker is
+  re-fetched; a poll tick landing in that window could previously unpark and
+  burn a bonus session past the cap.
+- **Wording fix:** parking preserves the workspace and the `after_run` run
+  log beside it; there are no per-issue orchestrator logs (the earlier
+  "workspace + logs" phrasing overpromised — the log sink is stderr).

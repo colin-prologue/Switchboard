@@ -21,30 +21,19 @@ There is no Switchboard runtime. There is:
   we chose over a multiplexing daemon).
 
 The dependency arrow points **up**: Symphony is the substrate; the Switchboard
-methodology rides on top as `WORKFLOW.md` + repo conventions + one MCP tool. When
-the orchestration substrate revises, your methodology survives.
+methodology rides on top as `WORKFLOW.md` + repo conventions (+ in a later
+phase, the decision-corpus MCP tool). When the orchestration substrate
+revises, your methodology survives.
 
 ---
 
-## Repurposing this repo (archive the old Switchboard)
+## History: where the old Switchboard went
 
-Preserve history, then clear the root for the fork. From the repo root:
-
-```bash
-# 1. Tag the legacy state so nothing is lost.
-git tag switchboard-legacy-archive
-git push origin switchboard-legacy-archive
-
-# 2. Move everything that was here into ARCHIVE/ in one commit (history retained).
-mkdir -p ARCHIVE
-git ls-files | grep -v '^ARCHIVE/' | xargs -I{} git mv {} ARCHIVE/{} 2>/dev/null || true
-git commit -m "Archive legacy Switchboard; repo becomes Symphony-fork home"
-
-# 3. Drop this setup kit onto the clean root and commit.
-```
-
-The old framework (lanes, Jam, tier-pinned pools) lives in `ARCHIVE/` for
-reference only. Nothing imports from it.
+The legacy framework (lanes, Jam, tier-pinned pools) is **not in the working
+tree**. It is preserved in git only: tag `switchboard-legacy-archive` plus the
+`archive/main` and `archive/switchboard-v2` branches. `main` was reset for the
+Symphony fork rather than moved under an `ARCHIVE/` directory. Nothing imports
+from the legacy code.
 
 ---
 
@@ -56,7 +45,9 @@ switchboard/
     SPEC.md               # OWNED top-level spec (Claude+GitHub bindings + extensions)
     SPEC.core.md          # one-time vendored Symphony orchestration body (paste once)
     PROVENANCE.md         # where SPEC.core.md came from; manual-upgrade notes
-  orchestrator/             # the generated implementation (Phase 1) — empty until built
+  orchestrator/             # the Phase-1 implementation (Python/asyncio; built, tested)
+    src/orchestrator/       #   scheduler, Claude runner, GitHub tracker, workspace mgr
+    tests/                  #   pytest suite (fake tracker/runner/claude)
   workflow/WORKFLOW.base.md # shared methodology base (front-matter defaults + prompt)
   methodology/METHODOLOGY.md# the IDSD workflow the agent follows (referenced by prompt)
   hooks/                    # workspace population — the clean-checkout-per-ticket linchpin
@@ -67,14 +58,15 @@ switchboard/
     register-project.sh     # per-project registration (binding + labels + composed WORKFLOW)
     run-project.sh          # launch ONE project's Symphony process (N-process topology)
     list-projects.sh        # list registered projects
+    new-ticket.sh           # file a correctly-shaped ticket (default entry: status:triage)
+    verify-setup.sh         # setup-stage checklist + composed-workflow drift check
   deploy/switchboard@.service  # optional systemd template for managing the N processes
   projects/<slug>/          # per-project binding (created by register-project.sh)
     project.env
     WORKFLOW.md
   self/                     # DOGFOOD scope: this repo managed as its own project
     .switchboard/intents/   #   its product-intent files
-    .decisions/             #   its ADRs ("why we built Switchboard this way")
-  ARCHIVE/                  # frozen legacy Switchboard, reference only
+    .decisions/             #   its ADRs/AgDRs ("why we built Switchboard this way")
 ```
 
 The product role (`spec/`, `workflow/`, `methodology/`, `hooks/`, `scripts/`) is
@@ -94,11 +86,12 @@ dogfood role lives entirely under `self/`. **`methodology/` never references
   ```
   The hooks rely on `gh auth setup-git`; they do not embed tokens.
 - **Claude CLI** (`claude`) available on PATH for the execution adapter.
-- The **orchestrator** (Phase 1): first paste the Symphony `SPEC.md` body into
-  `spec/SPEC.core.md` (once) and record its origin in `spec/PROVENANCE.md`. Then
-  generate the orchestrator by pointing Claude Code at `spec/SPEC.md` +
-  `spec/SPEC.core.md`, and set `SB_ORCHESTRATOR_CMD` (see below). Until then,
-  registration works but `run-project.sh` has nothing to launch.
+- **uv** (Python project runner) — the orchestrator is a Python/asyncio
+  implementation living in `orchestrator/` (Phase 1 is done; the spec is
+  vendored and `spec/PROVENANCE.md` records its origin). Launch it via:
+  ```bash
+  export SB_ORCHESTRATOR_CMD="uv run --project orchestrator python -m orchestrator"
+  ```
 
 ---
 
@@ -111,12 +104,15 @@ No. You **register** an existing repo. Greenfield or existing, same three steps:
 scripts/register-project.sh --slug acme-api --repo acme/api --base main
 
 # 2. Launch its process (one per project; use a process manager for N — see deploy/).
-SB_ORCHESTRATOR_CMD="node orchestrator/dist/main.js" scripts/run-project.sh acme-api
+SB_ORCHESTRATOR_CMD="uv run --project orchestrator python -m orchestrator" \
+  scripts/run-project.sh acme-api
 
-# 3. File GitHub issues. The army picks them up.
+# 3. File GitHub issues (scripts/new-ticket.sh gives them the right shape).
+#    The army picks them up.
 ```
 
-What is **shared/installed once**: orchestrator, both adapters, corpus engine.
+What is **shared/installed once**: orchestrator + both adapters (the
+decision-corpus engine is a later phase).
 What is **per-project**: the `projects/<slug>/` binding and the `.switchboard/` /
 `.decisions/` conventions inside *that project's own repo*. What is **per-ticket**:
 a fresh workspace, checked out to the right repo by `hooks/after_create.sh`.
@@ -138,12 +134,13 @@ tickets never pollute the general-purpose `methodology/`. See `self/README.md`.
 
 ---
 
-## What runs today vs. after Phase 1
+## Status
 
-- **Today:** archive + restructure, `register-project.sh` (bindings + labels +
-  composed `WORKFLOW.md`, including `--self`), the hooks, the methodology config.
-- **After Phase 1** (orchestrator generated from `spec/SPEC.md` + `spec/SPEC.core.md`):
-  `run-project.sh` has a binary to launch and the loop goes live.
+Phase 1 is complete: the orchestrator is implemented (from `spec/SPEC.md` +
+`spec/SPEC.core.md`), tested, and dogfooding this repo as its own project
+(`projects/switchboard-self/`). The full loop — register, file a ticket via
+`new-ticket.sh`, triage verification, worker dispatch, PR handoff at the human
+gate — runs today. The decision-corpus MCP remains a later phase.
 
 See `spec/SPEC.md` for the bindings and `methodology/METHODOLOGY.md` for the
 gate-state workflow and proportionality rules.
