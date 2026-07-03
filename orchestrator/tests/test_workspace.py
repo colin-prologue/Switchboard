@@ -6,6 +6,7 @@ implements: core §9 (Workspace Management and Safety), §17.2 (test matrix)
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -169,6 +170,30 @@ async def test_after_run_failure_is_ignored(tmp_path: Path) -> None:
     ws = await mgr.create_for_issue("3")
     # Must not raise.
     await mgr.run_after_run(ws)
+
+
+async def test_hook_cancellation_kills_process_group(tmp_path: Path) -> None:
+    """A hard-cancelled hook await (shutdown grace expired) must SIGKILL the
+    hook's process group rather than orphan it past process exit."""
+    pidfile = tmp_path / "hook.pid"
+    mgr = WorkspaceManager(
+        root=tmp_path / "root",
+        hooks=hooks(after_run=f'echo $$ > "{pidfile}"; sleep 30', timeout_ms=60000),
+    )
+    ws = await mgr.create_for_issue("9")
+    task = asyncio.create_task(mgr.run_after_run(ws))
+    deadline = time.monotonic() + 3
+    while not pidfile.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    pid = int(pidfile.read_text().strip())
+
+    start = time.monotonic()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert time.monotonic() - start < 2.0
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)  # group leader must be dead and reaped
 
 
 # --- removal ------------------------------------------------------------------

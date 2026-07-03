@@ -156,6 +156,7 @@ async def test_required_label_removed_midrun_releases_worker(tmp_path, monkeypat
     await orch._tick()
 
     assert "node-1" not in orch.running
-    assert "node-1" not in orch.claimed
+    # claim release reports back from the background teardown task
+    await wait_for(lambda: "node-1" not in orch.claimed)
     assert "node-1" not in orch.retry_attempts
     runner.release.set()
