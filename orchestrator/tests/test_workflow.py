@@ -412,6 +412,7 @@ def test_real_workflow_base_file_loads_after_placeholder_substitution(tmp_path: 
     tracker = cfg.tracker()
     assert tracker.kind == "github"
     assert tracker.repo == "acme/widgets"
+    assert "triage" in tracker.active_states  # verifier sessions are dispatchable
 
     agent = cfg.agent()
     assert agent.max_concurrent_agents == 10

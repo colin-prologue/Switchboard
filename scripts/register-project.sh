@@ -81,6 +81,7 @@ mklabel() { # name color description
 }
 echo "creating gate-state labels on $REPO:"
 mklabel "status:drafting"     "FBCA04" "Gate A: intent/spec being authored (not dispatched)"
+mklabel "status:triage"       "006B75" "Adversarial ticket verification before dispatch"
 mklabel "status:todo"         "0E8A16" "Approved & dispatchable"
 mklabel "status:in-progress"  "1D76DB" "Agent working"
 mklabel "status:plan-review"  "D93F0B" "Gate B: plan/ADR awaiting approval (not dispatched)"
