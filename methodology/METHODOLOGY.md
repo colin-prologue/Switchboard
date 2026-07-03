@@ -40,9 +40,12 @@ an issue becomes dispatchable, an independent verifier session subjects it to
 adversarial scrutiny so the implementing agent only ever sees contracts that
 survived independent review. It is an **active** state (Symphony dispatches it),
 but the dispatched session runs as a *verifier*, not an implementer — the
-`status:triage` branch in the workflow prompt swaps the role. No new daemon or
-scheduler semantics; it reuses the same dispatch machinery, session, and budget
-caps as an implementation session.
+`status:triage` branch in the workflow prompt swaps the role. It reuses the
+same dispatch machinery, session, and budget caps as an implementation session,
+plus one generic scheduler rule it leans on: sessions are *role-pinned* — when
+a worker's issue changes state (even active → active, e.g. a PASS relabel
+`status:triage → status:todo`), the session ends at the next turn boundary and
+normal re-dispatch starts a fresh session in the new role (SPEC.md §4).
 
 The verifier applies the rubric in the prompt body (assumptions, criteria shape,
 testing asks, sizing, boundaries) and routes to exactly one verdict:

@@ -63,7 +63,7 @@ Normalized outputs must match the core's issue domain model.
 | `project_slug` (Linear slug)        | `tracker.repo: owner/name` (one process = one repo)                            |
 | `api_key` / `LINEAR_API_KEY`        | `GITHUB_TOKEN` (GitHub App installation token preferred)                        |
 | workflow **state** (first-class)    | **status label** convention `status:<name>` (GitHub issues are only open/closed)|
-| `active_states`                     | `["todo", "in progress"]` → labels `status:todo`, `status:in-progress`          |
+| `active_states`                     | `["triage", "todo", "in progress"]` → labels `status:triage`, `status:todo`, `status:in-progress` |
 | terminal states                     | issue **closed** → terminal; `status:*` gate labels are non-active              |
 | `blocked_by` (Linear `blocks`)      | GitHub **native issue dependencies** (blocked-by) + sub-issues, read via GraphQL|
 | `issue.identifier`                  | the issue **number** (workspace root is per-project, so numbers don't collide)  |
@@ -102,6 +102,16 @@ These are ours, layered on top, not in the original Symphony spec:
 - **Decision-corpus MCP** (later phase) — a tool the agent queries before
   architecture decisions and writes ADRs into; the cross-task memory that keeps
   parallel agents convergent.
+- **Role-pinned worker sessions** — core §16.5 keeps a session's turn loop
+  running while the issue is in *any* active state. Switchboard renders the
+  turn-1 prompt from dispatch-time state (the `status:triage` branch swaps the
+  agent's role), so the worker instead breaks the loop as soon as the refreshed
+  state differs from the state it was dispatched under — including
+  active → active transitions (triage PASS: `status:triage → status:todo`).
+  The normal continuation re-dispatch then starts a fresh session in the new
+  role instead of feeding continuation prompts to a stale one. Consequence: an
+  agent cannot relabel its own issue mid-session and keep working — a state
+  transition is always a session handoff.
 - **Session cap + parking** (`agent.max_sessions_per_issue`, default 3) — the
   core's continuation loop re-dispatches an active issue indefinitely; with a
   paid execution adapter that is an unbounded-spend path. After N worker
