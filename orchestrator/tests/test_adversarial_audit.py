@@ -112,6 +112,29 @@ Work {{{{ issue.identifier }}}}
 """
 
 
+async def test_required_label_removed_between_turns_stops_continuation(
+        tmp_path, monkeypatch):
+    # PR #23 review (codex): reconciliation only observes label removal at
+    # the next poll tick — the worker's own between-turn refresh must apply
+    # the same gate, or turn 2 fires despite the issue losing eligibility.
+    tmpl = REQUIRED_LABELS_TMPL.replace("max_turns: 1", "max_turns: 2")
+    orch, tracker, runner, _ = _build_harness(
+        tmp_path, monkeypatch, workflow_tmpl=tmpl)
+
+    labeled = make_issue(1)
+    labeled.labels = ["status:todo", "sb"]
+    unlabeled = make_issue(1)
+    unlabeled.labels = ["status:todo"]  # same active state, label pulled
+
+    tracker.candidates = [labeled]
+    tracker.states = {"node-1": unlabeled}  # what the turn-boundary refresh sees
+    await orch._tick()
+    await wait_for(lambda: "node-1" not in orch.running)
+
+    assert len(runner.turns) == 1, "continuation turn fired after label removal"
+    orch._cancel_retry("node-1")
+
+
 async def test_required_label_removed_midrun_releases_worker(tmp_path, monkeypatch):
     orch, tracker, runner, _ = _build_harness(
         tmp_path, monkeypatch, workflow_tmpl=REQUIRED_LABELS_TMPL)

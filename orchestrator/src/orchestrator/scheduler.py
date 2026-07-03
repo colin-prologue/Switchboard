@@ -363,6 +363,15 @@ class Orchestrator:
                 # ends the session; re-dispatch picks it up in the new role.
                 if issue.state.lower() != dispatch_state:
                     break
+                # core §11.1(3): required labels gate continuation here too —
+                # reconciliation only sees label removal at the next poll
+                # tick, which is too late to stop the next turn from firing.
+                t = cfg.tracker()
+                if t.required_labels and not all(
+                        lbl in issue.labels for lbl in t.required_labels):
+                    log("required label removed; ending session normally",
+                        issue_id=issue.id, issue_identifier=issue.identifier)
+                    break
                 if claude_cfg.max_budget_usd is not None \
                         and cumulative_cost >= claude_cfg.max_budget_usd:
                     log("worker budget ceiling reached; ending session normally",
