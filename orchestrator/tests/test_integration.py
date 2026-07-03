@@ -8,6 +8,8 @@ extension per SPEC.md §4), not just happy paths:
 - terminal reconciliation cancels the worker and cleans the workspace;
   non-active reconciliation cancels without cleanup
 - stall detection terminates and queues a retry
+- an active -> active state change ends the session at the turn boundary
+  (role-pinned sessions, SPEC.md §4 — the triage PASS handoff)
 - session-cap exhaustion parks the issue: claim released, ONE comment posted,
   workspace preserved, no re-dispatch until updated_at changes
 - restart recovery: startup terminal sweep removes stale workspaces
@@ -114,13 +116,12 @@ Work {{{{ issue.identifier }}}}: {{{{ issue.title }}}}
 """
 
 
-@pytest.fixture
-def harness(tmp_path, monkeypatch):
+def _build_harness(tmp_path, monkeypatch, workflow_tmpl=WORKFLOW_TMPL):
     monkeypatch.setattr(scheduler_mod, "CONTINUATION_DELAY_MS", 30)
     monkeypatch.setattr(scheduler_mod, "FAILURE_BASE_BACKOFF_MS", 30)
     ws_root = tmp_path / "ws"
     wf = tmp_path / "WORKFLOW.md"
-    wf.write_text(WORKFLOW_TMPL.format(ws_root=ws_root))
+    wf.write_text(workflow_tmpl.format(ws_root=ws_root))
 
     orch = Orchestrator(wf)
     orch._load_workflow(initial=True)
@@ -134,6 +135,11 @@ def harness(tmp_path, monkeypatch):
 
     orch._components = fake_components
     return orch, tracker, runner, ws_root
+
+
+@pytest.fixture
+def harness(tmp_path, monkeypatch):
+    return _build_harness(tmp_path, monkeypatch)
 
 
 async def wait_for(cond, timeout=3.0):
@@ -279,6 +285,27 @@ async def test_session_cap_parks_issue(harness):
     await orch._tick()
     assert "node-1" not in orch.parked
     await wait_for(lambda: not orch.running)
+
+
+async def test_active_to_active_state_change_ends_session(tmp_path, monkeypatch):
+    """Role-pin override (SPEC.md §4): a triage PASS relabel (triage -> todo,
+    both active) ends the session at the turn boundary instead of feeding
+    continuation prompts to the stale verifier role until max_turns."""
+    tmpl = (WORKFLOW_TMPL
+            .replace('active_states: ["todo", "in progress"]',
+                     'active_states: ["triage", "todo", "in progress"]')
+            .replace("max_turns: 1", "max_turns: 3"))
+    orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+
+    tracker.candidates = [make_issue(1, "triage")]
+    tracker.states = {"node-1": make_issue(1, "todo")}  # PASS routed during turn 1
+
+    await orch._tick()
+    tracker.candidates = []  # quiesce: continuation retry finds no candidate
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+    assert len(runner.turns) == 1      # no continuation turns after the relabel
+    assert runner.turns[0][1] is None  # and that turn was a fresh session
 
 
 async def test_startup_terminal_sweep_removes_stale_workspaces(harness):
