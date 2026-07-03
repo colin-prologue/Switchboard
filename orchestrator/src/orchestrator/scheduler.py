@@ -41,6 +41,8 @@ from .workspace import WorkspaceManager
 
 CONTINUATION_DELAY_MS = 1000       # core §8.4 fixed continuation delay
 FAILURE_BASE_BACKOFF_MS = 10000    # core §8.4 failure backoff base
+SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
+                                   # blocks (after_run hooks) before hard-cancel
 
 CONTINUATION_PROMPT = (
     "Continue working the same issue in this workspace. Do not restart from "
@@ -81,6 +83,7 @@ class Orchestrator:
 
         # core §4.1.8 runtime state
         self.running: dict[str, RunningEntry] = {}
+        self.terminating: dict[str, asyncio.Task] = {}  # in-flight teardowns
         self.claimed: set[str] = set()
         self.retry_attempts: dict[str, RetryEntry] = {}
 
@@ -177,9 +180,20 @@ class Orchestrator:
         for retry in list(self.retry_attempts.values()):
             retry.timer_handle.cancel()
         self.retry_attempts.clear()
-        if self.running:
-            await asyncio.gather(*(e.task for e in self.running.values()),
-                                 return_exceptions=True)
+        # Drain workers (their `finally` runs the after_run hook) and in-flight
+        # teardowns, bounded: a wedged hook must not hold SIGTERM hostage for
+        # hooks.timeout_ms. Past the grace, a second cancel interrupts the hook
+        # await, and _run_hook kills the hook's process group on the way out.
+        pending = {e.task for e in self.running.values()} | set(self.terminating.values())
+        if pending:
+            _, not_done = await asyncio.wait(
+                pending, timeout=SHUTDOWN_TEARDOWN_GRACE_MS / 1000)
+            if not_done:
+                log("shutdown teardown grace expired; hard-cancelling",
+                    pending=len(not_done), grace_ms=SHUTDOWN_TEARDOWN_GRACE_MS)
+                for task in not_done:
+                    task.cancel()
+                await asyncio.gather(*not_done, return_exceptions=True)
         self._tick_wakeup.set()
 
     async def _startup_terminal_cleanup(self) -> None:
@@ -484,7 +498,7 @@ class Orchestrator:
                     log("stalled session; terminating and retrying",
                         issue_id=issue_id, issue_identifier=entry.identifier,
                         session_id=entry.session_id)
-                    await self._terminate(issue_id, cleanup=False, retry=True)
+                    self._terminate(issue_id, cleanup=False, retry=True)
 
         if not self.running:
             return
@@ -502,7 +516,7 @@ class Orchestrator:
                 continue
             state = issue.state.lower()
             if state in t.terminal_states:
-                await self._terminate(issue.id, cleanup=True, retry=False)
+                self._terminate(issue.id, cleanup=True, retry=False)
             elif state in t.active_states:
                 # core §11.1(3)/§8.2: required labels gate continuation too —
                 # pulling a required label mid-run stops the worker.
@@ -510,31 +524,59 @@ class Orchestrator:
                         lbl in issue.labels for lbl in t.required_labels):
                     log("required label removed; releasing worker",
                         issue_id=issue.id, issue_identifier=entry.identifier)
-                    await self._terminate(issue.id, cleanup=False, retry=False)
+                    self._terminate(issue.id, cleanup=False, retry=False)
                 else:
                     entry.issue = issue
             else:
-                await self._terminate(issue.id, cleanup=False, retry=False)
+                self._terminate(issue.id, cleanup=False, retry=False)
 
-    async def _terminate(self, issue_id: str, *, cleanup: bool, retry: bool) -> None:
+    def _terminate(self, issue_id: str, *, cleanup: bool, retry: bool) -> None:
         """Take authority over a running worker (§8.5): pop the entry *before*
         cancelling so the done-callback becomes a no-op, then decide retry vs
-        release ourselves — deterministic regardless of callback ordering."""
+        release ourselves — deterministic regardless of callback ordering.
+
+        Cancellation runs the worker's `finally` (the after_run hook, up to
+        hooks.timeout_ms), so awaiting the worker here would wedge the poll
+        loop behind one slow hook. Instead a background teardown task awaits
+        the exit and reports back: retry scheduling / claim release / terminal
+        cleanup happen only after the worker has fully stopped, and the claim
+        stays held meanwhile so the issue cannot be re-dispatched into a
+        workspace whose after_run is still running. Single-authority (core
+        §7.4) holds — the teardown task is orchestrator code on the event
+        loop, not worker code."""
         entry = self.running.pop(issue_id, None)
         if entry is None:
             return
         entry.cancelled_by_reconciliation = True
         entry.task.cancel()
-        await asyncio.gather(entry.task, return_exceptions=True)
-        if retry:
-            attempt = (entry.retry_attempt or 0) + 1
-            self._schedule_retry(issue_id, entry.identifier, attempt=attempt,
-                                 delay_ms=self._failure_backoff_ms(attempt))
-        else:
+        # Resolve the workspace manager NOW, synchronously inside the tick,
+        # against the config the worker actually ran under. The teardown await
+        # can span many ticks (up to hooks.timeout_ms), and each tick may
+        # hot-reload the workflow (§6.2) — resolving wsm after the await would
+        # let a workspace.root/hook change retarget cleanup at the wrong root.
+        wsm = self._components()[1] if cleanup else None
+        teardown = asyncio.create_task(
+            self._finish_termination(issue_id, entry, wsm=wsm, retry=retry))
+        self.terminating[issue_id] = teardown
+        teardown.add_done_callback(
+            lambda t, iid=issue_id: self.terminating.pop(iid, None))
+
+    async def _finish_termination(self, issue_id: str, entry: RunningEntry, *,
+                                  wsm: WorkspaceManager | None, retry: bool) -> None:
+        try:
+            await asyncio.gather(entry.task, return_exceptions=True)
+            if wsm is not None:
+                await wsm.cleanup_terminal([entry.identifier])
+            if retry and not self._stopping:
+                attempt = (entry.retry_attempt or 0) + 1
+                self._schedule_retry(issue_id, entry.identifier, attempt=attempt,
+                                     delay_ms=self._failure_backoff_ms(attempt))
+            else:
+                self.claimed.discard(issue_id)
+        except Exception as exc:  # noqa: BLE001 - teardown must not leak the claim
             self.claimed.discard(issue_id)
-        if cleanup:
-            _, wsm, _ = self._components()
-            await wsm.cleanup_terminal([entry.identifier])
+            log("teardown error; claim released", issue_id=issue_id,
+                issue_identifier=entry.identifier, error=repr(exc))
 
     # -- parking (owned extension, SPEC.md §4) --------------------------------------
 
