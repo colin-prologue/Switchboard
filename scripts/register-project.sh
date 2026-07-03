@@ -76,8 +76,17 @@ sed \
 
 # --- 3. gate-state labels on the repo ---------------------------------------
 mklabel() { # name color description
-  gh label create "$1" --repo "$REPO" --color "$2" --description "$3" --force >/dev/null 2>&1 \
-    && echo "  label $1" || echo "  label $1 (exists/skipped)"
+  # --force makes this idempotent (existing labels are updated, never an
+  # error) — so ANY failure here is real (bad repo, no auth, no permission)
+  # and must abort registration, not print a fake "(exists/skipped)".
+  local out
+  if out=$(gh label create "$1" --repo "$REPO" --color "$2" --description "$3" --force 2>&1); then
+    echo "  label $1"
+  else
+    echo "ERROR creating label $1 on $REPO:" >&2
+    echo "$out" >&2
+    exit 1
+  fi
 }
 echo "creating gate-state labels on $REPO:"
 mklabel "status:drafting"     "FBCA04" "Gate A: intent/spec being authored (not dispatched)"

@@ -10,7 +10,7 @@ tracker:
   repo: "{{REPO}}"
   api_key: $GITHUB_TOKEN
   active_states: ["triage", "todo", "in progress"]
-  terminal_states: ["done", "closed", "cancelled"]
+  terminal_states: ["closed"]  # issue-closed is the ONLY terminal condition (SPEC.md §2); status:* labels are never terminal
 
 polling:
   interval_ms: 30000
