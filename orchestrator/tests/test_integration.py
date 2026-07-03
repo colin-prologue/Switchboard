@@ -64,9 +64,8 @@ class FakeTracker:
         # Mimic GitHub: commenting bumps the issue's updatedAt. The parking
         # marker must survive this (audit finding #1 regression guard).
         bump = datetime.now(UTC)
-        for coll in (self.states, ):
-            if issue_id in coll:
-                coll[issue_id].updated_at = bump
+        if issue_id in self.states:
+            self.states[issue_id].updated_at = bump
         for issue in self.candidates:
             if issue.id == issue_id:
                 issue.updated_at = bump
