@@ -111,7 +111,12 @@ These are ours, layered on top, not in the original Symphony spec:
   The normal continuation re-dispatch then starts a fresh session in the new
   role instead of feeding continuation prompts to a stale one. Consequence: an
   agent cannot relabel its own issue mid-session and keep working — a state
-  transition is always a session handoff.
+  transition is always a session handoff. Forward constraint for any
+  orchestrator-applied dispatch label (e.g. issue #14's `status:in-progress`
+  visibility marker): the label must be applied **before** the worker captures
+  dispatch-time state, or the captured state must be defined as the post-label
+  value — otherwise every session self-terminates after turn 1. Adjust the
+  labeling mechanism, not the role-pin rule (AgDR-005).
 - **Session cap + parking** (`agent.max_sessions_per_issue`, default 3) — the
   core's continuation loop re-dispatches an active issue indefinitely; with a
   paid execution adapter that is an unbounded-spend path. After N worker
