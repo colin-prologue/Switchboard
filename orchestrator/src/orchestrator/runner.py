@@ -118,7 +118,7 @@ class ClaudeRunner:
         if self.cfg.max_budget_usd is not None:
             cmd += f" --max-budget-usd {self.cfg.max_budget_usd}"
         if resume_session_id:
-            cmd += f" --resume {resume_session_id}"
+            cmd += f" --resume {shlex.quote(resume_session_id)}"
         if settings_path is not None:
             cmd += f" --settings {shlex.quote(str(settings_path))}"
         return cmd
@@ -199,15 +199,24 @@ class ClaudeRunner:
                     pass
 
         async def reap() -> None:
+            # A process still alive here is being abandoned (result already
+            # decided, or an exception is unwinding) — it must not outlive the
+            # turn, so escalate to SIGKILL rather than leaving a zombie agent
+            # holding the workspace while a retry dispatches a second one.
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
-                pass
+                await kill_process_group()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
             stderr_task.cancel()
             try:
                 await stderr_task
             except (asyncio.CancelledError, Exception):
                 pass
+            settings_path.unlink(missing_ok=True)  # guard sidecar is per-turn
 
         loop = asyncio.get_event_loop()
         turn_deadline = loop.time() + self.cfg.turn_timeout_ms / 1000.0
@@ -221,7 +230,17 @@ class ClaudeRunner:
             while True:
                 remaining_turn = turn_deadline - loop.time()
                 if remaining_turn <= 0:
-                    raise asyncio.TimeoutError("turn_timeout")
+                    # Deadline expired between reads: same handling as the
+                    # in-read timeout below — kill the agent and fail the turn
+                    # (raising here would abandon a live subprocess).
+                    await kill_process_group()
+                    await reap()
+                    emit(
+                        "turn_failed",
+                        {"error": "turn_timeout", "stderr": _stderr_tail(stderr_chunks)},
+                        pid,
+                    )
+                    return TurnResult(status="timed_out", session_id=session_id, error="turn_timeout")
 
                 if first_line:
                     read_timeout = min(self.cfg.read_timeout_ms / 1000.0, remaining_turn)

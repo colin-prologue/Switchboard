@@ -142,18 +142,23 @@ class Config:
         required_labels_raw = raw.get("required_labels", [])
         required_labels = _normalize_state_list(required_labels_raw) if isinstance(required_labels_raw, list) else []
 
+        # Defaults match the SPEC.md §2 binding: triage is an active state
+        # (AgDR-006), and issue-closed is the ONLY terminal condition — the
+        # core §5.3.1 Linear defaults ("done"/"cancelled") would make a stray
+        # status:done label on an OPEN issue terminal, and reconciliation
+        # would destroy its in-flight workspace.
         active_states_raw = raw.get("active_states")
         active_states = (
             _normalize_state_list(active_states_raw)
             if isinstance(active_states_raw, list)
-            else ["todo", "in progress"]
+            else ["triage", "todo", "in progress"]
         )
 
         terminal_states_raw = raw.get("terminal_states")
         terminal_states = (
             _normalize_state_list(terminal_states_raw)
             if isinstance(terminal_states_raw, list)
-            else ["done", "closed", "cancelled"]
+            else ["closed"]
         )
 
         return TrackerConfig(
@@ -174,6 +179,12 @@ class Config:
         value = raw.get("interval_ms", 30000)
         if not isinstance(value, int) or isinstance(value, bool):
             return 30000
+        if value <= 0:
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"polling.interval_ms must be a positive integer, got {value!r}"
+                " (a non-positive interval hot-loops the tracker API)",
+            )
         return value
 
     # -- workspace ---------------------------------------------------------------
@@ -224,6 +235,12 @@ class Config:
         max_concurrent_agents = raw.get("max_concurrent_agents", 10)
         if isinstance(max_concurrent_agents, bool) or not isinstance(max_concurrent_agents, int):
             max_concurrent_agents = 10
+        elif max_concurrent_agents <= 0:
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"agent.max_concurrent_agents must be a positive integer, got"
+                f" {max_concurrent_agents!r} (0 would poll forever without dispatching)",
+            )
 
         max_turns = raw.get("max_turns", 20)
         if isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns <= 0:
@@ -338,8 +355,9 @@ def validate_dispatch(cfg: Config) -> None:
     if not claude_cfg.command.strip():
         raise WorkflowError("workflow_parse_error", "claude.command must be non-empty")
 
-    # Force typed-getter validation now so invalid agent/hook/workspace values
-    # fail startup (§6.3) instead of surfacing as per-tick errors forever.
+    # Force typed-getter validation now so invalid agent/hook/workspace/polling
+    # values fail startup (§6.3) instead of surfacing as per-tick errors forever.
     cfg.agent()
     cfg.hooks()
     cfg.workspace_root()
+    cfg.polling_interval_ms()

@@ -1,7 +1,7 @@
 """Orchestration state machine, poll loop, retries, reconciliation.
 
 implements: core §7 (state machine), §8 (polling/scheduling/reconciliation),
-            §16 (reference algorithms), §13.5 (token accounting), §6.2 (reload)
+            §16 (reference algorithms), §6.2 (reload)
 overridden by: spec/SPEC.md §1 (worker turns are `claude -p` invocations resumed
             by session id), SPEC.md §4 owned extension: per-issue session cap
             with parking ("caps as diagnostic checkpoints" — when
@@ -19,11 +19,11 @@ is mutated only from the event loop; workers report outcomes, they never mutate.
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+
+import httpx
 
 from .log import log
 from .prompt import render_prompt
@@ -35,7 +35,6 @@ from .types import (
     RetryEntry,
     TrackerError,
     WorkflowError,
-    Workspace,
 )
 from .workflow import Config, load_workflow, validate_dispatch
 from .workspace import WorkspaceManager
@@ -53,19 +52,15 @@ CONTINUATION_PROMPT = (
 
 @dataclass
 class RunningEntry:
-    """core §16.4 running-entry shape (claude-bound field names)."""
+    """core §16.4 running-entry shape (claude-bound field names), trimmed to
+    the fields orchestration actually consumes (the §13.3 snapshot surface and
+    its token accounting were removed as unused — restore from git if a status
+    endpoint lands)."""
     task: asyncio.Task
     identifier: str
     issue: Issue
     session_id: str | None = None
-    agent_pid: int | None = None
-    last_event: str | None = None
-    last_event_at: datetime | None = None
-    last_message: str = ""
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
-    turn_count: int = 0
+    last_event_at: datetime | None = None  # stall-detection anchor (§8.5)
     retry_attempt: int | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     cancelled_by_reconciliation: bool = False
@@ -88,9 +83,6 @@ class Orchestrator:
         self.running: dict[str, RunningEntry] = {}
         self.claimed: set[str] = set()
         self.retry_attempts: dict[str, RetryEntry] = {}
-        self.completed: set[str] = set()
-        self.totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-                       "seconds_running": 0.0, "cost_usd": 0.0}
 
         # owned extension state (SPEC.md §4 session cap / parking)
         self.sessions_per_issue: dict[str, int] = {}
@@ -99,13 +91,17 @@ class Orchestrator:
         self._stopping = False
         self._workflow_broken: str | None = None  # §5.5 dispatch block reason
         self._tick_wakeup: asyncio.Event = asyncio.Event()
+        # One shared HTTP client for the process lifetime (core §11.2 timeout).
+        # Per-call GitHubTracker instances borrow it, so pools/handshakes are
+        # reused and there is exactly one thing to close at shutdown.
+        self._http: httpx.AsyncClient | None = None
 
-    # -- component wiring (rebuilt on workflow reload) -------------------------
+    # -- component wiring (config-derived views over shared resources) ----------
 
     def _components(self) -> tuple[GitHubTracker, WorkspaceManager, ClaudeRunner]:
         cfg = self._cfg
         assert cfg is not None
-        tracker = GitHubTracker(cfg.tracker())
+        tracker = GitHubTracker(cfg.tracker(), client=self._http)
         wsm = WorkspaceManager(cfg.workspace_root(), cfg.hooks())
         runner = ClaudeRunner(cfg.claude())
         return tracker, wsm, runner
@@ -152,19 +148,26 @@ class Orchestrator:
         log("orchestrator starting", workflow=str(self.workflow_path),
             repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()))
 
-        await self._startup_terminal_cleanup()
+        self._http = httpx.AsyncClient(timeout=30.0)  # core §11.2 network timeout
+        try:
+            await self._startup_terminal_cleanup()
 
-        while not self._stopping:
-            try:
-                await self._tick()
-            except Exception as exc:  # a tick must never kill the service (§14.2)
-                log("tick error", error=repr(exc))
-            interval = (self._cfg.polling_interval_ms() if self._cfg else 30000) / 1000
-            self._tick_wakeup.clear()
-            try:
-                await asyncio.wait_for(self._tick_wakeup.wait(), timeout=interval)
-            except asyncio.TimeoutError:
-                pass
+            while not self._stopping:
+                try:
+                    await self._tick()
+                except Exception as exc:  # a tick must never kill the service (§14.2)
+                    log("tick error", error=repr(exc))
+                interval = (self._cfg.polling_interval_ms() if self._cfg else 30000) / 1000
+                self._tick_wakeup.clear()
+                try:
+                    await asyncio.wait_for(self._tick_wakeup.wait(), timeout=interval)
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            # shutdown() has already cancelled and gathered workers by the
+            # time the loop observes _stopping, so no request is in flight.
+            await self._http.aclose()
+            self._http = None
 
     async def shutdown(self) -> None:
         self._stopping = True
@@ -220,6 +223,8 @@ class Orchestrator:
             return
 
         for issue in self._sort_for_dispatch(issues):
+            if self._stopping:  # shutdown arrived while we awaited the fetch
+                return
             if self._available_slots() <= 0:
                 break
             if self._should_dispatch(issue):
@@ -290,9 +295,11 @@ class Orchestrator:
     async def _dispatch(self, issue: Issue, attempt: int | None) -> None:
         cfg = self._cfg
         assert cfg is not None
+        # The cap is always positive (workflow.py coerces invalid values back
+        # to the default) — parking cannot be configured off.
         cap = cfg.agent().max_sessions_per_issue
         spent = self.sessions_per_issue.get(issue.id, 0)
-        if cap > 0 and spent >= cap:
+        if spent >= cap:
             await self._park(issue, f"session cap reached ({spent}/{cap})")
             return
 
@@ -337,10 +344,7 @@ class Orchestrator:
                     ws.path, prompt, resume_session_id=session_id,
                     on_event=self._on_agent_event, issue_id=issue.id)
                 cumulative_cost += result.cost_usd
-                self.totals["cost_usd"] += result.cost_usd
                 entry = self.running.get(issue.id)
-                if entry:
-                    entry.turn_count = turn_number
                 if result.status != "succeeded":
                     raise WorkerFailure(result.error or result.status)
                 session_id = result.session_id or session_id
@@ -376,8 +380,6 @@ class Orchestrator:
         entry = self.running.pop(issue_id, None)
         if entry is None:
             return
-        elapsed = (datetime.now(timezone.utc) - entry.started_at).total_seconds()
-        self.totals["seconds_running"] += elapsed
 
         if entry.cancelled_by_reconciliation or task.cancelled():
             self.claimed.discard(issue_id)
@@ -387,18 +389,15 @@ class Orchestrator:
 
         exc = task.exception()
         if exc is None:
-            self.completed.add(issue_id)
             self._schedule_retry(issue_id, entry.identifier, attempt=1,
-                                 delay_ms=CONTINUATION_DELAY_MS,
-                                 error=None)
+                                 delay_ms=CONTINUATION_DELAY_MS)
             log("worker completed", issue_id=issue_id,
                 issue_identifier=entry.identifier,
                 session_id=entry.session_id, outcome="completed")
         else:
             attempt = (entry.retry_attempt or 0) + 1
             self._schedule_retry(issue_id, entry.identifier, attempt=attempt,
-                                 delay_ms=self._failure_backoff_ms(attempt),
-                                 error=str(exc))
+                                 delay_ms=self._failure_backoff_ms(attempt))
             log("worker failed", issue_id=issue_id,
                 issue_identifier=entry.identifier,
                 session_id=entry.session_id, outcome="failed", error=str(exc))
@@ -417,7 +416,7 @@ class Orchestrator:
             entry.timer_handle.cancel()
 
     def _schedule_retry(self, issue_id: str, identifier: str, attempt: int,
-                        delay_ms: int, error: str | None) -> None:
+                        delay_ms: int) -> None:
         self._cancel_retry(issue_id)
         self.claimed.add(issue_id)
         handle = asyncio.get_event_loop().call_later(
@@ -425,8 +424,7 @@ class Orchestrator:
             lambda: asyncio.ensure_future(self._on_retry_timer(issue_id)))
         self.retry_attempts[issue_id] = RetryEntry(
             issue_id=issue_id, identifier=identifier, attempt=attempt,
-            due_at_ms=time.monotonic() * 1000 + delay_ms,
-            timer_handle=handle, error=error)
+            timer_handle=handle)
 
     async def _on_retry_timer(self, issue_id: str) -> None:
         entry = self.retry_attempts.pop(issue_id, None)
@@ -435,10 +433,14 @@ class Orchestrator:
         tracker, _, _ = self._components()
         try:
             candidates = await tracker.fetch_candidate_issues()
-        except TrackerError:
+        except Exception as exc:
+            # ANY failure here (TrackerError or a payload-shape bug) must
+            # reschedule rather than propagate: the retry entry is already
+            # popped, so an escaped exception would strand the claim forever.
+            log("retry poll failed; rescheduling", issue_id=issue_id,
+                issue_identifier=entry.identifier, error=repr(exc))
             self._schedule_retry(issue_id, entry.identifier, entry.attempt + 1,
-                                 self._failure_backoff_ms(entry.attempt + 1),
-                                 error="retry poll failed")
+                                 self._failure_backoff_ms(entry.attempt + 1))
             return
         issue = next((i for i in candidates if i.id == issue_id), None)
         if issue is None:
@@ -448,8 +450,7 @@ class Orchestrator:
             return
         if self._available_slots() <= 0:
             self._schedule_retry(issue_id, entry.identifier, entry.attempt + 1,
-                                 self._failure_backoff_ms(entry.attempt + 1),
-                                 error="no available orchestrator slots")
+                                 self._failure_backoff_ms(entry.attempt + 1))
             return
         # re-run eligibility checks (blockers/labels/state may have changed)
         self.claimed.discard(issue_id)
@@ -494,7 +495,15 @@ class Orchestrator:
             if state in t.terminal_states:
                 await self._terminate(issue.id, cleanup=True, retry=False)
             elif state in t.active_states:
-                entry.issue = issue
+                # core §11.1(3)/§8.2: required labels gate continuation too —
+                # pulling a required label mid-run stops the worker.
+                if t.required_labels and not all(
+                        lbl in issue.labels for lbl in t.required_labels):
+                    log("required label removed; releasing worker",
+                        issue_id=issue.id, issue_identifier=entry.identifier)
+                    await self._terminate(issue.id, cleanup=False, retry=False)
+                else:
+                    entry.issue = issue
             else:
                 await self._terminate(issue.id, cleanup=False, retry=False)
 
@@ -508,13 +517,10 @@ class Orchestrator:
         entry.cancelled_by_reconciliation = True
         entry.task.cancel()
         await asyncio.gather(entry.task, return_exceptions=True)
-        elapsed = (datetime.now(timezone.utc) - entry.started_at).total_seconds()
-        self.totals["seconds_running"] += elapsed
         if retry:
             attempt = (entry.retry_attempt or 0) + 1
             self._schedule_retry(issue_id, entry.identifier, attempt=attempt,
-                                 delay_ms=self._failure_backoff_ms(attempt),
-                                 error="terminated (stall)")
+                                 delay_ms=self._failure_backoff_ms(attempt))
         else:
             self.claimed.discard(issue_id)
         if cleanup:
@@ -524,7 +530,6 @@ class Orchestrator:
     # -- parking (owned extension, SPEC.md §4) --------------------------------------
 
     async def _park(self, issue: Issue, reason: str) -> None:
-        self.claimed.discard(issue.id)
         self._cancel_retry(issue.id)
         self.parked[issue.id] = issue.updated_at.isoformat() if issue.updated_at else ""
         log("ISSUE PARKED — human attention needed", issue_id=issue.id,
@@ -535,75 +540,37 @@ class Orchestrator:
             f"**Switchboard parked this issue** — {reason}.\n\n"
             f"The orchestrator will not dispatch it again until the issue is "
             f"updated (edit, label change, or comment). The per-issue workspace "
-            f"and logs are preserved for diagnosis at "
-            f"`{wsm.path_for(issue.identifier)}`."
+            f"is preserved for diagnosis at `{wsm.path_for(issue.identifier)}`."
         )
+        # Hold the claim while the marker settles: our own comment bumps
+        # updatedAt, and a poll tick landing between the comment and the
+        # marker re-fetch below would otherwise see marker != updatedAt,
+        # unpark, and dispatch a bonus session past the cap.
+        self.claimed.add(issue.id)
         try:
             await tracker.add_issue_comment(issue.id, body)
-            # Our own comment bumps updatedAt; re-fetch so the park marker is
-            # the POST-comment value — otherwise the next poll would see the
-            # bump, unpark, and loop the cap forever (the exact failure this
-            # extension exists to prevent).
+            # Re-fetch so the park marker is the POST-comment value —
+            # otherwise the next poll would see the bump, unpark, and loop
+            # the cap forever (the exact failure this extension prevents).
             refreshed = await tracker.fetch_issue_states_by_ids([issue.id])
             if refreshed and refreshed[0].updated_at:
                 self.parked[issue.id] = refreshed[0].updated_at.isoformat()
         except TrackerError as exc:
             log("parking comment/marker refresh failed (issue stays parked "
                 "on pre-comment marker)", issue_id=issue.id, error=str(exc))
+        finally:
+            self.claimed.discard(issue.id)
 
-    # -- agent events (core §10.4 consumer, §13.5 accounting) -------------------------
+    # -- agent events (core §10.4 consumer) --------------------------------------------
 
     def _on_agent_event(self, issue_id: str, event: AgentEvent) -> None:
         entry = self.running.get(issue_id)
         if entry is None:
             return
-        entry.last_event = event.event
         entry.last_event_at = event.timestamp
-        if event.pid:
-            entry.agent_pid = event.pid
         if event.event == "session_started":
             sid = event.payload.get("session_id")
             if sid:
                 entry.session_id = sid
                 log("session started", issue_id=issue_id,
                     issue_identifier=entry.identifier, session_id=sid)
-        msg = event.payload.get("summary") or event.payload.get("text") or ""
-        if msg:
-            entry.last_message = str(msg)[:200]
-        if event.usage and event.event in ("turn_completed", "turn_failed"):
-            # per-invocation usage is additive (not absolute thread totals)
-            for src, dst in (("input_tokens", "input_tokens"),
-                             ("output_tokens", "output_tokens")):
-                delta = int(event.usage.get(src, 0) or 0)
-                setattr(entry, dst, getattr(entry, dst) + delta)
-                self.totals[dst] += delta
-            total_delta = int(event.usage.get("input_tokens", 0) or 0) + \
-                int(event.usage.get("output_tokens", 0) or 0)
-            entry.total_tokens += total_delta
-            self.totals["total_tokens"] += total_delta
-
-    # -- snapshot (core §13.3, minimal) ------------------------------------------------
-
-    def snapshot(self) -> dict[str, Any]:
-        now = datetime.now(timezone.utc)
-        return {
-            "generated_at": now.isoformat(),
-            "counts": {"running": len(self.running),
-                       "retrying": len(self.retry_attempts),
-                       "parked": len(self.parked)},
-            "running": [
-                {"issue_id": iid, "issue_identifier": e.identifier,
-                 "issue_url": e.issue.url, "state": e.issue.state,
-                 "session_id": e.session_id, "turn_count": e.turn_count,
-                 "last_event": e.last_event, "last_message": e.last_message,
-                 "started_at": e.started_at.isoformat(),
-                 "tokens": {"input_tokens": e.input_tokens,
-                            "output_tokens": e.output_tokens,
-                            "total_tokens": e.total_tokens}}
-                for iid, e in self.running.items()],
-            "retrying": [
-                {"issue_id": r.issue_id, "issue_identifier": r.identifier,
-                 "attempt": r.attempt, "error": r.error}
-                for r in self.retry_attempts.values()],
-            "totals": dict(self.totals),
-        }

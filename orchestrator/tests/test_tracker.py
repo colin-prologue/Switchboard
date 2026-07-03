@@ -364,7 +364,10 @@ async def test_fetch_issue_states_by_ids_uses_nodes_query_and_skips_nulls():
         body = request_body(request)
         assert body["query"] == ISSUES_BY_IDS_QUERY
         assert body["variables"] == {"ids": ["I_1", "I_deleted"]}
-        return graphql_response({"nodes": [node, None]})
+        # None = deleted issue; {} = a node id that is not an Issue (the
+        # `... on Issue` fragment matched nothing). Both must be skipped,
+        # never KeyError (an escaped non-TrackerError would strand claims).
+        return graphql_response({"nodes": [node, None, {}]})
 
     tracker, transport = make_tracker(handler)
     issues = await tracker.fetch_issue_states_by_ids(["I_1", "I_deleted"])

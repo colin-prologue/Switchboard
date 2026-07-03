@@ -29,10 +29,9 @@ _LOG_TRUNCATE = 1000  # core §15.4: hook output SHOULD be truncated in logs
 class WorkspaceManager:
     """Creates, prepares, and removes per-issue workspace directories."""
 
-    def __init__(self, root: Path, hooks: HooksConfig, extra_env: dict[str, str] | None = None) -> None:
+    def __init__(self, root: Path, hooks: HooksConfig) -> None:
         self.root = Path(root).resolve()
         self.hooks = hooks
-        self.extra_env = extra_env or {}
 
     # --- path safety (core §9.5) ---------------------------------------------
 
@@ -111,7 +110,7 @@ class WorkspaceManager:
     # --- hook execution (core §9.4, §15.4) ------------------------------------
 
     async def _run_hook(self, script: str, cwd: Path, hook_name: str, identifier: str) -> None:
-        env = {**os.environ, **self.extra_env}
+        env = dict(os.environ)
         timeout_s = self.hooks.timeout_ms / 1000.0
 
         log("hook.start", hook=hook_name, issue_identifier=identifier, cwd=str(cwd))

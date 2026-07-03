@@ -151,14 +151,14 @@ async def test_before_run_failure_raises_hook_error(tmp_path: Path) -> None:
         await mgr.run_before_run(ws)
 
 
-async def test_before_run_success_has_extra_env_and_correct_cwd(tmp_path: Path) -> None:
+async def test_before_run_success_inherits_process_env_and_correct_cwd(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Hooks receive the orchestrator's process environment (project.env vars
+    # arrive via run-project.sh exporting them) and run with cwd == workspace.
+    monkeypatch.setenv("SB_TEST_VAR", "hello")
     marker = tmp_path.parent / "before_run_marker.txt"
     script = f'test "$SB_TEST_VAR" = "hello" && test "$PWD" = "$(pwd -P)" && pwd > "{marker}"'
-    mgr = WorkspaceManager(
-        root=tmp_path,
-        hooks=hooks(before_run=script),
-        extra_env={"SB_TEST_VAR": "hello"},
-    )
+    mgr = WorkspaceManager(root=tmp_path, hooks=hooks(before_run=script))
     ws = await mgr.create_for_issue("2")
     await mgr.run_before_run(ws)
     assert marker.read_text().strip() == str(ws.path.resolve())
