@@ -12,7 +12,13 @@
 - **Rejected:** (a) separate verifier daemon/process — duplicate scheduler for
   one prompt difference; (b) pre-dispatch orchestrator check — puts judgment
   in orchestrator code, violating the methodology-as-config principle that
-  gates cost zero orchestrator code.
+  gates cost zero orchestrator code; (c) context-free subagents / a dedicated
+  verifier pool (raised at merge-gate review, 2026-07-03) — the dispatched
+  session is already a fresh clone with zero author context, so extra workers
+  add dispatch cost without marginal independence (PHI-038). The residual
+  bias is same-model/same-rubric correlation, which subagents don't fix; the
+  effective future knob is a different-model verifier (per-state execution
+  command), deferred until calibration shows lenient-verifier failures.
 - **Blast radius:** low on code (prompt + labels), but the original claim "no
   new daemon or scheduler semantics" was disproved at review — the PASS
   handoff required the role-pin rule (AgDR-005). Consequence: prompt-level

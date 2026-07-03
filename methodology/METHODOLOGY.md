@@ -31,7 +31,10 @@ Dependencies use GitHub's native **blocked-by**; Symphony won't dispatch a
   agent produces an implementation plan + ADR, parks at `status:plan-review`, and
   a human approves before child tickets are filed.
 - **Gate C — final review.** Every implementation hands off at
-  `status:human-review`. A human merges. Agents never self-merge.
+  `status:human-review`. A human merges. Agents never self-merge. Merge review
+  includes ratifying (or overturning) any AgDRs the PR added under
+  `<convention_root>.decisions/` — a PR that changed spec/methodology
+  semantics without one is incomplete.
 
 ## Triage — adversarial ticket verification (active state)
 

@@ -141,7 +141,15 @@ once the verdict is routed.
    `pytest`, `python3`, `cd <dir> && ...` chains) will be denied — do not
    retry variants; if a criterion genuinely needs a command outside this
    list, say so in the PR/comments instead of burning turns.
-6. **Hand off, don't self-merge.** Commit, push the branch, open a PR with `gh`
+6. **Record pivotal decisions (AgDR).** If your change alters spec or
+   methodology semantics (`spec/`, `methodology/`, workflow prompt templates)
+   or makes a pivotal judgment call — forecloses alternatives, is expensive to
+   reverse, resolves spec ambiguity, or commits resources — add an AgDR file
+   at `{{CONVENTION_ROOT}}.decisions/AgDR-NNN-<slug>.md` (next free NNN) in
+   the same PR: context, decision, rejected options steelmanned, blast radius,
+   weakest point. A PR touching those layers with no AgDR is incomplete and
+   will be bounced at the merge gate.
+7. **Hand off, don't self-merge.** Commit, push the branch, open a PR with `gh`
    linking this issue, attach evidence of the criteria passing, then move the
    issue's `status:` label to the handoff state defined in `METHODOLOGY.md`
    (default `status:human-review`). Stop there. A human merges.
