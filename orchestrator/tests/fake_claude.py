@@ -74,7 +74,7 @@ def main() -> None:
         record_stdin()
         emit({"type": "system", "subtype": "init", "session_id": "sess-err"})
         emit(result_line("error_max_turns", session_id="sess-err"))
-        return
+        sys.exit(1)  # real CLI exits nonzero on error result subtypes
 
     if scenario == "turn_timeout":
         record_stdin()
@@ -82,6 +82,21 @@ def main() -> None:
         # sleep past the tiny turn_timeout_ms configured by the test
         time.sleep(5)
         emit(result_line("success", session_id="sess-slow"))
+        return
+
+    if scenario == "hang":
+        # Emit init (so the runner learns the pid/session), then hang far past
+        # any test timeout. Used to prove cancellation kills the process group:
+        # if the kill fails, this process outlives the test and the pid-dead
+        # assertion fails. Records its own pid so the test can verify the
+        # actual agent process died, not just the bash wrapper.
+        record_stdin()
+        pid_file = os.environ.get("FAKE_PID_FILE")
+        if pid_file:
+            with open(pid_file, "w") as f:
+                f.write(str(os.getpid()))
+        emit({"type": "system", "subtype": "init", "session_id": "sess-hang"})
+        time.sleep(300)
         return
 
     if scenario == "read_timeout":
