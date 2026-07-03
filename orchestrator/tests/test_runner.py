@@ -8,6 +8,7 @@ app-server).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -234,6 +235,74 @@ async def test_stderr_noise_does_not_corrupt_parsing(workspace: Path, monkeypatc
 
     assert result.status == "succeeded"
     assert result.session_id == "sess-stderr"
+
+
+async def test_cancellation_kills_process_group(workspace: Path, monkeypatch, tmp_path: Path):
+    """Cancelling a worker mid-turn (stall/reconciliation/shutdown, core §8.5)
+    must SIGKILL the agent's whole PROCESS GROUP, not just the leader. The
+    'hang' scenario sleeps 300s AND spawns a distinct child in the same group;
+    only os.killpg reaps that child, so a proc.kill()-only regression leaves it
+    alive and fails the pid-dead poll — distinguishing group-kill from a bare
+    leader kill (which bash's exec makes indistinguishable on the leader pid)."""
+    pid_file = tmp_path / "agent.pid"
+    child_pid_file = tmp_path / "agent-child.pid"
+    monkeypatch.setenv("FAKE_SCENARIO", "hang")
+    monkeypatch.setenv("FAKE_PID_FILE", str(pid_file))
+    monkeypatch.setenv("FAKE_CHILD_PID_FILE", str(child_pid_file))
+    cfg = make_cfg(turn_timeout_ms=60000, read_timeout_ms=10000)
+    runner = ClaudeRunner(cfg)
+    recorder = EventRecorder()
+
+    task = asyncio.create_task(
+        runner.run_turn(workspace, "prompt", None, recorder, "issue-1"))
+
+    async def poll(cond, timeout=5.0):
+        deadline = asyncio.get_event_loop().time() + timeout
+        while not cond():
+            assert asyncio.get_event_loop().time() < deadline, "condition not met"
+            await asyncio.sleep(0.02)
+
+    # wait for init so the subprocess is definitely up and its pid is known
+    await poll(lambda: "session_started" in recorder.names)
+    wrapper_pid = next(e.pid for _, e in recorder.events
+                       if e.event == "session_started")
+    assert wrapper_pid is not None
+    await poll(lambda: pid_file.exists() and child_pid_file.exists())
+    agent_pid = int(pid_file.read_text())
+    agent_child_pid = int(child_pid_file.read_text())
+    # The descendant must be a DISTINCT process — otherwise killpg and a bare
+    # proc.kill() are indistinguishable and the group-kill claim is untested.
+    assert agent_child_pid != wrapper_pid
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    def dead(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return False
+        except ProcessLookupError:
+            return True
+
+    # leader and its distinct child are both reaped only if the GROUP was
+    # killed; each is reparented to init after SIGKILL — poll briefly for both.
+    await poll(lambda: dead(wrapper_pid))
+    await poll(lambda: dead(agent_child_pid))
+
+
+async def test_error_scenario_exits_nonzero_result_still_parsed(workspace: Path, monkeypatch):
+    """The real CLI exits nonzero on error result subtypes; the parsed result
+    line must win over the exit code (no port_exit/claude_not_found remap)."""
+    monkeypatch.setenv("FAKE_SCENARIO", "error_max_turns")
+    cfg = make_cfg()
+    runner = ClaudeRunner(cfg)
+    recorder = EventRecorder()
+
+    result = await runner.run_turn(workspace, "prompt", None, recorder, "issue-1")
+
+    assert result.status == "failed"
+    assert result.error == "error_max_turns"
 
 
 async def test_workspace_must_exist(tmp_path: Path):

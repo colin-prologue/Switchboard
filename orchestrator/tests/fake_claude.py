@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -74,7 +75,7 @@ def main() -> None:
         record_stdin()
         emit({"type": "system", "subtype": "init", "session_id": "sess-err"})
         emit(result_line("error_max_turns", session_id="sess-err"))
-        return
+        sys.exit(1)  # real CLI exits nonzero on error result subtypes
 
     if scenario == "turn_timeout":
         record_stdin()
@@ -82,6 +83,28 @@ def main() -> None:
         # sleep past the tiny turn_timeout_ms configured by the test
         time.sleep(5)
         emit(result_line("success", session_id="sess-slow"))
+        return
+
+    if scenario == "hang":
+        # Emit init (so the runner learns the pid/session), then hang far past
+        # any test timeout. Used to prove cancellation kills the whole PROCESS
+        # GROUP, not just the leader. bash execs this single command, so our
+        # own pid == the runner's proc.pid; a proc.kill() regression would kill
+        # that shared process and look correct. To distinguish killpg from a
+        # bare proc.kill(), spawn a DISTINCT child in the same process group:
+        # only os.killpg reaps it. The test asserts this grandchild dies.
+        record_stdin()
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        child_pid_file = os.environ.get("FAKE_CHILD_PID_FILE")
+        if child_pid_file:
+            with open(child_pid_file, "w") as f:
+                f.write(str(child.pid))
+        pid_file = os.environ.get("FAKE_PID_FILE")
+        if pid_file:
+            with open(pid_file, "w") as f:
+                f.write(str(os.getpid()))
+        emit({"type": "system", "subtype": "init", "session_id": "sess-hang"})
+        time.sleep(300)
         return
 
     if scenario == "read_timeout":

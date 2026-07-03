@@ -18,13 +18,14 @@ extension per SPEC.md §4), not just happy paths:
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 import orchestrator.scheduler as scheduler_mod
-from orchestrator.scheduler import Orchestrator
+from orchestrator.scheduler import CONTINUATION_PROMPT, Orchestrator
 from orchestrator.types import BlockerRef, Issue, TurnResult
 
 UTC = timezone.utc
@@ -73,18 +74,23 @@ class FakeTracker:
 
 
 class FakeRunner:
-    """Controllable runner: workers block until released, then succeed."""
+    """Controllable runner: workers block until released, then succeed.
+
+    Returns a distinct session id per turn (sess-1, sess-2, ...) so tests can
+    assert the scheduler resumes with the LATEST session id, not a stale one.
+    """
 
     def __init__(self, hold: bool = False):
         self.hold = hold
         self.release = asyncio.Event()
-        self.turns: list[tuple[str, str | None]] = []  # (issue_id, resume_sid)
+        # (issue_id, resume_sid, prompt)
+        self.turns: list[tuple[str, str | None, str]] = []
 
     async def run_turn(self, workspace, prompt, resume_session_id, on_event, issue_id):
-        self.turns.append((issue_id, resume_session_id))
+        self.turns.append((issue_id, resume_session_id, prompt))
         if self.hold:
             await self.release.wait()
-        return TurnResult(status="succeeded", session_id="sess-1",
+        return TurnResult(status="succeeded", session_id=f"sess-{len(self.turns)}",
                           cost_usd=0.01, usage={"input_tokens": 1, "output_tokens": 1},
                           num_turns=1)
 
@@ -315,6 +321,83 @@ async def test_startup_terminal_sweep_removes_stale_workspaces(harness):
     tracker.terminal = [make_issue(42, "closed")]
     await orch._startup_terminal_cleanup()
     assert not stale.exists()
+
+
+async def test_multi_turn_continuation_resumes_session(tmp_path, monkeypatch):
+    """Turn 2+ inside ONE worker session must resume the previous turn's
+    session id and send CONTINUATION_PROMPT, never the rendered task prompt
+    (core §16.5, §7.1). A regression that drops the session id between turns
+    (turns[n][1] becomes None) or resumes a stale id must fail here."""
+    tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 3")
+    orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}  # state never changes
+
+    await orch._tick()
+    tracker.candidates = []  # quiesce: post-session continuation retry releases
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+
+    assert len(runner.turns) == 3  # ran to agent.max_turns in one session
+    # turn 1: fresh session, rendered task prompt
+    assert runner.turns[0][1] is None
+    assert runner.turns[0][2] == "Work 1: Issue 1"
+    # turn 2 resumes turn 1's session; turn 3 resumes turn 2's (latest wins)
+    assert runner.turns[1][1] == "sess-1"
+    assert runner.turns[2][1] == "sess-2"
+    for _, _, prompt in runner.turns[1:]:
+        assert prompt == CONTINUATION_PROMPT
+    assert "node-1" in orch.completed  # normal exit, not a failure
+
+
+async def test_budget_ceiling_ends_session_normally(tmp_path, monkeypatch):
+    """claude.max_budget_usd caps the CUMULATIVE session cost: at $0.01/turn a
+    $0.025 ceiling ends the session after turn 3 (0.03 >= 0.025) as a normal
+    completion, well before agent.max_turns (§13.5 accounting)."""
+    tmpl = (WORKFLOW_TMPL
+            .replace("max_turns: 1", "max_turns: 10")
+            .replace('command: "unused-by-fake-runner"',
+                     'command: "unused-by-fake-runner"\n  max_budget_usd: 0.025'))
+    orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}  # state never changes
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+
+    assert len(runner.turns) == 3          # ceiling, not max_turns (10), ended it
+    assert "node-1" in orch.completed      # normal completion, not WorkerFailure
+    assert orch.totals["cost_usd"] == pytest.approx(0.03)
+
+
+async def test_maybe_reload_detects_real_mtime_change(harness):
+    """_maybe_reload must pick up an edited workflow via the REAL stat path —
+    no _workflow_mtime=None bypass. Also documents the granularity edge: an
+    edit that lands with an IDENTICAL st_mtime (e.g. two writes within the
+    filesystem's timestamp resolution) is invisible to mtime-based reload."""
+    orch, _, _, _ = harness
+    wf = orch.workflow_path
+    assert orch._cfg.agent().max_concurrent_agents == 2
+    orig = wf.stat()
+
+    new_text = wf.read_text().replace("max_concurrent_agents: 2",
+                                      "max_concurrent_agents: 5")
+    wf.write_text(new_text)
+    # Pin the mtime back to the original value: same-second (same-resolution)
+    # edit. KNOWN LIMITATION — the reload path cannot see this change.
+    os.utime(wf, ns=(orig.st_atime_ns, orig.st_mtime_ns))
+    orch._maybe_reload()
+    assert orch._cfg.agent().max_concurrent_agents == 2
+
+    # A real mtime change is picked up without any test-harness bypass.
+    os.utime(wf, ns=(orig.st_atime_ns, orig.st_mtime_ns + 1_000_000_000))
+    orch._maybe_reload()
+    assert orch._cfg.agent().max_concurrent_agents == 5
+    assert orch._workflow_broken is None
 
 
 async def test_worker_failure_uses_backoff_then_releases_when_gone(harness):
