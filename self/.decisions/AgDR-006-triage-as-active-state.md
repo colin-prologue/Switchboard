@@ -1,7 +1,8 @@
 # AgDR-006: Triage rides the existing dispatch machinery as an active state
 
-- **Status:** retroactively recorded at merge gate (2026-07-03) for the
-  original PR #17 implementation (f8bfe3f), which shipped without a record.
+- **Status:** ratified by Colin at PR #17 merge gate (2026-07-03).
+  Retroactively recorded for the original implementation (f8bfe3f), which
+  shipped without a record; rejected option (c) reviewed explicitly.
 - **Context:** Issue #11 wanted adversarial ticket verification before an
   issue becomes dispatchable. The verification step needs a session, budget
   caps, a workspace to investigate in, and a routing outcome.

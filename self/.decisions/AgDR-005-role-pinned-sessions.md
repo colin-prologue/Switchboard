@@ -1,7 +1,7 @@
 # AgDR-005: Role-pinned worker sessions (break on ANY state change)
 
-- **Status:** accepted (PR #17 review fix, 2026-07-03, approved by Colin in
-  session; general rule chosen over triage-scoped alternatives).
+- **Status:** ratified by Colin at PR #17 merge gate (2026-07-03; general
+  rule chosen over triage-scoped alternatives, approved in session).
 - **Context:** Codex review P2 on PR #17: a triage PASS relabels
   `status:triage → status:todo`, both active states, so core §16.5's loop
   ("break when state leaves active_states") kept the verifier session alive —

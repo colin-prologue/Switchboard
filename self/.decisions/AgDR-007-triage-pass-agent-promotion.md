@@ -1,8 +1,8 @@
 # AgDR-007: Triage PASS lets an agent promote a ticket to dispatchable
 
-- **Status:** retroactively recorded at merge gate (2026-07-03) for the
-  original PR #17 implementation (f8bfe3f) — **most contestable call of this
-  pass; review this one first.**
+- **Status:** ratified by Colin at PR #17 merge gate (2026-07-03).
+  Retroactively recorded for the original implementation (f8bfe3f); was
+  flagged most contestable call of this pass.
 - **Context:** Gate A (METHODOLOGY.md) reserves the `status:drafting →
   status:todo` promotion for a human: "the agent never sees an unapproved
   ticket." Triage PASS gives an *agent* a promotion path to `status:todo`
