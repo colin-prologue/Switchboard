@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -86,11 +87,18 @@ def main() -> None:
 
     if scenario == "hang":
         # Emit init (so the runner learns the pid/session), then hang far past
-        # any test timeout. Used to prove cancellation kills the process group:
-        # if the kill fails, this process outlives the test and the pid-dead
-        # assertion fails. Records its own pid so the test can verify the
-        # actual agent process died, not just the bash wrapper.
+        # any test timeout. Used to prove cancellation kills the whole PROCESS
+        # GROUP, not just the leader. bash execs this single command, so our
+        # own pid == the runner's proc.pid; a proc.kill() regression would kill
+        # that shared process and look correct. To distinguish killpg from a
+        # bare proc.kill(), spawn a DISTINCT child in the same process group:
+        # only os.killpg reaps it. The test asserts this grandchild dies.
         record_stdin()
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        child_pid_file = os.environ.get("FAKE_CHILD_PID_FILE")
+        if child_pid_file:
+            with open(child_pid_file, "w") as f:
+                f.write(str(child.pid))
         pid_file = os.environ.get("FAKE_PID_FILE")
         if pid_file:
             with open(pid_file, "w") as f:

@@ -239,13 +239,16 @@ async def test_stderr_noise_does_not_corrupt_parsing(workspace: Path, monkeypatc
 
 async def test_cancellation_kills_process_group(workspace: Path, monkeypatch, tmp_path: Path):
     """Cancelling a worker mid-turn (stall/reconciliation/shutdown, core §8.5)
-    must SIGKILL the agent's process group — both the bash wrapper and the
-    actual agent process it launched. The 'hang' scenario sleeps 300s, so a
-    surviving process fails the pid-dead polls below instead of exiting on
-    its own and masking a broken kill."""
+    must SIGKILL the agent's whole PROCESS GROUP, not just the leader. The
+    'hang' scenario sleeps 300s AND spawns a distinct child in the same group;
+    only os.killpg reaps that child, so a proc.kill()-only regression leaves it
+    alive and fails the pid-dead poll — distinguishing group-kill from a bare
+    leader kill (which bash's exec makes indistinguishable on the leader pid)."""
     pid_file = tmp_path / "agent.pid"
+    child_pid_file = tmp_path / "agent-child.pid"
     monkeypatch.setenv("FAKE_SCENARIO", "hang")
     monkeypatch.setenv("FAKE_PID_FILE", str(pid_file))
+    monkeypatch.setenv("FAKE_CHILD_PID_FILE", str(child_pid_file))
     cfg = make_cfg(turn_timeout_ms=60000, read_timeout_ms=10000)
     runner = ClaudeRunner(cfg)
     recorder = EventRecorder()
@@ -264,8 +267,12 @@ async def test_cancellation_kills_process_group(workspace: Path, monkeypatch, tm
     wrapper_pid = next(e.pid for _, e in recorder.events
                        if e.event == "session_started")
     assert wrapper_pid is not None
-    await poll(lambda: pid_file.exists())
+    await poll(lambda: pid_file.exists() and child_pid_file.exists())
     agent_pid = int(pid_file.read_text())
+    agent_child_pid = int(child_pid_file.read_text())
+    # The descendant must be a DISTINCT process — otherwise killpg and a bare
+    # proc.kill() are indistinguishable and the group-kill claim is untested.
+    assert agent_child_pid != wrapper_pid
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -278,10 +285,10 @@ async def test_cancellation_kills_process_group(workspace: Path, monkeypatch, tm
         except ProcessLookupError:
             return True
 
-    # wrapper is reaped by the runner; the agent process is reparented after
-    # the group SIGKILL and reaped by init — poll briefly for both.
+    # leader and its distinct child are both reaped only if the GROUP was
+    # killed; each is reparented to init after SIGKILL — poll briefly for both.
     await poll(lambda: dead(wrapper_pid))
-    await poll(lambda: dead(agent_pid))
+    await poll(lambda: dead(agent_child_pid))
 
 
 async def test_error_scenario_exits_nonzero_result_still_parsed(workspace: Path, monkeypatch):
