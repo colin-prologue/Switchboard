@@ -1,0 +1,41 @@
+# CI merge gate. Runs on every PR (against the MERGE commit — the PR as it
+# would land on current main, not the branch in isolation) and on every push
+# to main. Exists because two independently-green PRs (#23/#24) merged into a
+# red main: git only sees textual conflicts; this job sees semantic ones.
+#
+# To make the gate binding, enable in repo settings -> branch protection for
+# main: "Require status checks to pass" with this job, plus "Require branches
+# to be up to date before merging" — the second forces a stale PR to re-test
+# against the moved main instead of merging on an outdated green.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test suite
+        run: uv run --project orchestrator python -m pytest orchestrator/tests -q
+
+      - name: Setup / compose-drift check
+        # verify-setup.sh always exits 0 (it's a status report); FAIL lines
+        # are real errors — most importantly a composed WORKFLOW.md that has
+        # drifted from workflow/WORKFLOW.base.md.
+        run: |
+          out="$(bash scripts/verify-setup.sh)"
+          echo "$out"
+          if echo "$out" | grep -q '\[FAIL\]'; then
+            echo '::error::verify-setup.sh reported FAIL items (see output above)'
+            exit 1
+          fi
