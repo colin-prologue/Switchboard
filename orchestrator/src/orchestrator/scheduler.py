@@ -540,18 +540,23 @@ class Orchestrator:
             return
         entry.cancelled_by_reconciliation = True
         entry.task.cancel()
+        # Resolve the workspace manager NOW, synchronously inside the tick,
+        # against the config the worker actually ran under. The teardown await
+        # can span many ticks (up to hooks.timeout_ms), and each tick may
+        # hot-reload the workflow (§6.2) — resolving wsm after the await would
+        # let a workspace.root/hook change retarget cleanup at the wrong root.
+        wsm = self._components()[1] if cleanup else None
         teardown = asyncio.create_task(
-            self._finish_termination(issue_id, entry, cleanup=cleanup, retry=retry))
+            self._finish_termination(issue_id, entry, wsm=wsm, retry=retry))
         self.terminating[issue_id] = teardown
         teardown.add_done_callback(
             lambda t, iid=issue_id: self.terminating.pop(iid, None))
 
     async def _finish_termination(self, issue_id: str, entry: RunningEntry, *,
-                                  cleanup: bool, retry: bool) -> None:
+                                  wsm: WorkspaceManager | None, retry: bool) -> None:
         try:
             await asyncio.gather(entry.task, return_exceptions=True)
-            if cleanup:
-                _, wsm, _ = self._components()
+            if wsm is not None:
                 await wsm.cleanup_terminal([entry.identifier])
             if retry and not self._stopping:
                 attempt = (entry.retry_attempt or 0) + 1

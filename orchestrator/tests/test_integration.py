@@ -405,6 +405,39 @@ async def test_terminal_cleanup_waits_for_wedged_after_run(harness, monkeypatch)
     assert "node-1" not in orch.retry_attempts
 
 
+async def test_teardown_cleanup_uses_original_root_across_reload(harness, monkeypatch):
+    """Terminal cleanup must target the workspace the worker actually used,
+    even if the workflow hot-reloads workspace.root during the (long) teardown
+    window. Regression for PR #25 review: _finish_termination must not resolve
+    the WorkspaceManager from post-reload config after the await."""
+    orch, tracker, runner, ws_root = harness
+    hook_started, hook_release = _wedged_after_run(monkeypatch)
+    runner.hold = True
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1)}
+    await orch._tick()
+    old_wsdir = ws_root / "1"
+    await wait_for(lambda: old_wsdir.is_dir())
+
+    tracker.states = {"node-1": make_issue(1, "closed")}
+    await asyncio.wait_for(orch._reconcile_running(), timeout=5.0)
+    await wait_for(hook_started.is_set)  # teardown parked on the wedged hook
+
+    # operator moves workspace.root mid-teardown; a tick reloads the config
+    new_root = ws_root.parent / "ws2"
+    wf = orch.workflow_path
+    wf.write_text(wf.read_text().replace(f'root: "{ws_root}"',
+                                         f'root: "{new_root}"'))
+    orch._workflow_mtime = None
+    orch._load_workflow(initial=False)
+    assert orch._cfg.workspace_root() == new_root  # reload took effect
+
+    hook_release.set()
+    await wait_for(lambda: not old_wsdir.exists())  # ORIGINAL workspace cleaned
+    assert not new_root.exists()                    # new root never touched
+    await wait_for(lambda: "node-1" not in orch.claimed)
+
+
 async def test_shutdown_bounded_despite_wedged_after_run(harness, monkeypatch):
     """SIGTERM shutdown drains workers (whose `finally` runs after_run) for at
     most the teardown grace, then hard-cancels the stragglers."""
