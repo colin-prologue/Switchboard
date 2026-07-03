@@ -93,8 +93,11 @@ def test_tracker_defaults(tmp_path: Path):
     assert t.repo == "acme/widgets"
     assert t.endpoint == "https://api.github.com/graphql"
     assert t.required_labels == []
-    assert t.active_states == ["todo", "in progress"]
-    assert t.terminal_states == ["done", "closed", "cancelled"]
+    # SPEC.md §2 binding: triage is active (AgDR-006); issue-closed is the
+    # ONLY terminal condition — a status:* label must never be terminal, or
+    # a stray status:done on an OPEN issue would destroy its workspace.
+    assert t.active_states == ["triage", "todo", "in progress"]
+    assert t.terminal_states == ["closed"]
 
 
 def test_tracker_api_key_dollar_var_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

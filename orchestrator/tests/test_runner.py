@@ -31,10 +31,9 @@ def make_cfg(
     turn_timeout_ms: int = 3600000,
     read_timeout_ms: int = 5000,
     stall_timeout_ms: int = 300000,
-    extra_command: str = "",
 ) -> ClaudeConfig:
     return ClaudeConfig(
-        command=f"python3 {FIXTURE}{extra_command}",
+        command=f"python3 {FIXTURE}",
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
         turn_timeout_ms=turn_timeout_ms,

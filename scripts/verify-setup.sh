@@ -22,7 +22,8 @@ KIT_OK=1
 for f in spec/SPEC.md spec/SPEC.core.md spec/PROVENANCE.md \
          workflow/WORKFLOW.base.md methodology/METHODOLOGY.md \
          hooks/after_create.sh hooks/before_run.sh hooks/after_run.sh \
-         scripts/register-project.sh scripts/run-project.sh scripts/list-projects.sh; do
+         scripts/register-project.sh scripts/run-project.sh scripts/list-projects.sh \
+         scripts/new-ticket.sh scripts/verify-setup.sh deploy/switchboard@.service; do
   if [ -f "$f" ]; then :; else fail "missing $f"; KIT_OK=0; fi
 done
 for f in hooks/*.sh scripts/*.sh; do
@@ -43,7 +44,11 @@ fi
 
 # --- Stage 1: repurposed ----------------------------------------------------
 echo "Stage 1 — repurposed repo:"
-if [ -d ARCHIVE ]; then ok "ARCHIVE/ present"; else warn "no ARCHIVE/ (fine if this was a fresh repo)"; fi
+if git tag -l switchboard-legacy-archive 2>/dev/null | grep -q .; then
+  ok "legacy state archived (tag switchboard-legacy-archive; branches archive/*)"
+else
+  warn "no legacy-archive tag (fine if this was a fresh repo)"
+fi
 
 # --- Stage 2: spec vendored + provenance ------------------------------------
 echo "Stage 2 — vendored spec:"
@@ -63,9 +68,10 @@ fi
 # --- Stage 3: orchestrator built --------------------------------------------
 echo "Stage 3 — orchestrator:"
 ORCH_BUILT=0
-ORCH_FILES=$(find orchestrator -type f ! -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ')
-if [ "${ORCH_FILES:-0}" -gt 0 ]; then ok "orchestrator/ has $ORCH_FILES file(s)"; ORCH_BUILT=1
-else pend "orchestrator/ empty — generate with Claude Code (Stage 3)"; fi
+# Check for actual source, not any file — a stray .venv/ alone must not pass.
+if [ -f orchestrator/src/orchestrator/main.py ] && [ -f orchestrator/pyproject.toml ]; then
+  ok "orchestrator source present (orchestrator/src/orchestrator/)"; ORCH_BUILT=1
+else pend "orchestrator/ has no source — generate with Claude Code (Stage 3)"; fi
 if [ -n "${SB_ORCHESTRATOR_CMD:-}" ]; then ok "SB_ORCHESTRATOR_CMD set"; else warn "SB_ORCHESTRATOR_CMD not set in this shell (needed to run)"; fi
 
 # --- Stage 4: projects registered -------------------------------------------
@@ -80,8 +86,29 @@ for env in projects/*/project.env; do
   # are legitimate Liquid template variables rendered at dispatch time.
   if [ -f "$wf" ] && grep -qE '\{\{[A-Z_]+\}\}' "$wf"; then
     fail "$slug: WORKFLOW.md has unsubstituted {{PLACEHOLDERS}}"
-  else
-    ok "project '$slug' registered"
+    continue
+  fi
+  ok "project '$slug' registered"
+  # Drift check: recompose from the current base with this project's binding
+  # values and diff. A stale composed file silently drops base features (the
+  # triage pipeline was lost exactly this way) — placeholder-grepping can't
+  # see it.
+  if [ -f "$wf" ] && [ -f workflow/WORKFLOW.base.md ]; then
+    p_repo="$(sed -n 's/^SB_GITHUB_REPO=//p' "$env" | head -1)"
+    p_wsroot="$(sed -n 's/^SB_WORKSPACE_ROOT=//p' "$env" | head -1)"
+    p_conv="$(sed -n 's/^SB_CONVENTION_ROOT=//p' "$env" | head -1)"
+    p_agents="$(sed -n 's/^  max_concurrent_agents: \([0-9][0-9]*\)$/\1/p' "$wf" | head -1)"
+    if [ -n "$p_repo" ] && [ -n "$p_wsroot" ] && [ -n "$p_agents" ]; then
+      if ! sed -e "s|{{REPO}}|$p_repo|g" \
+               -e "s|{{WORKSPACE_ROOT}}|$p_wsroot|g" \
+               -e "s|{{MAX_AGENTS}}|$p_agents|g" \
+               -e "s|{{CONVENTION_ROOT}}|$p_conv|g" \
+               workflow/WORKFLOW.base.md | diff -q - "$wf" >/dev/null 2>&1; then
+        fail "$slug: WORKFLOW.md drifted from workflow/WORKFLOW.base.md — re-run register-project.sh"
+      else
+        ok "$slug: WORKFLOW.md matches current base"
+      fi
+    fi
   fi
 done
 [ "$PROJ_COUNT" -eq 0 ] && pend "no projects yet — try: scripts/register-project.sh --self --repo <you>/switchboard"

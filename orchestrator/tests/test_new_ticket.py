@@ -50,12 +50,6 @@ def test_scaffold_emits_all_sections_and_exits_clean() -> None:
         assert section in out, f"scaffold missing section: {section}"
 
 
-def test_scaffold_needs_no_title_or_network() -> None:
-    # No --title, no --repo, no gh — scaffold must still succeed offline.
-    proc = run("--scaffold")
-    assert proc.returncode == 0, proc.stderr
-
-
 # --- dry-run: flag -> payload mapping ----------------------------------------
 
 
@@ -101,11 +95,21 @@ def test_dry_run_omitted_optionals_render_as_none() -> None:
     assert "blocked-by: (none)" in proc.stdout
 
 
-def test_dry_run_makes_no_network_write() -> None:
-    # Sentinel: the banner explicitly promises no writes; presence guards against a
-    # future refactor that files during dry-run.
-    proc = run("--dry-run", "--title", "T", "--repo", "o/n")
+def test_dry_run_makes_no_network_write(tmp_path: Path) -> None:
+    # Prove no write happens, don't just read the banner: shadow `gh` with a
+    # sentinel that records any invocation, and assert it was never called.
+    fake_gh = tmp_path / "gh"
+    marker = tmp_path / "gh-was-called"
+    fake_gh.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n')
+    fake_gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--title", "T", "--repo", "o/n"],
+        capture_output=True, text=True, cwd=REPO_ROOT, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
     assert "no network writes" in proc.stdout.lower()
+    assert not marker.exists(), "dry-run invoked gh"
 
 
 def test_scaffold_output_is_valid_dry_run_body() -> None:

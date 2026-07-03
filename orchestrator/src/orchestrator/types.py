@@ -17,7 +17,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable
 
 
 # --- issues (core §4.1.1) ----------------------------------------------------
@@ -84,6 +84,8 @@ class AgentConfig:
     # Owned extension (SPEC.md §4, "caps as diagnostic checkpoints"): total
     # worker sessions allowed per issue per process lifetime before the issue
     # is parked (claim released, one notification comment, no re-dispatch).
+    # Always on: invalid or non-positive values coerce back to the default —
+    # the cap cannot be disabled (parking is the diagnostic checkpoint).
     max_sessions_per_issue: int          # default 3
 
 
@@ -116,7 +118,7 @@ class Workspace:
 class AgentEvent:
     """Structured event emitted upstream to the orchestrator (core §10.4)."""
     event: str                   # session_started | turn_completed | turn_failed |
-                                 # startup_failed | notification | other_message | malformed
+                                 # startup_failed | notification | malformed
     timestamp: datetime
     pid: int | None = None
     usage: dict[str, int] | None = None
@@ -144,9 +146,7 @@ class RetryEntry:
     issue_id: str
     identifier: str
     attempt: int                 # 1-based
-    due_at_ms: float             # monotonic clock
     timer_handle: Any            # asyncio.TimerHandle or Task
-    error: str | None = None
 
 
 # --- errors --------------------------------------------------------------------

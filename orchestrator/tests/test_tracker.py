@@ -249,27 +249,13 @@ async def test_blocked_by_normalizes_open_and_closed_blockers():
 
 @pytest.mark.asyncio
 async def test_closed_issue_state_is_closed_even_with_status_label():
+    # Verify the normalizer via fetch_issue_states_by_ids (candidate fetch
+    # filters to active states, so a closed issue would never appear there).
     node = issue_node(state="CLOSED", labels=["status:todo"])
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return graphql_response(
-            {
-                "repository": {
-                    "issues": {
-                        "nodes": [node],
-                        "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    }
-                }
-            }
-        )
-
-    tracker, _ = make_tracker(handler)
-    # candidate fetch only returns active states, so closed won't appear here;
-    # verify via the normalizer directly through fetch_issue_states_by_ids.
-    tracker2, transport2 = make_tracker(
+    tracker, _ = make_tracker(
         lambda request: graphql_response({"nodes": [node]})
     )
-    issues = await tracker2.fetch_issue_states_by_ids(["I_1"])
+    issues = await tracker.fetch_issue_states_by_ids(["I_1"])
     assert issues[0].state == "closed"
 
 
@@ -364,7 +350,10 @@ async def test_fetch_issue_states_by_ids_uses_nodes_query_and_skips_nulls():
         body = request_body(request)
         assert body["query"] == ISSUES_BY_IDS_QUERY
         assert body["variables"] == {"ids": ["I_1", "I_deleted"]}
-        return graphql_response({"nodes": [node, None]})
+        # None = deleted issue; {} = a node id that is not an Issue (the
+        # `... on Issue` fragment matched nothing). Both must be skipped,
+        # never KeyError (an escaped non-TrackerError would strand claims).
+        return graphql_response({"nodes": [node, None, {}]})
 
     tracker, transport = make_tracker(handler)
     issues = await tracker.fetch_issue_states_by_ids(["I_1", "I_deleted"])

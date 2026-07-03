@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 
+from orchestrator.log import log
 from orchestrator.types import BlockerRef, Issue, TrackerConfig, TrackerError
 
 # --- GraphQL query/mutation constants (core §11.2) --------------------------
@@ -176,7 +177,11 @@ class GitHubTracker:
             raise TrackerError("github_unknown_payload", "missing 'nodes' in response data")
         issues = []
         for node in nodes:
-            if node is None:  # deleted/inaccessible issue
+            # None = deleted/inaccessible; {} = node id that is not an Issue
+            # (the `... on Issue` fragment matched nothing). Normalizing the
+            # latter would KeyError, which upstream must never see as a
+            # non-TrackerError surprise.
+            if not isinstance(node, dict) or not node.get("id"):
                 continue
             issues.append(self._normalize_issue(node))
         return issues
@@ -274,6 +279,12 @@ class GitHubTracker:
             state = "closed"
         else:
             status_labels = sorted(l for l in labels if l.startswith("status:"))
+            if len(status_labels) > 1:
+                # One status label per issue is the workflow contract; more
+                # than one resolves deterministically (sorted-first) but the
+                # winner is semantically arbitrary — surface it.
+                log("issue carries multiple status:* labels; using sorted-first",
+                    issue_number=raw.get("number"), labels=",".join(status_labels))
             if status_labels:
                 state = status_labels[0][len("status:") :].replace("-", " ")
             else:

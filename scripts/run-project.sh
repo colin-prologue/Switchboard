@@ -33,5 +33,9 @@ set +a
 echo "[run-project] $SLUG -> $SB_GITHUB_REPO (workspaces: $SB_WORKSPACE_ROOT)"
 mkdir -p "$SB_WORKSPACE_ROOT"
 
+# The documented SB_ORCHESTRATOR_CMD ("uv run --project orchestrator ...") is
+# relative to the repo root — pin the cwd so launching from anywhere works.
+cd "$SB_HOME"
+
 # shellcheck disable=SC2086
 exec $SB_ORCHESTRATOR_CMD --workflow "$WORKFLOW"

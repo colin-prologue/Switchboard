@@ -13,9 +13,11 @@ At any point, run the verifier to see where you are and what's left:
 bash scripts/verify-setup.sh
 ```
 
-It prints a checklist and a single "You are at: Stage N — next: …" line. Nothing
-below is irreversible except the Stage 1 git history rewrite of the *old* repo
-contents (and even that is preserved by the tag), so go at your own pace.
+It prints a checklist and a single "You are at: Stage N — next: …" line.
+
+**State of THIS repo:** Stages 0–5 are done (the verifier should report
+"Stage 5 — ready to run"). Stages 1–3 below are kept as the historical record
+and as the runbook for standing the kit up somewhere fresh.
 
 ---
 
@@ -35,28 +37,22 @@ version. (`verify-setup.sh` checks these.)
 
 ---
 
-## Stage 1 — Repurpose the repo  [MANUAL]
+## Stage 1 — Repurpose the repo  [MANUAL]  *(done — historical record)*
 
-In the repo you're turning into the Switchboard home. **Skip the archive block if
-this is a brand-new empty repo.**
+**What was actually done here** (differs from the originally drafted runbook):
+the legacy state was preserved in git only — tag `switchboard-legacy-archive`
+plus branches `archive/main` and `archive/switchboard-v2` — and `main` was
+**reset** for the fork. No `ARCHIVE/` directory exists in the working tree.
 
-```bash
-# 1a. Preserve the old state immovably.
-git tag switchboard-legacy-archive
-git push origin switchboard-legacy-archive
-
-# 1b. Move the old contents into ARCHIVE/ in one commit (history retained).
-mkdir -p ARCHIVE
-git ls-files | grep -v '^ARCHIVE/' | xargs -I{} git mv {} ARCHIVE/{}
-git commit -m "Archive legacy Switchboard"
-
-# 1c. Drop this kit onto the clean root (copy the kit files in), then:
-git add -A
-git commit -m "Switchboard becomes Symphony-derived methodology layer"
-```
+For a fresh repo: skip this stage entirely. For repurposing another existing
+repo: tag it, branch the old state aside (`git branch archive/main`), reset or
+orphan a new `main`, and drop the kit files onto the clean root. (Do not bulk
+`git mv` into an archive subdirectory — `git mv` does not create destination
+parents, so that fails half-way on any nested tree.)
 
 **Verify:** the kit files (`spec/`, `workflow/`, `hooks/`, `scripts/`, …) sit at the
-repo root; old files are under `ARCHIVE/`. `verify-setup.sh` reports "kit installed".
+repo root. `verify-setup.sh` reports "all kit files present" and finds the
+legacy-archive tag.
 
 ---
 
@@ -93,7 +89,7 @@ cite — record the URL + date and write "copied from rendered page, no commit r
 
 ---
 
-## Stage 3 — Generate the orchestrator  [CLAUDE CODE]  *(this is Phase 1)*
+## Stage 3 — Generate the orchestrator  [CLAUDE CODE]  *(this is Phase 1 — done: Python/asyncio in `orchestrator/`)*
 
 From inside the repo, run Claude Code and give it roughly this:
 
@@ -104,14 +100,16 @@ From inside the repo, run Claude Code and give it roughly this:
 > and load `WORKFLOW.md` from it. Implement the workspace-population step by invoking
 > the existing `hooks/` scripts. Build it and tell me the exact launch command.
 
-Then capture the launch command it gives you:
+Then capture the launch command it gives you. For this repo's implementation:
 
 ```bash
-export SB_ORCHESTRATOR_CMD="node orchestrator/dist/main.js"   # example — use yours
+export SB_ORCHESTRATOR_CMD="uv run --project orchestrator python -m orchestrator"
 ```
 
-**Verify:** `orchestrator/` has real files (beyond `.gitkeep`), and
-`$SB_ORCHESTRATOR_CMD --help` runs. `verify-setup.sh` reports "orchestrator built".
+**Verify:** `orchestrator/src/orchestrator/` has the source, the test suite
+passes (`uv run --project orchestrator python -m pytest orchestrator/tests -q`),
+and `$SB_ORCHESTRATOR_CMD --help` runs. `verify-setup.sh` reports the
+orchestrator source present.
 
 ---
 
@@ -128,7 +126,9 @@ This writes `projects/switchboard-self/`, composes its `WORKFLOW.md`, scaffolds
 repo's issue board.
 
 **Verify:** `scripts/list-projects.sh` shows `switchboard-self`; the repo's Labels
-page shows the six `status:*` labels. `verify-setup.sh` reports "≥1 project registered".
+page shows the **seven** `status:*` labels (drafting, triage, todo, in-progress,
+plan-review, human-review, blocked). `verify-setup.sh` reports the project
+registered and its composed `WORKFLOW.md` matching the current base.
 
 ---
 
@@ -140,8 +140,10 @@ export SB_ORCHESTRATOR_CMD="…"          # from Stage 3
 scripts/run-project.sh switchboard-self
 ```
 
-Then, on the repo's issue board: open a small test issue, add the `status:todo`
-label, and watch it get picked up → a PR opened → the issue moved to
+Then file a small test ticket — `scripts/new-ticket.sh --title "..."` gives it
+the right body shape and the default `status:triage` entry label (the triage
+verifier promotes it to `status:todo` on PASS; add `--entry todo` to skip the
+gate) — and watch it get picked up → a PR opened → the issue moved to
 `status:human-review`. That round trip is the whole loop proven end to end.
 
 For many projects, manage one process per project with the systemd template in
@@ -163,8 +165,8 @@ Real projects never receive the kit — they're registered. Only `.switchboard/`
 
 ## Expected topology when complete
 
-After Stage 4 (Phase-1 build done, self registered), `find . -type f` should look
-like this (plus `ARCHIVE/…` and your generated `orchestrator/…` files):
+After Stage 4 (Phase-1 build done, self registered), the tracked tree
+(`git ls-files`) should look like this:
 
 ```
 spec/SPEC.md
@@ -178,14 +180,18 @@ hooks/after_run.sh
 scripts/register-project.sh
 scripts/run-project.sh
 scripts/list-projects.sh
+scripts/new-ticket.sh
 scripts/verify-setup.sh
 deploy/switchboard@.service
-orchestrator/…             # generated in Stage 3 (was just .gitkeep)
+orchestrator/pyproject.toml
+orchestrator/uv.lock
+orchestrator/src/orchestrator/…   # scheduler, runner, tracker, workspace, …
+orchestrator/tests/…              # pytest suite
 projects/switchboard-self/project.env
 projects/switchboard-self/WORKFLOW.md
 self/README.md
-self/.switchboard/intents/.gitkeep
-self/.decisions/.gitkeep
+self/.switchboard/intents/…       # product-intent files as they accrue
+self/.decisions/…                 # ADR-000 + AgDR records
 README.md
 SETUP.md
 ```

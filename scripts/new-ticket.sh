@@ -126,8 +126,10 @@ command -v gh >/dev/null || { echo "ERROR gh CLI not found" >&2; exit 1; }
 # Milestone: attach by number; create via gh api if it does not exist.
 MILESTONE_ARGS=()
 if [ -n "$MILESTONE" ]; then
-  ms_number="$(gh api --paginate "repos/$REPO/milestones?state=all" \
-    --jq ".[] | select(.title==\"$MILESTONE\") | .number" 2>/dev/null | head -n1 || true)"
+  # Title goes in via env, not string interpolation — a quote in the
+  # milestone name must not break (or inject into) the jq program.
+  ms_number="$(MS_TITLE="$MILESTONE" gh api --paginate "repos/$REPO/milestones?state=all" \
+    --jq '.[] | select(.title==env.MS_TITLE) | .number' 2>/dev/null | head -n1 || true)"
   if [ -z "$ms_number" ]; then
     echo "milestone '$MILESTONE' not found, creating..." >&2
     ms_number="$(gh api "repos/$REPO/milestones" -f title="$MILESTONE" --jq .number)"

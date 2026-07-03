@@ -65,9 +65,8 @@ class FakeTracker:
         # Mimic GitHub: commenting bumps the issue's updatedAt. The parking
         # marker must survive this (audit finding #1 regression guard).
         bump = datetime.now(UTC)
-        for coll in (self.states, ):
-            if issue_id in coll:
-                coll[issue_id].updated_at = bump
+        if issue_id in self.states:
+            self.states[issue_id].updated_at = bump
         for issue in self.candidates:
             if issue.id == issue_id:
                 issue.updated_at = bump
@@ -411,7 +410,7 @@ async def test_worker_failure_uses_backoff_then_releases_when_gone(harness):
     tracker.states = {"node-1": make_issue(1)}
     await orch._tick()
     await wait_for(lambda: "node-1" in orch.retry_attempts)
-    assert orch.retry_attempts["node-1"].error is not None
+    assert orch.retry_attempts["node-1"].attempt == 1
 
     tracker.candidates = []  # issue disappears -> retry path releases the claim
     await wait_for(lambda: "node-1" not in orch.claimed
