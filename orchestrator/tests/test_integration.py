@@ -322,7 +322,7 @@ async def test_startup_terminal_sweep_removes_stale_workspaces(harness):
     assert not stale.exists()
 
 
-async def test_multi_turn_continuation_resumes_session(tmp_path, monkeypatch):
+async def test_multi_turn_continuation_resumes_session(tmp_path, monkeypatch, capfd):
     """Turn 2+ inside ONE worker session must resume the previous turn's
     session id and send CONTINUATION_PROMPT, never the rendered task prompt
     (core §16.5, §7.1). A regression that drops the session id between turns
@@ -347,10 +347,14 @@ async def test_multi_turn_continuation_resumes_session(tmp_path, monkeypatch):
     assert runner.turns[2][1] == "sess-2"
     for _, _, prompt in runner.turns[1:]:
         assert prompt == CONTINUATION_PROMPT
-    assert "node-1" in orch.completed  # normal exit, not a failure
+    # Normal exit, not a failure (the write-only `completed` set was removed
+    # in the v0.1.4 audit — assert the observable outcome instead).
+    err = capfd.readouterr().err
+    assert "worker completed" in err
+    assert "worker failed" not in err
 
 
-async def test_budget_ceiling_ends_session_normally(tmp_path, monkeypatch):
+async def test_budget_ceiling_ends_session_normally(tmp_path, monkeypatch, capfd):
     """claude.max_budget_usd caps the CUMULATIVE session cost: at $0.01/turn a
     $0.025 ceiling ends the session after turn 3 (0.03 >= 0.025) as a normal
     completion, well before agent.max_turns (§13.5 accounting)."""
@@ -369,8 +373,14 @@ async def test_budget_ceiling_ends_session_normally(tmp_path, monkeypatch):
                    and "node-1" not in orch.claimed)
 
     assert len(runner.turns) == 3          # ceiling, not max_turns (10), ended it
-    assert "node-1" in orch.completed      # normal completion, not WorkerFailure
-    assert orch.totals["cost_usd"] == pytest.approx(0.03)
+    # Normal completion, not WorkerFailure (the `completed` set and cost
+    # totals were removed in the v0.1.4 audit — assert observable outcomes:
+    # the ceiling log line records the cumulative cost that tripped it).
+    err = capfd.readouterr().err
+    assert "worker budget ceiling reached" in err
+    assert "cost_usd=0.03" in err
+    assert "worker completed" in err
+    assert "worker failed" not in err
 
 
 async def test_maybe_reload_detects_real_mtime_change(harness):
