@@ -11,6 +11,7 @@ orchestrator code.
 | Label                  | Active? | Meaning                                                        |
 |------------------------|---------|----------------------------------------------------------------|
 | `status:drafting`      | no      | Gate A pending — intent + spec being authored/approved         |
+| `status:triage`        | **yes** | Adversarial ticket verification — dispatched to a verifier session |
 | `status:todo`          | **yes** | Approved, unblocked, dispatchable                              |
 | `status:in-progress`   | **yes** | An agent is working it                                          |
 | `status:plan-review`   | no      | Gate B handoff — agent produced a plan/ADR awaiting approval    |
@@ -30,7 +31,52 @@ Dependencies use GitHub's native **blocked-by**; Symphony won't dispatch a
   agent produces an implementation plan + ADR, parks at `status:plan-review`, and
   a human approves before child tickets are filed.
 - **Gate C — final review.** Every implementation hands off at
-  `status:human-review`. A human merges. Agents never self-merge.
+  `status:human-review`. A human merges. Agents never self-merge. Merge review
+  includes ratifying (or overturning) any AgDRs the PR added under
+  `<convention_root>.decisions/` — a PR that changed spec/methodology
+  semantics without one is incomplete.
+
+## Triage — adversarial ticket verification (active state)
+
+`status:triage` moves "verification before autonomy" to the ticket layer: before
+an issue becomes dispatchable, an independent verifier session subjects it to
+adversarial scrutiny so the implementing agent only ever sees contracts that
+survived independent review. It is an **active** state (Symphony dispatches it),
+but the dispatched session runs as a *verifier*, not an implementer — the
+`status:triage` branch in the workflow prompt swaps the role. It reuses the
+same dispatch machinery, session, and budget caps as an implementation session,
+plus one generic scheduler rule it leans on: sessions are *role-pinned* — when
+a worker's issue changes state (even active → active, e.g. a PASS relabel
+`status:triage → status:todo`), the session ends at the next turn boundary and
+normal re-dispatch starts a fresh session in the new role (SPEC.md §4).
+
+The verifier applies the rubric in the prompt body (assumptions, criteria shape,
+testing asks, sizing, boundaries) and routes to exactly one verdict:
+
+- **PASS** → relabel `status:triage → status:todo` (dispatchable).
+- **NEEDS WORK** → relabel `status:triage → status:drafting` + a `## Triage
+  verdict` feedback comment (fixed, grep-able heading).
+- **SPLIT** → file child issues at `status:drafting` (drafted bodies, native
+  blocked-by chaining), park the parent at `status:drafting`.
+
+The verifier never edits the issue body and never writes feature code — comments,
+labels, and child issues only. Transitions in: a human (or a `SPLIT` parent)
+files at `status:triage`. Transitions out: `status:todo` or `status:drafting`.
+
+### When to file at `status:triage` vs straight to `status:todo`
+
+Proportionality applies here too — triage is a scrutiny gate, not a mandatory
+tollbooth:
+
+- **Skip triage** for trivial/low-risk tickets whose criteria are already
+  bounded and checkable (a one-line fix, a typo, a config bump). File them
+  straight at `status:todo`. Forcing triage onto a five-minute bug is the same
+  mis-set-entry-state mistake as forcing Gate A/B onto it.
+- **File at `status:triage`** when a ticket is new, author-fresh, or its criteria
+  smell unbounded ("all/every/comprehensive"), its assumptions are unstated, or
+  its size is uncertain — exactly the cases where an unverified contract can burn
+  an implementation session. (Calibration pair: a bounded ticket round-trips
+  cleanly; an unbounded one burns a session and gets parked.)
 
 ## Proportionality (the risk knob)
 

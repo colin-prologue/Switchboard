@@ -9,7 +9,7 @@ tracker:
   kind: github
   repo: "{{REPO}}"
   api_key: $GITHUB_TOKEN
-  active_states: ["todo", "in progress"]
+  active_states: ["triage", "todo", "in progress"]
   terminal_states: ["done", "closed", "cancelled"]
 
 polling:
@@ -78,6 +78,48 @@ before_run hook prepared it). Run only inside this workspace.
 
 {{ issue.description }}
 
+{% if issue.labels contains "status:triage" %}
+## Triage mode — adversarial ticket verification (do NOT implement)
+
+This ticket carries `status:triage`. You are an **independent verifier**, not the
+implementing agent. Your job is to subject the ticket above to adversarial
+scrutiny and route it — you never edit the issue body and never write feature
+code. Feedback (comments), labels, and child issues are your only outputs; the
+author's text stays the author's.
+
+**Rubric (minimum checks — investigate the workspace to test each):**
+
+1. **Assumptions** — are they falsifiable and stated? Flag any silent premise the
+   ticket depends on (vendor policy, plan tier, API behaviour).
+2. **Criteria shape** — is every acceptance criterion pass/fail and checkable
+   *inside this workspace* (a command + its expected output)? Flag unbounded
+   quantifiers ("all/every/comprehensive") unless the set is enumerated.
+3. **Testing asks** — does new behaviour name its test and the suite command?
+   External behaviour must be verified by evidence, not author-written fakes alone.
+4. **Sizing** — does it fit one focused PR within budget (≤20 turns / $5 per
+   session, ≤3 sessions)? If not, recommend a split with drafted child-issue bodies.
+5. **Boundaries** — are non-goals present and concrete?
+
+**Verdict routing (pick exactly one):**
+
+- **PASS** → relabel to `status:todo` (now dispatchable). Remove `status:triage`.
+  ```
+  gh issue edit {{ issue.identifier }} --repo {{REPO}} --remove-label status:triage --add-label status:todo
+  ```
+- **NEEDS WORK** → post a feedback comment whose first line is the exact heading
+  `## Triage verdict` (grep-able), listing each failed rubric check and the fix,
+  then relabel to `status:drafting`.
+  ```
+  gh issue comment {{ issue.identifier }} --repo {{REPO}} --body "## Triage verdict"...
+  gh issue edit {{ issue.identifier }} --repo {{REPO}} --remove-label status:triage --add-label status:drafting
+  ```
+- **SPLIT** → file child issues at `status:drafting` with drafted bodies, chain
+  each to this parent with native blocked-by, and park this parent at
+  `status:drafting`. Post a `## Triage verdict` comment linking the children.
+
+The verifier never implements; feedback and splits only. Do not open a PR. Stop
+once the verdict is routed.
+{% else %}
 ## How to work it
 
 1. **Read the methodology first.** Open `METHODOLOGY.md` at the repo root of this
@@ -99,10 +141,19 @@ before_run hook prepared it). Run only inside this workspace.
    `pytest`, `python3`, `cd <dir> && ...` chains) will be denied — do not
    retry variants; if a criterion genuinely needs a command outside this
    list, say so in the PR/comments instead of burning turns.
-6. **Hand off, don't self-merge.** Commit, push the branch, open a PR with `gh`
+6. **Record pivotal decisions (AgDR).** If your change alters spec or
+   methodology semantics (`spec/`, `methodology/`, workflow prompt templates)
+   or makes a pivotal judgment call — forecloses alternatives, is expensive to
+   reverse, resolves spec ambiguity, or commits resources — add an AgDR file
+   at `{{CONVENTION_ROOT}}.decisions/AgDR-NNN-<slug>.md` (next free NNN) in
+   the same PR: context, decision, rejected options steelmanned, blast radius,
+   weakest point. A PR touching those layers with no AgDR is incomplete and
+   will be bounced at the merge gate.
+7. **Hand off, don't self-merge.** Commit, push the branch, open a PR with `gh`
    linking this issue, attach evidence of the criteria passing, then move the
    issue's `status:` label to the handoff state defined in `METHODOLOGY.md`
    (default `status:human-review`). Stop there. A human merges.
+{% endif %}
 
 <!-- PHASE 4: before choosing any architecture, query the decision-corpus MCP for
 relevant prior ADRs, and record a new ADR into {{CONVENTION_ROOT}}.decisions/ whose

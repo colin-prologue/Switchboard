@@ -97,3 +97,35 @@ def test_none_priority_renders_without_raising():
     template = "priority={{ issue.priority }}"
     out = render_prompt(template, make_issue(priority=None), attempt=None)
     assert out == "priority="
+
+
+# --- triage branch: the real WORKFLOW.base.md body must gate on the label -----
+
+def _real_base_body() -> str:
+    """The real prompt body, with scaffold placeholders substituted as
+    register-project.sh would (leaving only render-time Liquid)."""
+    from pathlib import Path
+
+    real_path = Path(__file__).resolve().parents[2] / "workflow" / "WORKFLOW.base.md"
+    text = real_path.read_text(encoding="utf-8")
+    substituted = (
+        text.replace("{{REPO}}", "acme/widgets")
+        .replace("{{WORKSPACE_ROOT}}", "/tmp/ws")
+        .replace("{{MAX_AGENTS}}", "10")
+        .replace("{{CONVENTION_ROOT}}", "")
+    )
+    # Drop the YAML front matter; keep the prompt body Symphony would render.
+    return substituted.split("---", 2)[2].strip()
+
+
+def test_triage_label_selects_verifier_branch():
+    out = render_prompt(_real_base_body(), make_issue(labels=["status:triage"]), attempt=None)
+    assert "Triage mode" in out
+    assert "Triage verdict" in out
+    assert "## How to work it" not in out  # implementer branch suppressed
+
+
+def test_absent_triage_label_selects_implementer_branch():
+    out = render_prompt(_real_base_body(), make_issue(labels=["bug", "status:todo"]), attempt=None)
+    assert "## How to work it" in out
+    assert "Triage mode" not in out

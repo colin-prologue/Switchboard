@@ -326,6 +326,7 @@ class Orchestrator:
         session_id: str | None = None
         cumulative_cost = 0.0
         turn_number = 1
+        dispatch_state = issue.state.lower()
         try:
             while True:
                 if turn_number == 1:
@@ -352,7 +353,11 @@ class Orchestrator:
                     issue = refreshed[0]
                     if entry:
                         entry.issue = issue
-                if issue.state.lower() not in cfg.tracker().active_states:
+                # SPEC.md §4 override of core §16.5 (role-pinned sessions):
+                # the turn-1 prompt was rendered from dispatch-time state, so
+                # ANY state change — active -> active included (triage PASS) —
+                # ends the session; re-dispatch picks it up in the new role.
+                if issue.state.lower() != dispatch_state:
                     break
                 if claude_cfg.max_budget_usd is not None \
                         and cumulative_cost >= claude_cfg.max_budget_usd:
