@@ -96,6 +96,7 @@ mklabel "status:in-progress"  "1D76DB" "Agent working"
 mklabel "status:plan-review"  "D93F0B" "Gate B: plan/ADR awaiting approval (not dispatched)"
 mklabel "status:human-review" "5319E7" "Gate C: implementation done, awaiting human merge"
 mklabel "status:blocked"      "B60205" "Parked / dependency unmet"
+mklabel "status:parked"       "E99695" "Cap-park: orchestrator halted at session cap — remove to re-dispatch"
 
 cat <<EOF
 

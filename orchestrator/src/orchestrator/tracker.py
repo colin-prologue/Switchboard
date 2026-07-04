@@ -110,6 +110,22 @@ mutation($subjectId: ID!, $body: String!) {
 }
 """
 
+LABEL_ID_QUERY = """
+query($owner: String!, $name: String!, $label: String!) {
+  repository(owner: $owner, name: $name) {
+    label(name: $label) { id }
+  }
+}
+"""
+
+ADD_LABELS_MUTATION = """
+mutation($labelableId: ID!, $labelIds: [ID!]!) {
+  addLabelsToLabelable(input: {labelableId: $labelableId, labelIds: $labelIds}) {
+    clientMutationId
+  }
+}
+"""
+
 
 class GitHubTracker:
     """Tracker adapter bound to GitHub Issues (SPEC.md §2).
@@ -122,6 +138,8 @@ class GitHubTracker:
         self._owned_client = client is None
         # core §11.2: network timeout 30000 ms.
         self._client = client or httpx.AsyncClient(timeout=30.0)
+        # label name -> node id; labels are immutable ids per repo, safe to cache.
+        self._label_id_cache: dict[str, str] = {}
 
     async def aclose(self) -> None:
         if self._owned_client:
@@ -197,6 +215,35 @@ class GitHubTracker:
         extension that needs a single write path).
         """
         await self._request(ADD_COMMENT_MUTATION, {"subjectId": issue_id, "body": body})
+
+    async def add_labels(self, issue_id: str, label_names: list[str]) -> None:
+        """Apply labels to an issue (SPEC.md §4 owned extension: durable park).
+
+        The `status:parked` marker must live in the tracker so parking survives
+        a process restart. Like `add_issue_comment`, this is a sanctioned
+        exception to the core §11.5 no-tracker-writes boundary. Label node ids
+        are resolved by name (and cached) since GitHub's mutation takes ids.
+        """
+        label_ids = [await self._resolve_label_id(name) for name in label_names]
+        await self._request(
+            ADD_LABELS_MUTATION, {"labelableId": issue_id, "labelIds": label_ids}
+        )
+
+    async def _resolve_label_id(self, name: str) -> str:
+        if name in self._label_id_cache:
+            return self._label_id_cache[name]
+        owner, repo = self._split_repo()
+        data = await self._request(
+            LABEL_ID_QUERY, {"owner": owner, "name": repo, "label": name}
+        )
+        label = (data.get("repository") or {}).get("label")
+        if not isinstance(label, dict) or not label.get("id"):
+            raise TrackerError(
+                "github_label_not_found",
+                f"label {name!r} does not exist in the repo (provision it first)",
+            )
+        self._label_id_cache[name] = label["id"]
+        return label["id"]
 
     # --- pagination -----------------------------------------------------------
 

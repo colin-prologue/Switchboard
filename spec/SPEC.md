@@ -122,12 +122,17 @@ These are ours, layered on top, not in the original Symphony spec:
   core's continuation loop re-dispatches an active issue indefinitely; with a
   paid execution adapter that is an unbounded-spend path. After N worker
   sessions on one issue in a process lifetime, the orchestrator *parks* it:
-  claim released, workspace preserved (plus the `after_run` run log beside
-  it), one notification comment posted on the issue, and no re-dispatch until
-  the issue's `updated_at` changes (i.e., a human touched it). Caps are
-  diagnostic checkpoints, not kill switches. The parking comment is the single
-  deliberate exception to the core §11.5 orchestrator-never-writes-the-tracker
-  boundary; nothing else is alive to notify the human at that point. Both the
-  parked set and the per-issue counter are in-memory: a process restart
-  re-grants the FULL cap to a previously parked issue, not one bonus session
-  (AgDR-002 addendum).
+  claim released, workspace preserved (plus the `after_run` run log beside it),
+  one notification comment posted on the issue, and the durable `status:parked`
+  label applied. A parked issue is not re-dispatched while it carries that
+  label; because the label lives in the tracker, the park decision survives a
+  process restart. **Unpark is deliberate: a human removes the `status:parked`
+  label** (e.g. moves the card off *Parked* on the board), which also resets the
+  per-issue session counter. A stray edit or comment no longer unparks — this is
+  what structurally forecloses the OBS-022 self-unpark loop (the park decision
+  never reads `updated_at`). Caps are diagnostic checkpoints, not kill switches.
+  The comment and the label are the two deliberate exceptions to the core §11.5
+  orchestrator-never-writes-the-tracker boundary; nothing else is alive to
+  notify the human at that point. The in-memory `parked` set survives only as
+  session-counter bookkeeping for within-run unparks; it is not load-bearing for
+  the park decision (AgDR-008 supersedes AgDR-002's in-memory-park weakness).

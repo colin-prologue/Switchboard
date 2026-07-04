@@ -1,7 +1,9 @@
 # AgDR-002: Session cap + parking (one tracker-write exception)
 
 - **Status:** accepted (autonomous run, 2026-07-01) — **most contestable call
-  of the run; review this one first.**
+  of the run; review this one first.** The in-memory-park weakness (below) is
+  **superseded by AgDR-008** (2026-07-04): the park marker is now the durable
+  `status:parked` tracker label, so parking survives a restart.
 - **Context:** Core Symphony re-dispatches an active issue indefinitely
   (normal exit → 1s continuation retry → new session). The Codex original
   bills differently; with `claude -p` each session is real money. An agent

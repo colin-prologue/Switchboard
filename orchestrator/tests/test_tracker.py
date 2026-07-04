@@ -15,9 +15,11 @@ import pytest
 
 from orchestrator.tracker import (
     ADD_COMMENT_MUTATION,
+    ADD_LABELS_MUTATION,
     CANDIDATE_ISSUES_QUERY,
     CLOSED_ISSUES_QUERY,
     ISSUES_BY_IDS_QUERY,
+    LABEL_ID_QUERY,
     GitHubTracker,
 )
 from orchestrator.types import TrackerConfig, TrackerError
@@ -480,6 +482,60 @@ async def test_add_issue_comment_posts_mutation():
         "subjectId": "I_1",
         "body": "Parking this issue after 3 sessions.",
     }
+
+
+@pytest.mark.asyncio
+async def test_add_labels_resolves_id_then_posts_mutation():
+    captured: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request_body(request)
+        captured.append(body)
+        if body["query"] == LABEL_ID_QUERY:
+            return graphql_response({"repository": {"label": {"id": "LA_parked"}}})
+        return graphql_response({"addLabelsToLabelable": {"clientMutationId": None}})
+
+    tracker, transport = make_tracker(handler)
+    await tracker.add_labels("I_1", ["status:parked"])
+
+    assert transport.call_count == 2                      # resolve id, then mutate
+    assert captured[0]["query"] == LABEL_ID_QUERY
+    assert captured[0]["variables"]["label"] == "status:parked"
+    assert captured[1]["query"] == ADD_LABELS_MUTATION
+    assert captured[1]["variables"] == {
+        "labelableId": "I_1",
+        "labelIds": ["LA_parked"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_add_labels_caches_label_id_across_calls():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request_body(request)["query"] == LABEL_ID_QUERY:
+            return graphql_response({"repository": {"label": {"id": "LA_parked"}}})
+        return graphql_response({"addLabelsToLabelable": {"clientMutationId": None}})
+
+    tracker, transport = make_tracker(handler)
+    await tracker.add_labels("I_1", ["status:parked"])
+    await tracker.add_labels("I_2", ["status:parked"])
+
+    # 2 (first call: resolve + mutate) + 1 (second call: mutate only, id cached)
+    assert transport.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_add_labels_raises_when_label_not_provisioned():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request_body(request)["query"] == LABEL_ID_QUERY:
+            return graphql_response({"repository": {"label": None}})
+        return graphql_response({"addLabelsToLabelable": {"clientMutationId": None}})
+
+    tracker, transport = make_tracker(handler)
+    with pytest.raises(TrackerError) as exc:
+        await tracker.add_labels("I_1", ["status:parked"])
+
+    assert exc.value.code == "github_label_not_found"
+    assert transport.call_count == 1                      # never reached the mutation
 
 
 @pytest.mark.asyncio
