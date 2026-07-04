@@ -39,3 +39,24 @@
   in-flight ones), and was the explicit trade of the label approach over disk
   state persistence. `status:parked` is applied additively (the prior
   `status:todo` is not removed); single-status-column cleanup belongs to #22.
+
+## Addendum (2026-07-04, Codex PR #28 P1 — label-write failure)
+
+- **Defect (worse than reported):** the first cut added the issue to
+  `self.parked` *before* writing the label. If `add_labels` failed, the next
+  `_eligible` saw "in `parked` + label absent", took the unpark branch (which
+  resets the counter), and re-dispatched — a same-process cap→park→fail→unpark
+  spend loop, not just the restart hole Codex described. The OBS-022 loop class,
+  resurrected on the error path.
+- **Fix:** `self.parked.add` happens only *after* the label write succeeds. On
+  failure the id stays out of `parked`, the counter stays at cap, and the next
+  tick re-enters `_park` (the cap check blocks a worker) and retries the label —
+  no bonus session, transient failures self-heal. The notification comment is
+  guarded by a `_park_notified` set so retries don't spam the issue.
+- **Unprovisioned label (Codex's cited case):** if `add_labels` fails with
+  `github_label_not_found`, the durable marker can never be written, so the cap
+  is unenforceable. `_park` sets a `_park_label_missing` dispatch block (§5.5
+  style) that halts *new* dispatch loudly until `status:parked` is provisioned
+  and the process restarts — safer than silently re-granting caps. Regression
+  tests: `test_park_label_write_failure_holds_at_cap_without_looping`,
+  `test_park_missing_label_halts_dispatch`.

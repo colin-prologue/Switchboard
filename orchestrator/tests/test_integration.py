@@ -30,7 +30,7 @@ import pytest
 
 import orchestrator.scheduler as scheduler_mod
 from orchestrator.scheduler import CONTINUATION_PROMPT, Orchestrator
-from orchestrator.types import BlockerRef, Issue, TurnResult
+from orchestrator.types import BlockerRef, Issue, TrackerError, TurnResult
 from orchestrator.workspace import WorkspaceManager
 
 UTC = timezone.utc
@@ -56,6 +56,7 @@ class FakeTracker:
         self.terminal: list[Issue] = []
         self.comments: list[tuple[str, str]] = []
         self.labels_added: list[tuple[str, tuple[str, ...]]] = []
+        self.add_labels_error: TrackerError | None = None  # set to simulate a write failure
 
     async def fetch_candidate_issues(self):
         return list(self.candidates)
@@ -79,6 +80,8 @@ class FakeTracker:
                 issue.updated_at = bump
 
     async def add_labels(self, issue_id, label_names):
+        if self.add_labels_error is not None:
+            raise self.add_labels_error
         # Mimic GitHub: the label becomes visible on every subsequent fetch of
         # the issue. This is the durable state that survives a "restart" — a test
         # that rebuilds the scheduler but reuses the tracker still sees the label.
@@ -344,6 +347,62 @@ async def test_parked_issue_not_redispatched_after_restart(tmp_path, monkeypatch
     assert "node-1" not in orch.claimed
     assert orch.sessions_per_issue.get("node-1", 0) == 0  # no fresh cap granted
     assert tracker.comments == []                        # no duplicate park comment
+
+
+async def test_park_label_write_failure_holds_at_cap_without_looping(harness):
+    """Codex PR #28 P1: if the durable label write fails, `_park` must not leave
+    the issue in a state that unparks itself on the next tick.
+
+    Before the fix, `_park` added the issue to `self.parked` *before* the label
+    write; when the write failed the next `_eligible` saw "in parked + no label",
+    took the unpark branch (resetting the counter), and re-dispatched — an
+    unbounded cap→park→fail→unpark spend loop. The counter must stay at cap and
+    the comment must be posted exactly once.
+    """
+    orch, tracker, runner, _ = harness
+    tracker.add_labels_error = TrackerError("github_api_status", "transient boom")
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states = {"node-1": issue}
+
+    await orch._tick()
+    await wait_for(lambda: orch.sessions_per_issue.get("node-1") == 2)  # ran to cap
+    for _ in range(4):                                # keep ticking; write keeps failing
+        await orch._tick()
+        await asyncio.sleep(0.02)
+
+    assert orch.sessions_per_issue.get("node-1") == 2  # counter held at cap, NOT reset
+    assert len(runner.turns) == 2                      # no bonus sessions past the cap
+    assert len(tracker.comments) == 1                  # notified once, no spam
+    assert "node-1" not in orch.parked                 # not durably parked (label absent)
+
+    # Recovery: once the write succeeds, the next park attempt makes it durable.
+    tracker.add_labels_error = None
+    await orch._tick()
+    await wait_for(lambda: "node-1" in orch.parked)
+    assert ("node-1", ("status:parked",)) in tracker.labels_added
+    assert len(tracker.comments) == 1                  # still only one comment total
+
+
+async def test_park_missing_label_halts_dispatch(harness):
+    """Codex PR #28 P1 (the cited case): if `status:parked` is not provisioned,
+    the durable park marker can never be written, so the cap cannot be enforced
+    across restarts. Rather than silently re-grant caps, halt dispatch loudly."""
+    orch, tracker, runner, _ = harness
+    tracker.add_labels_error = TrackerError("github_label_not_found", "not provisioned")
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states = {"node-1": issue}
+
+    await orch._tick()
+    await wait_for(lambda: orch._park_label_missing is not None)  # park tripped the halt
+
+    # A brand-new dispatchable issue must NOT be picked up while dispatch is halted.
+    tracker.candidates = [issue, make_issue(2)]
+    tracker.states["node-2"] = make_issue(2, "human review")
+    await orch._tick()
+    assert "node-2" not in orch.running
+    assert "node-2" not in orch.sessions_per_issue
 
 
 async def test_active_to_active_state_change_ends_session(tmp_path, monkeypatch):
