@@ -44,6 +44,11 @@ FAILURE_BASE_BACKOFF_MS = 10000    # core §8.4 failure backoff base
 SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
                                    # blocks (after_run hooks) before hard-cancel
 
+# Durable park marker (SPEC.md §4 owned extension). Written to the tracker at
+# park time; its presence is the single source of truth for "parked", so the
+# decision survives a process restart (AgDR-002 weakest point → resolved).
+PARK_LABEL = "status:parked"
+
 CONTINUATION_PROMPT = (
     "Continue working the same issue in this workspace. Do not restart from "
     "scratch: review your progress so far, then finish the remaining work, "
@@ -89,7 +94,13 @@ class Orchestrator:
 
         # owned extension state (SPEC.md §4 session cap / parking)
         self.sessions_per_issue: dict[str, int] = {}
-        self.parked: dict[str, str] = {}  # issue_id -> updated_at iso at park time
+        self.parked: set[str] = set()  # issue ids DURABLY parked this run (label
+                                       # write confirmed); counter-reset bookkeeping
+                                       # only — the durable state is the PARK_LABEL
+                                       # on the tracker, not this set
+        self._park_notified: set[str] = set()  # comment posted once per park episode
+        self._park_label_missing: str | None = None  # §5.5-style dispatch block when
+                                                     # PARK_LABEL is unprovisioned
 
         self._stopping = False
         self._workflow_broken: str | None = None  # §5.5 dispatch block reason
@@ -221,6 +232,15 @@ class Orchestrator:
                 error=self._workflow_broken)
             return
 
+        if self._park_label_missing is not None:
+            # A park could not write its durable PARK_LABEL because the label is
+            # unprovisioned. Without it the session cap cannot survive a restart,
+            # so halting dispatch is safer than silently re-granting caps. Fix:
+            # provision `status:parked` (scripts/register-project.sh) and restart.
+            log("dispatch halted: status:parked label is unprovisioned",
+                error=self._park_label_missing)
+            return
+
         cfg = self._cfg
         assert cfg is not None
         try:
@@ -286,14 +306,21 @@ class Orchestrator:
             return False
         if issue.id in self.running or issue.id in self.claimed:
             return False
-        # owned parking gate: an updated_at change (human touched it) unparks
+        # owned parking gate (durable): the PARK_LABEL written to the tracker at
+        # park time is the source of truth, so a process restart still sees the
+        # issue as parked (unlike the in-memory set, which is empty on restart).
+        # Removing the label — a deliberate human action, e.g. moving the card
+        # off *Parked* on the board — is the sole unpark signal and resets the
+        # session counter. A stray comment/edit no longer re-arms a capped agent,
+        # which also makes the OBS-022 self-unpark loop structurally impossible.
+        if PARK_LABEL in issue.labels:
+            self.parked.add(issue.id)
+            return False
         if issue.id in self.parked:
-            marker = issue.updated_at.isoformat() if issue.updated_at else ""
-            if self.parked[issue.id] == marker:
-                return False
-            del self.parked[issue.id]
+            self.parked.discard(issue.id)
+            self._park_notified.discard(issue.id)
             self.sessions_per_issue.pop(issue.id, None)
-            log("issue unparked (tracker activity observed)",
+            log("issue unparked (status:parked label removed)",
                 issue_id=issue.id, issue_identifier=issue.identifier)
         if not self._state_slots_available(issue.state):
             return False
@@ -582,33 +609,42 @@ class Orchestrator:
 
     async def _park(self, issue: Issue, reason: str) -> None:
         self._cancel_retry(issue.id)
-        self.parked[issue.id] = issue.updated_at.isoformat() if issue.updated_at else ""
-        log("ISSUE PARKED — human attention needed", issue_id=issue.id,
-            issue_identifier=issue.identifier, reason=reason,
-            workspace_preserved=True)
         tracker, wsm, _ = self._components()
         body = (
             f"**Switchboard parked this issue** — {reason}.\n\n"
-            f"The orchestrator will not dispatch it again until the issue is "
-            f"updated (edit, label change, or comment). The per-issue workspace "
-            f"is preserved for diagnosis at `{wsm.path_for(issue.identifier)}`."
+            f"The orchestrator will not dispatch it again while it carries the "
+            f"`{PARK_LABEL}` label. Remove that label (or move the issue off "
+            f"*Parked* on the board) to re-dispatch — the session counter resets "
+            f"on unpark. The per-issue workspace is preserved for diagnosis at "
+            f"`{wsm.path_for(issue.identifier)}`."
         )
-        # Hold the claim while the marker settles: our own comment bumps
-        # updatedAt, and a poll tick landing between the comment and the
-        # marker re-fetch below would otherwise see marker != updatedAt,
-        # unpark, and dispatch a bonus session past the cap.
+        # Hold the claim while the tracker writes settle so a poll tick cannot
+        # dispatch the issue mid-park. The issue is added to `self.parked` ONLY
+        # after the durable label write succeeds: if the write fails, the id
+        # stays out of `self.parked`, the session counter stays at cap, and the
+        # next tick re-enters `_park` (cap check blocks a worker) and retries the
+        # label — no bonus session, no self-unpark loop. The comment is guarded
+        # by `_park_notified` so retries don't spam the issue.
         self.claimed.add(issue.id)
         try:
-            await tracker.add_issue_comment(issue.id, body)
-            # Re-fetch so the park marker is the POST-comment value —
-            # otherwise the next poll would see the bump, unpark, and loop
-            # the cap forever (the exact failure this extension prevents).
-            refreshed = await tracker.fetch_issue_states_by_ids([issue.id])
-            if refreshed and refreshed[0].updated_at:
-                self.parked[issue.id] = refreshed[0].updated_at.isoformat()
+            if issue.id not in self._park_notified:
+                await tracker.add_issue_comment(issue.id, body)
+                self._park_notified.add(issue.id)
+                log("ISSUE PARKED — human attention needed", issue_id=issue.id,
+                    issue_identifier=issue.identifier, reason=reason,
+                    workspace_preserved=True)
+            await tracker.add_labels(issue.id, [PARK_LABEL])
+            self.parked.add(issue.id)  # durable marker confirmed
         except TrackerError as exc:
-            log("parking comment/marker refresh failed (issue stays parked "
-                "on pre-comment marker)", issue_id=issue.id, error=str(exc))
+            if exc.code == "github_label_not_found":
+                # The park label is unprovisioned: parking can never persist, so
+                # the cap is unenforceable across restarts. Halt dispatch (§5.5
+                # style) rather than silently re-grant caps. Cleared by restart
+                # after `status:parked` is provisioned.
+                self._park_label_missing = str(exc)
+            log("park label write failed; issue held at cap and will retry the "
+                "label on the next tick (not durably parked yet)",
+                issue_id=issue.id, error=str(exc))
         finally:
             self.claimed.discard(issue.id)
 
