@@ -14,4 +14,23 @@ set -uo pipefail
   git status --short 2>/dev/null
 } >> "../.$(basename "$PWD").run.log" 2>&1 || true
 
+# Ground-truth transcript capture (issue #30, blocks #20b / #16).
+# Copy this session's CLI transcript(s) into the workspace's .run/transcripts/
+# so a fresh fail-review verifier reads them FROM DISK (ADR-013 inversion)
+# instead of trusting returned summaries. Transcripts carry secrets: .run/ is
+# gitignored and their content is NEVER committed or posted to GitHub — this
+# writes to local disk only.
+#
+# The project-dir name is derivable from the workspace path (safety invariant:
+# cwd == the per-issue workspace), so no session id is needed. Claude Code
+# encodes the absolute cwd by replacing every "/" and "." with "-".
+{
+  transcript_src="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
+  if [ -d "$transcript_src" ]; then
+    mkdir -p .run/transcripts
+    # Overwrite-safe on a reused workspace; no-op if the glob matches nothing.
+    cp -f "$transcript_src"/*.jsonl .run/transcripts/ 2>/dev/null || true
+  fi
+} || true
+
 exit 0
