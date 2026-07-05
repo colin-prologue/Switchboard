@@ -121,6 +121,72 @@ def test_scaffold_output_is_valid_dry_run_body() -> None:
         assert section in proc.stdout
 
 
+# --- real-filing path: MILESTONE_ARGS empty-array regression ------------------
+#
+# The reported bug (`MILESTONE_ARGS[@]: unbound variable`) lives in the
+# real-filing path, AFTER the --dry-run early-exit — so --dry-run alone cannot
+# cover it. We stub `gh` on PATH so the path runs network-free and assert it
+# reaches `gh issue create` without aborting under `set -u`.
+#
+# Version note: bash < 4.4 (macOS system bash 3.2) is what makes "${arr[@]}" on
+# an EMPTY array an unbound-variable error; bash >= 4.4 tolerates it. So on the
+# dev box this is a hard regression guard; on newer bash it degrades to a smoke
+# test of the same path. Either way it must exit 0 and invoke `gh issue create`.
+
+
+def _gh_stub(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    """Install a fake `gh` on PATH; return (env, arglog). The stub records each
+    invocation's argv and answers just enough for the real-filing path: an issue
+    URL for `issue create`, a bare number for any `api` call (milestone lookup)."""
+    arglog = tmp_path / "gh-args.log"
+    fake_gh = tmp_path / "gh"
+    fake_gh.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{arglog}"\n'
+        'case "$1" in\n'
+        '  issue) echo "https://github.com/owner/name/issues/123" ;;\n'
+        "  api)   echo 7 ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+    fake_gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    return env, arglog
+
+
+def test_real_filing_no_milestone_reaches_gh(tmp_path: Path) -> None:
+    # Regression: no --milestone -> MILESTONE_ARGS is empty; the guarded
+    # expansion must not trip `set -u`. Reproduces #... on bash 3.2.
+    env, arglog = _gh_stub(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), "--title", "T", "--repo", "owner/name"],
+        input="body text\n", capture_output=True, text=True, cwd=REPO_ROOT, env=env,
+    )
+    assert proc.returncode == 0, f"real filing aborted: {proc.stderr}"
+    assert "unbound variable" not in proc.stderr
+    assert arglog.exists(), "gh was never invoked"
+    calls = arglog.read_text()
+    assert "issue create" in calls
+    assert "created:" in proc.stdout
+
+
+def test_real_filing_with_milestone_forwards_flag(tmp_path: Path) -> None:
+    # Guard against an over-correction that drops the milestone: when set, the
+    # array must still forward `--milestone <name>` to `gh issue create`.
+    env, arglog = _gh_stub(tmp_path)
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), "--title", "T", "--repo", "owner/name",
+         "--milestone", "Sprint 3"],
+        input="body text\n", capture_output=True, text=True, cwd=REPO_ROOT, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    create_call = next(
+        (ln for ln in arglog.read_text().splitlines() if ln.startswith("issue create")),
+        "",
+    )
+    assert "--milestone Sprint 3" in create_call, f"milestone not forwarded: {create_call!r}"
+
+
 # --- validation --------------------------------------------------------------
 
 
