@@ -31,6 +31,13 @@ def record_argv() -> None:
             json.dump(sys.argv[1:], f)
 
 
+def record_env() -> None:
+    env_file = os.environ.get("FAKE_ENV_FILE")
+    if env_file:
+        with open(env_file, "w") as f:
+            json.dump({k: os.environ.get(k) for k in ("GITHUB_TOKEN", "GH_TOKEN")}, f)
+
+
 def record_stdin() -> str:
     data = sys.stdin.read()
     stdin_file = os.environ.get("FAKE_STDIN_FILE")
@@ -55,6 +62,7 @@ def result_line(subtype: str = "success", session_id: str = "sess-123") -> dict:
 def main() -> None:
     scenario = os.environ.get("FAKE_SCENARIO", "success")
     record_argv()
+    record_env()
 
     if scenario == "success":
         record_stdin()

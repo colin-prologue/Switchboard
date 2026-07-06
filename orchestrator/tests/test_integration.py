@@ -105,9 +105,12 @@ class FakeRunner:
         self.release = asyncio.Event()
         # (issue_id, resume_sid, prompt)
         self.turns: list[tuple[str, str | None, str]] = []
+        self.tokens: list[str | None] = []  # agent_token per turn (issue #10)
 
-    async def run_turn(self, workspace, prompt, resume_session_id, on_event, issue_id):
+    async def run_turn(self, workspace, prompt, resume_session_id, on_event,
+                       issue_id, agent_token=None):
         self.turns.append((issue_id, resume_session_id, prompt))
+        self.tokens.append(agent_token)
         if self.hold:
             await self.release.wait()
         return TurnResult(status="succeeded", session_id=f"sess-{len(self.turns)}",
@@ -665,7 +668,8 @@ async def test_maybe_reload_detects_real_mtime_change(harness):
 async def test_worker_failure_uses_backoff_then_releases_when_gone(harness):
     orch, tracker, runner, _ = harness
 
-    async def failing_turn(workspace, prompt, resume_session_id, on_event, issue_id):
+    async def failing_turn(workspace, prompt, resume_session_id, on_event,
+                           issue_id, agent_token=None):
         return TurnResult(status="failed", session_id=None, error="error_during_execution")
 
     runner.run_turn = failing_turn
@@ -702,3 +706,48 @@ async def test_components_share_one_credential_provider(tmp_path, monkeypatch):
         assert t1._creds is orch._creds
         assert t2._creds is orch._creds
     orch._http = None
+
+
+class FakeCredsProvider:
+    def __init__(self, fail: bool = False):
+        self.fail = fail
+        self.mints = 0
+
+    async def token(self) -> str:
+        if self.fail:
+            raise RuntimeError("mint endpoint unreachable")
+        self.mints += 1
+        return f"ghs-mint-{self.mints}"
+
+    def invalidate(self) -> None:
+        pass
+
+
+async def test_worker_passes_minted_token_to_each_turn(harness):
+    orch, tracker, runner, _ = harness
+    orch._creds = FakeCredsProvider()
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: len(runner.turns) >= 1)
+    await asyncio.gather(*(e.task for e in orch.running.values()),
+                         return_exceptions=True)
+
+    assert runner.tokens == ["ghs-mint-1"]
+
+
+async def test_mint_failure_fails_worker_without_launching_agent(harness):
+    orch, tracker, runner, _ = harness
+    orch._creds = FakeCredsProvider(fail=True)
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    tasks = [e.task for e in orch.running.values()]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert runner.turns == []  # agent never launched without credentials
+    assert any(isinstance(r, scheduler_mod.WorkerFailure) for r in results)
