@@ -6,9 +6,11 @@
 #   SB_ORCHESTRATOR_CMD="uv run --project orchestrator python -m orchestrator" \
 #     scripts/run-project.sh <slug>
 #
-# Sources projects/<slug>/project.env and exports its SB_* vars so the workspace
-# hooks (hooks/*.sh) can see them, then execs the orchestrator with the project's
-# composed WORKFLOW.md. GITHUB_TOKEN must already be in the environment.
+# Sources ~/.config/switchboard/app.env (GitHub App identity, issue #10) and
+# projects/<slug>/project.env, exporting their vars so the orchestrator and the
+# workspace hooks (hooks/*.sh) can see them, then execs the orchestrator with
+# the project's composed WORKFLOW.md. Credentials: a complete SB_APP_* set
+# (preferred) or GITHUB_TOKEN (dogfood fallback).
 set -euo pipefail
 
 SB_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,7 +25,23 @@ WORKFLOW="$SB_HOME/projects/$SLUG/WORKFLOW.md"
 [ -f "$WORKFLOW" ] || { echo "ERROR $WORKFLOW missing — re-run register-project.sh" >&2; exit 1; }
 
 : "${SB_ORCHESTRATOR_CMD:?SB_ORCHESTRATOR_CMD not set (see SETUP.md Stage 3)}"
-: "${GITHUB_TOKEN:?GITHUB_TOKEN not set (tracker auth; for dogfood: export GITHUB_TOKEN=\"\$(gh auth token)\")}"
+
+# issue #10: the App credential set (non-secret identifiers; the SECRET is the
+# .pem they reference by path) lives outside the repo. Source it if present.
+APP_ENV="$HOME/.config/switchboard/app.env"
+if [ -f "$APP_ENV" ]; then
+  set -a
+  # shellcheck source=/dev/null
+  . "$APP_ENV"
+  set +a
+  echo "[run-project] App identity: ${SB_APP_BOT_LOGIN:-<unset>} (from $APP_ENV)"
+fi
+
+if [ -z "${GITHUB_TOKEN:-}" ] && { [ -z "${SB_APP_ID:-}" ] \
+    || [ -z "${SB_APP_INSTALLATION_ID:-}" ] || [ -z "${SB_APP_PRIVATE_KEY_FILE:-}" ]; }; then
+  echo "ERROR no credentials: provide $APP_ENV with SB_APP_ID/SB_APP_INSTALLATION_ID/SB_APP_PRIVATE_KEY_FILE (preferred), or export GITHUB_TOKEN (dogfood: \"\$(gh auth token)\")" >&2
+  exit 1
+fi
 
 set -a
 # shellcheck source=/dev/null
