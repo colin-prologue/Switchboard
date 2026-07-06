@@ -105,7 +105,7 @@ author's text stays the author's.
    quantifiers ("all/every/comprehensive") unless the set is enumerated.
 3. **Testing asks** — does new behaviour name its test and the suite command?
    External behaviour must be verified by evidence, not author-written fakes alone.
-4. **Sizing** — does it fit one focused PR within budget (≤20 turns / $5 per
+4. **Sizing** — does it fit one focused PR within budget (≤100 turns / $5 per
    session, ≤3 sessions)? If not, recommend a split with drafted child-issue bodies.
 5. **Boundaries** — are non-goals present and concrete?
 
