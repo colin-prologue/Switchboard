@@ -37,6 +37,53 @@ version. (`verify-setup.sh` checks these.)
 
 ---
 
+## Stage 0b — Register the Switchboard GitHub App  [MANUAL]  *(~5 min, one-time — done for THIS install: `switchboard-agent`)*
+
+The orchestrator and its agents act as a dedicated **`switchboard-agent[bot]`**
+identity, not your personal account. This makes agent actions attributable,
+lets you formally **approve** agent PRs (GitHub blocks approving your *own*
+PRs, so a shared personal identity degrades Gate C to merge-without-review),
+and gives the installation its own rate-limit budget. The App is **$0** — no
+org, no seats. See `self/.decisions/AgDR-009-github-app-identity.md`.
+
+If you'd rather not set this up yet, skip it: the kit runs on your personal
+token (Stage 5's fallback). You lose real Gate-C approvals until you switch.
+
+1. **Create the App.** github.com → Settings → Developer settings → **GitHub
+   Apps** → **New GitHub App**. Name it (e.g. `switchboard-agent`). Uncheck
+   **Webhook → Active** (unused). Repository permissions: **Issues** Read &
+   write · **Contents** Read & write · **Pull requests** Read & write
+   (Metadata Read comes automatically). Note the **App ID**.
+2. **Generate a private key** (App page → Private keys) and store it as the
+   ONLY secret at rest:
+   ```bash
+   mkdir -p ~/.config/switchboard && chmod 700 ~/.config/switchboard
+   mv ~/Downloads/<app>.private-key.pem ~/.config/switchboard/switchboard-agent.pem
+   chmod 600 ~/.config/switchboard/switchboard-agent.pem
+   ```
+3. **Install it** on your account, scoped to the repos Switchboard manages
+   (this repo for dogfooding; add real repos in Stage 6). The installation id:
+   `gh api /users/<you>/installation --jq .id`.
+4. **Write `~/.config/switchboard/app.env`** (non-secret identifiers; the
+   secret stays in the `.pem` it references) — `run-project.sh` sources this
+   automatically:
+   ```bash
+   SB_APP_ID=<app id>
+   SB_APP_INSTALLATION_ID=<installation id>
+   SB_APP_PRIVATE_KEY_FILE=$HOME/.config/switchboard/switchboard-agent.pem
+   SB_APP_BOT_LOGIN=<app-slug>[bot]
+   SB_APP_BOT_USER_ID=<gh api '/users/<app-slug>[bot]' --jq .id>
+   ```
+   `chmod 600` it. All five are required: the first three drive token minting
+   (a partial set fails startup loudly — no silent fallback to your personal
+   identity), the last two set the workspace git identity
+   (`<id>+<app-slug>[bot]@users.noreply.github.com`).
+
+**Verify:** the App page shows the three permissions; the `.pem` and `app.env`
+are `chmod 600`; launching (Stage 5) logs `App identity: <app-slug>[bot]`.
+
+---
+
 ## Stage 1 — Repurpose the repo  [MANUAL]  *(done — historical record)*
 
 **What was actually done here** (differs from the originally drafted runbook):
@@ -134,8 +181,25 @@ registered and its composed `WORKFLOW.md` matching the current base.
 
 ## Stage 5 — Go live  [RUNTIME]
 
+**Preferred — GitHub App identity (Stage 0b).** With
+`~/.config/switchboard/app.env` in place there is nothing to export beyond the
+orchestrator command: `run-project.sh` sources the App credential set, the
+orchestrator mints short-lived (1 h) installation tokens from the `.pem` and
+injects a fresh one into every tracker call, agent turn, and `git push` — no
+long-lived token at rest, hourly expiry handled transparently (re-mint before
+the boundary; 401 → re-mint + retry once):
+
 ```bash
-export GITHUB_TOKEN="<github app installation token>"
+export SB_ORCHESTRATOR_CMD="…"          # from Stage 3
+scripts/run-project.sh switchboard-self
+```
+
+**Fallback — personal token (dogfood).** No App yet? Export a static token;
+actions attribute to your account and Gate C degrades to merge-without-review
+(you can't approve your own PRs):
+
+```bash
+export GITHUB_TOKEN="$(gh auth token)"
 export SB_ORCHESTRATOR_CMD="…"          # from Stage 3
 scripts/run-project.sh switchboard-self
 ```
