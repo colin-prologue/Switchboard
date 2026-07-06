@@ -111,6 +111,20 @@ class ClaudeRunner:
     def __init__(self, cfg: ClaudeConfig) -> None:
         self.cfg = cfg
 
+    @staticmethod
+    def _build_env(agent_token: str | None) -> dict[str, str] | None:
+        """Subprocess env for one turn. With a token (issue #10), overlay it as
+        both GITHUB_TOKEN and GH_TOKEN over the inherited env — the agent's `gh`
+        calls and its `git push` (via the before_run credential helper) then act
+        as the bot. The token is per-turn, so a session spanning the hourly
+        expiry picks up a fresh mint on its next turn. None -> inherit as-is."""
+        if agent_token is None:
+            return None
+        env = dict(os.environ)
+        env["GITHUB_TOKEN"] = agent_token
+        env["GH_TOKEN"] = agent_token
+        return env
+
     def _build_command(self, resume_session_id: str | None,
                        settings_path: Path | None = None) -> str:
         cmd = self.cfg.command
@@ -130,12 +144,14 @@ class ClaudeRunner:
         resume_session_id: str | None,
         on_event: EventCallback,
         issue_id: str,
+        agent_token: str | None = None,
     ) -> TurnResult:
         if not workspace.is_dir():
             raise ValueError(f"workspace does not exist or is not a directory: {workspace}")
 
         settings_path = _write_guard_settings(workspace)
         command = self._build_command(resume_session_id, settings_path)
+        env = self._build_env(agent_token)
 
         def emit(event: str, payload: dict, pid: int | None, usage: dict | None = None) -> None:
             on_event(
@@ -155,6 +171,7 @@ class ClaudeRunner:
                 "-lc",
                 command,
                 cwd=str(workspace),
+                env=env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

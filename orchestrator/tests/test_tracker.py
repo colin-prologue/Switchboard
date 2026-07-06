@@ -562,3 +562,115 @@ async def test_candidate_issues_query_sends_owner_name_and_open_state():
     assert captured["body"]["variables"]["owner"] == "acme"
     assert captured["body"]["variables"]["name"] == "widgets"
     assert captured["body"]["variables"]["states"] == ["OPEN"]
+
+
+# --- credential provider / 401 re-mint (issue #10) ----------------------------
+
+
+class FakeCreds:
+    """Hands out tokens from a list, advancing on invalidate(); lets a test
+    drive the tracker's 401-refresh contract without minting a real App token."""
+
+    def __init__(self, tokens: list[str]):
+        self._tokens = tokens
+        self.invalidations = 0
+        self.handed: list[str] = []
+
+    async def token(self) -> str:
+        tok = self._tokens[min(self.invalidations, len(self._tokens) - 1)]
+        self.handed.append(tok)
+        return tok
+
+    def invalidate(self) -> None:
+        self.invalidations += 1
+
+
+def make_tracker_with_creds(handler, creds):
+    transport = RecordingTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    tracker = GitHubTracker(make_cfg(), client=client, creds=creds)
+    return tracker, transport
+
+
+@pytest.mark.asyncio
+async def test_request_sends_provider_token():
+    creds = FakeCreds(["ghs_minted"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer ghs_minted"
+        return graphql_response({"nodes": []})
+
+    tracker, _ = make_tracker_with_creds(handler, creds)
+    await tracker.fetch_issue_states_by_ids(["I_1"])
+    assert creds.handed == ["ghs_minted"]
+
+
+@pytest.mark.asyncio
+async def test_401_invalidates_and_retries_once_with_fresh_token():
+    # First call 401s (stale hourly token); after invalidate() the second call
+    # carries a freshly-minted token and succeeds. Models a run crossing the
+    # installation token's hourly expiry.
+    creds = FakeCreds(["stale", "fresh"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers["Authorization"] == "Bearer stale":
+            return httpx.Response(401, json={"message": "Bad credentials"})
+        return graphql_response({"nodes": []})
+
+    tracker, transport = make_tracker_with_creds(handler, creds)
+    await tracker.fetch_issue_states_by_ids(["I_1"])
+
+    assert len(transport.calls) == 2
+    assert creds.invalidations == 1
+    assert creds.handed == ["stale", "fresh"]
+
+
+@pytest.mark.asyncio
+async def test_persistent_401_gives_up_after_one_retry():
+    # The re-mint doesn't fix it (e.g. revoked installation): exactly one
+    # retry, then a github_api_status error. No infinite loop.
+    creds = FakeCreds(["a", "b"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "Bad credentials"})
+
+    tracker, transport = make_tracker_with_creds(handler, creds)
+    with pytest.raises(TrackerError) as exc:
+        await tracker.fetch_issue_states_by_ids(["I_1"])
+
+    assert exc.value.code == "github_api_status"
+    assert len(transport.calls) == 2
+    assert creds.invalidations == 1
+
+
+@pytest.mark.asyncio
+async def test_default_creds_fall_back_to_cfg_api_key():
+    # No provider wired (standalone/test use): the tracker authenticates with
+    # the statically-resolved cfg.api_key, exactly as before issue #10.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer test-token-123"
+        return graphql_response({"nodes": []})
+
+    transport = RecordingTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    tracker = GitHubTracker(make_cfg(), client=client)
+    await tracker.fetch_issue_states_by_ids(["I_1"])
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_mint_failure_surfaces_as_tracker_error():
+    # The provider raising an httpx error during token() (mint failure) must
+    # become a TrackerError, keeping the tracker's only-TrackerError contract.
+    class MintFails:
+        async def token(self) -> str:
+            raise httpx.ConnectError("mint endpoint unreachable")
+
+        def invalidate(self) -> None:
+            pass
+
+    tracker, _ = make_tracker_with_creds(
+        lambda request: graphql_response({"nodes": []}), MintFails())
+    with pytest.raises(TrackerError) as exc:
+        await tracker.fetch_issue_states_by_ids(["I_1"])
+    assert exc.value.code == "github_api_request"

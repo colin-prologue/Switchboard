@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 
+from orchestrator.auth import AppInstallationTokenProvider, StaticTokenProvider
 from orchestrator.log import log
 from orchestrator.types import BlockerRef, Issue, TrackerConfig, TrackerError
 
@@ -133,11 +134,21 @@ class GitHubTracker:
     implements: core §11.1 (required operations) / overridden by: SPEC.md §2
     """
 
-    def __init__(self, cfg: TrackerConfig, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        cfg: TrackerConfig,
+        client: httpx.AsyncClient | None = None,
+        creds: StaticTokenProvider | AppInstallationTokenProvider | None = None,
+    ) -> None:
         self._cfg = cfg
         self._owned_client = client is None
         # core §11.2: network timeout 30000 ms.
         self._client = client or httpx.AsyncClient(timeout=30.0)
+        # issue #10: the token comes from a provider (App installation token
+        # preferred, minted/re-minted at runtime). Absent an explicit provider,
+        # fall back to the statically-resolved cfg.api_key so the tracker stays
+        # usable standalone/in tests without wiring the scheduler.
+        self._creds = creds or StaticTokenProvider(cfg.api_key)
         # label name -> node id; labels are immutable ids per repo, safe to cache.
         self._label_id_cache: dict[str, str] = {}
 
@@ -288,20 +299,35 @@ class GitHubTracker:
 
     # --- transport --------------------------------------------------------------
 
-    async def _request(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
-        """POST one GraphQL request; return the `data` object or raise TrackerError.
-
-        Never logs or includes the token in error messages (core §11.4).
-        """
-        headers = {"Authorization": f"Bearer {self._cfg.api_key}"}
+    async def _post(self, query: str, variables: dict[str, Any]) -> httpx.Response:
+        """One authenticated GraphQL POST. Raises TrackerError on transport
+        failure; returns the raw response (status handled by the caller so a
+        401 can drive a token re-mint)."""
         try:
-            response = await self._client.post(
+            token = await self._creds.token()
+            return await self._client.post(
                 self._cfg.endpoint,
                 json={"query": query, "variables": variables},
-                headers=headers,
+                headers={"Authorization": f"Bearer {token}"},
             )
         except httpx.HTTPError as exc:
             raise TrackerError("github_api_request", f"transport error: {exc.__class__.__name__}") from exc
+
+    async def _request(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        """POST one GraphQL request; return the `data` object or raise TrackerError.
+
+        The token is fetched per request from the provider (issue #10: App
+        installation tokens expire hourly, so a token resolved once at startup
+        would 401 mid-run). On a 401, invalidate the cached token and retry
+        exactly once — the fresh mint recovers an expiry-boundary race; for a
+        static token the invalidate is a no-op and the retry just confirms.
+
+        Never logs or includes the token in error messages (core §11.4).
+        """
+        response = await self._post(query, variables)
+        if response.status_code == 401:
+            self._creds.invalidate()
+            response = await self._post(query, variables)
 
         if response.status_code != 200:
             raise TrackerError("github_api_status", f"unexpected status {response.status_code}")
