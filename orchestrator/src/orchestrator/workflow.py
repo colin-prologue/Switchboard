@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
+import httpx
 import yaml
 
+from .auth import AppInstallationTokenProvider, StaticTokenProvider
 from .types import (
     DEFAULT_WORKSPACE_ROOT,
     AgentConfig,
@@ -324,6 +326,62 @@ class Config:
         )
 
 
+# --- credential provider construction (issue #10: GitHub App identity) -------
+
+_APP_ENV_KEYS = ("SB_APP_ID", "SB_APP_INSTALLATION_ID", "SB_APP_PRIVATE_KEY_FILE")
+
+
+def _app_credentials_env(env: Mapping[str, str]) -> dict[str, str] | None:
+    """The SB_APP_* credential set from `env`: complete -> dict, absent -> None.
+
+    A PARTIAL set raises — silently falling back to the personal token would be
+    an unnoticed identity switch (agent actions attributed to the operator).
+    """
+    present = {k: env.get(k, "") for k in _APP_ENV_KEYS}
+    set_keys = [k for k, v in present.items() if v]
+    if not set_keys:
+        return None
+    if len(set_keys) < len(_APP_ENV_KEYS):
+        missing = sorted(set(_APP_ENV_KEYS) - set(set_keys))
+        raise WorkflowError(
+            "incomplete_app_credentials",
+            f"GitHub App credential set is incomplete: missing {', '.join(missing)}"
+            " (set all of SB_APP_ID/SB_APP_INSTALLATION_ID/SB_APP_PRIVATE_KEY_FILE,"
+            " or none to use the GITHUB_TOKEN fallback)",
+        )
+    return present
+
+
+def build_credentials(
+    tracker: TrackerConfig,
+    env: Mapping[str, str],
+    client: httpx.AsyncClient | None,
+) -> StaticTokenProvider | AppInstallationTokenProvider:
+    """Build the process-lifetime token provider (issue #10 / SPEC.md §2).
+
+    Complete SB_APP_* set in `env` -> AppInstallationTokenProvider (the private
+    key is read once, here; only the key lives at rest). Otherwise the
+    statically-resolved tracker.api_key (dogfood personal-token path).
+    """
+    app = _app_credentials_env(env)
+    if app is None:
+        return StaticTokenProvider(tracker.api_key)
+    key_file = app["SB_APP_PRIVATE_KEY_FILE"]
+    try:
+        pem = Path(key_file).read_text(encoding="utf-8")
+    except OSError as e:
+        raise WorkflowError(
+            "unreadable_app_private_key",
+            f"cannot read SB_APP_PRIVATE_KEY_FILE {key_file!r}: {e}",
+        ) from e
+    return AppInstallationTokenProvider(
+        app_id=app["SB_APP_ID"],
+        private_key_pem=pem,
+        installation_id=app["SB_APP_INSTALLATION_ID"],
+        client=client,
+    )
+
+
 # --- dispatch preflight validation (core §6.3, adapted per SPEC.md §2) -------
 
 def validate_dispatch(cfg: Config) -> None:
@@ -336,8 +394,17 @@ def validate_dispatch(cfg: Config) -> None:
             f"tracker.kind must be 'github', got {tracker.kind!r}",
         )
 
-    if not tracker.api_key:
-        raise WorkflowError("missing_tracker_api_key", "tracker.api_key is missing after resolution")
+    # Credentials come from EITHER a resolved api_key (dogfood personal-token
+    # path, `$GITHUB_TOKEN`) OR a complete SB_APP_* set in the environment
+    # (issue #10, preferred). App installation tokens are minted at runtime and
+    # never resolve into api_key, so check the env. A partial SB_APP_* set
+    # raises here even when api_key is present (fail loud, no identity switch).
+    if _app_credentials_env(os.environ) is None and not tracker.api_key:
+        raise WorkflowError(
+            "missing_tracker_api_key",
+            "no credentials: set SB_APP_ID/SB_APP_INSTALLATION_ID/"
+            "SB_APP_PRIVATE_KEY_FILE (App path) or GITHUB_TOKEN (dogfood)",
+        )
 
     if not tracker.repo or "/" not in tracker.repo or tracker.repo.startswith("/") or tracker.repo.endswith("/"):
         raise WorkflowError(
