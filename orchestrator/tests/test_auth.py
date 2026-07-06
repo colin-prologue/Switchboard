@@ -134,3 +134,33 @@ async def test_mint_failure_raises_httpx_status_error():
     )
     with pytest.raises(httpx.HTTPStatusError):
         await provider.token()
+
+
+async def test_min_ttl_forces_remint_of_token_that_would_outlive_skew_only():
+    # Codex PR #42 P1: a token minted ~30 min ago passes the 300s skew check,
+    # but an agent turn (bounded by turn_timeout) can outlive it. min_ttl lets
+    # the caller demand a token good for the whole turn.
+    records: list[httpx.Request] = []
+    clock = {"t": _T0}
+    provider = _app_provider(records=records, now=lambda: clock["t"])
+    await provider.token()  # minted at _T0, expires _T0 + 3600
+    clock["t"] = _T0 + 1800  # 1800s remaining: fine for the skew...
+    assert await provider.token() == "ghs_minted"
+    assert len(records) == 1  # ...so the plain call serves the cache
+    await provider.token(min_ttl=3600)  # ...but not for an hour-long turn
+    assert len(records) == 2  # re-minted
+
+
+async def test_min_ttl_satisfied_by_cache_does_not_remint():
+    records: list[httpx.Request] = []
+    clock = {"t": _T0}
+    provider = _app_provider(records=records, now=lambda: clock["t"])
+    await provider.token()
+    clock["t"] = _T0 + 100  # 3500s remaining
+    await provider.token(min_ttl=3000)
+    assert len(records) == 1  # cache still good for the requested horizon
+
+
+async def test_static_provider_accepts_min_ttl():
+    provider = StaticTokenProvider("ghp_fixed_token")
+    assert await provider.token(min_ttl=3600) == "ghp_fixed_token"

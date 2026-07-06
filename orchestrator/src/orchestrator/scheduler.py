@@ -132,7 +132,14 @@ class Orchestrator:
         if self._creds is None:
             return None
         try:
-            return await self._creds.token()
+            # The token is frozen in the subprocess env for the whole turn, so
+            # demand one that outlives the turn bound — a cached token with
+            # only the tracker's 300s skew left would expire before a long
+            # turn's final push (Codex PR #42 P1).
+            cfg = self._cfg
+            assert cfg is not None
+            min_ttl = cfg.claude().turn_timeout_ms / 1000
+            return await self._creds.token(min_ttl=min_ttl)
         except Exception as exc:
             raise WorkerFailure(f"token mint failed: {exc.__class__.__name__}") from exc
 

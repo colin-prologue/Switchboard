@@ -712,10 +712,12 @@ class FakeCredsProvider:
     def __init__(self, fail: bool = False):
         self.fail = fail
         self.mints = 0
+        self.min_ttls: list[float] = []  # min_ttl requested per token() call
 
-    async def token(self) -> str:
+    async def token(self, *, min_ttl: float = 0.0) -> str:
         if self.fail:
             raise RuntimeError("mint endpoint unreachable")
+        self.min_ttls.append(min_ttl)
         self.mints += 1
         return f"ghs-mint-{self.mints}"
 
@@ -751,3 +753,22 @@ async def test_mint_failure_fails_worker_without_launching_agent(harness):
 
     assert runner.turns == []  # agent never launched without credentials
     assert any(isinstance(r, scheduler_mod.WorkerFailure) for r in results)
+
+
+async def test_agent_token_requests_ttl_covering_the_turn(harness):
+    # Codex PR #42 P1: the scheduler must demand a token that outlives the
+    # turn (min_ttl = claude.turn_timeout), not just the tracker's 300s skew.
+    orch, tracker, runner, _ = harness
+    creds = FakeCredsProvider()
+    orch._creds = creds
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: len(runner.turns) >= 1)
+    await asyncio.gather(*(e.task for e in orch.running.values()),
+                         return_exceptions=True)
+
+    # WORKFLOW_TMPL sets claude.turn_timeout_ms: 5000
+    assert creds.min_ttls == [5.0]

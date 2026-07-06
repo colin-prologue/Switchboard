@@ -59,6 +59,13 @@ the sole minting authority) and threads it everywhere:
 
 - **Agent can read its own token** (`printenv`): inherent to giving the agent
   push rights; bounded by ≤1 h expiry and the installation's repo scoping.
+- **A turn longer than the mint's own ~1 h validity still outruns its env
+  token** (Codex PR #42 P1 addendum): the scheduler requests
+  `token(min_ttl=turn_timeout)`, so every turn starts with a token expected to
+  outlive it — but a mint is only ever valid for 1 h, so with
+  `turn_timeout_ms` ≥ 1 h the guarantee degrades to "freshest possible". The
+  full fix is a mint-on-demand credential helper; not needed while turns are
+  minutes long.
 - **Orchestrator-side git ops still ride ambient credentials on private
   repos:** `after_create.sh` clone / `before_run.sh` fetch run in the
   orchestrator env (no minted token injected there yet). On this machine the

@@ -51,8 +51,8 @@ class StaticTokenProvider:
     def __init__(self, token: str) -> None:
         self._token = token
 
-    async def token(self) -> str:
-        return self._token
+    async def token(self, *, min_ttl: float = 0.0) -> str:
+        return self._token  # a static token has no expiry to honor min_ttl against
 
     def invalidate(self) -> None:
         """No-op: a static token cannot be re-minted (401 recovery contract)."""
@@ -78,8 +78,18 @@ class AppInstallationTokenProvider:
         self._cached: str | None = None
         self._expires_at: float = 0.0
 
-    async def token(self) -> str:
-        if self._cached is None or self._now() >= self._expires_at - _EXPIRY_SKEW_SECONDS:
+    async def token(self, *, min_ttl: float = 0.0) -> str:
+        """Return a token valid for at least max(skew, min_ttl) seconds.
+
+        min_ttl lets a caller demand a longer horizon than the tracker's
+        request-scoped skew — e.g. an agent turn whose subprocess env freezes
+        the token for the whole turn (Codex PR #42 P1). A min_ttl at or beyond
+        the token's full lifetime yields a fresh mint every call (never loops —
+        one mint per call), which still cannot cover a turn longer than the
+        mint's own validity; that residual is documented in AgDR-009.
+        """
+        horizon = max(_EXPIRY_SKEW_SECONDS, min_ttl)
+        if self._cached is None or self._now() >= self._expires_at - horizon:
             await self._mint()
         return self._cached
 
