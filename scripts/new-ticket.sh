@@ -54,9 +54,17 @@ if [ "$SCAFFOLD" -eq 1 ]; then
 
 - <a hard scope boundary this ticket must not cross>
 
+## Consumers of mutated state
+<!-- delete this section only if the ticket writes NO shared state: labels, issue state, workspaces, env -->
+
+<enumerate every reader of state this ticket mutates, and how each consumes it.
+e.g. a ticket that writes a `status:*` label must list the eligibility/dispatch
+path, the between-turn role-pin check, and any `updatedAt` consumers.>
+
 ## Assumptions
 
 - <something taken as given; if false, stop and flag — the ticket is void>
+- Every cited mechanism carries a `file:line` verified at a named HEAD sha; uncitable claims are labeled guesses.
 SKELETON
   exit 0
 fi

@@ -46,8 +46,34 @@ def test_scaffold_emits_all_sections_and_exits_clean() -> None:
     proc = run("--scaffold")
     assert proc.returncode == 0, proc.stderr
     out = proc.stdout
-    for section in ("## Intent", "## Acceptance criteria", "## Non-goals", "## Assumptions"):
+    for section in (
+        "## Intent",
+        "## Acceptance criteria",
+        "## Non-goals",
+        "## Consumers of mutated state",
+        "## Assumptions",
+    ):
         assert section in out, f"scaffold missing section: {section}"
+
+
+def test_scaffold_pins_drafting_quality_content() -> None:
+    # Issue #14's recurring failure classes are encoded at the drafting altitude:
+    # the consumers section is ALWAYS emitted (deletion is the author's explicit
+    # act), and the citation rule rides under Assumptions.
+    proc = run("--scaffold")
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    # Consumers-of-mutated-state: always emitted, with the delete-guard comment.
+    assert "## Consumers of mutated state" in out
+    assert (
+        "<!-- delete this section only if the ticket writes NO shared state:"
+        " labels, issue state, workspaces, env -->" in out
+    )
+    # Citation rule (claim-vs-code drift) lives under Assumptions.
+    assert (
+        "Every cited mechanism carries a `file:line` verified at a named HEAD sha;"
+        " uncitable claims are labeled guesses." in out
+    )
 
 
 # --- dry-run: flag -> payload mapping ----------------------------------------

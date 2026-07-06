@@ -137,3 +137,46 @@ For gated work, the issue body should contain:
 Acceptance criteria are the agent's definition of done; non-goals are boundaries
 it must not cross. (Product-intent files, the verification contract, and the
 elicitation front door arrive in later roadmap phases.)
+
+## Drafting-quality checklist — the recurring failure classes
+
+Issue #14 took four triage rounds to reach dispatch; eight of its nine findings
+collapse into a handful of failure classes that are checkable at *drafting* time,
+not rediscovered one triage round at a time. Encode them here (prose for readers)
+and in the executable surfaces that reach every author — the `new-ticket.sh
+--scaffold` skeleton and the `status:triage` rubric — so drafting and triage share
+one vocabulary. (Attribution, not a pass condition: OBS-023 is the fake-fidelity
+observation these rules generalize; issue #14's four-pass verdict trail is the
+worked example that motivated them. Neither is resolvable inside a workspace
+clone, so treat them as provenance only.)
+
+1. **Claim-vs-code drift.** Every cited mechanism carries a `file:line` verified
+   at a named HEAD sha, or is explicitly labeled a guess. A ticket that cites a
+   transition table, a re-fetch, or a "reused" sweep that does not exist at HEAD
+   burns the implementing session rediscovering that the claim is fiction.
+
+2. **Consumers of mutated state.** For any state a ticket mutates — a `status:*`
+   label, issue state, a workspace, an env var — enumerate *who else reads it and
+   how*. This is one question asked repeatedly across #14's deepest findings.
+   Worked example: a ticket that writes a `status:*` label must enumerate the
+   eligibility/dispatch path (does relabeling make the issue dispatchable, or
+   pull it from the active set?), the between-turn role-pin check (a state change
+   ends the pinned session at the next turn boundary — see AgDR-005), and any
+   `updatedAt` consumers (a label write bumps the issue's `updatedAt`, which
+   ordering/polling logic may key on).
+
+3. **Fake fidelity.** *Any state the real system derives, the fake must derive the
+   same way.* A fake that hard-codes what the real system computes passes its own
+   tests and lies about the system. Known instances: a comment write echoes the
+   server-assigned `updatedAt` (the fake must echo it, not invent one); an issue's
+   `state` is recomputed from its `status:*` labels (the fake must recompute it
+   from labels, not store a separate field).
+
+4. **AC executability under the worker's capability envelope.** Every acceptance
+   criterion names a command the dispatched agent can actually run under the
+   worker allowlist (`workflow/WORKFLOW.base.md:61`: `git`, `gh`, and the two
+   pinned `uv run --project orchestrator ... pytest` prefixes), *or* explicitly
+   assigns that step to the human merge gate. An AC naming a command outside the
+   allowlist (a bare `pytest`, a `register-project.sh` run, a `cd … &&` chain) is
+   unsatisfiable at runtime and strands the session — the July-2 #10/#11
+   permission-wall incident, and #14's AC3 as first drafted.
