@@ -49,14 +49,46 @@ def make_issue(n: int, state: str = "todo", blockers: list[BlockerRef] | None = 
     )
 
 
+def _recompute_state_from_labels(issue: Issue) -> None:
+    """Mirror tracker._normalize_issue's status:* -> state derivation.
+
+    Conformance note (OBS-023): the FakeTracker must recompute issue.state from
+    its status:* labels on EVERY label write, exactly as the real
+    `_normalize_issue` does on read. Without this, the orchestrator's own
+    status-label writes would be invisible to the worker's between-turn state
+    refresh, and the role-pin regression that AgDR-010 decision #3 guards
+    against (a todo-dispatch label write burning a session) would be invisible
+    to every integration test. A closed issue keeps state "closed" (labels are
+    only meaningful while open), matching the real normalizer.
+    """
+    if issue.state == "closed":
+        return
+    status_labels = sorted(lbl for lbl in issue.labels if lbl.startswith("status:"))
+    if status_labels:
+        issue.state = status_labels[0][len("status:"):].replace("-", " ")
+    else:
+        issue.state = "none"
+
+
 class FakeTracker:
+    """Conformance note (OBS-023): this fake models three things the real
+    tracker's read/write contract implies and that issue #14 depends on —
+    (1) label REMOVAL (`remove_labels`, mirroring the real GraphQL mutation),
+    (2) the label-write -> updatedAt echo (a write bumps updated_at), and
+    (3) recomputing issue.state from status:* labels on every label write
+    (see `_recompute_state_from_labels`). All three are required for the
+    role-pin and revert behaviours to be observable end-to-end.
+    """
+
     def __init__(self):
         self.candidates: list[Issue] = []
         self.states: dict[str, Issue] = {}
         self.terminal: list[Issue] = []
         self.comments: list[tuple[str, str]] = []
         self.labels_added: list[tuple[str, tuple[str, ...]]] = []
+        self.labels_removed: list[tuple[str, tuple[str, ...]]] = []
         self.add_labels_error: TrackerError | None = None  # set to simulate a write failure
+        self.remove_labels_error: TrackerError | None = None
 
     async def fetch_candidate_issues(self):
         return list(self.candidates)
@@ -86,11 +118,34 @@ class FakeTracker:
         # the issue. This is the durable state that survives a "restart" — a test
         # that rebuilds the scheduler but reuses the tracker still sees the label.
         self.labels_added.append((issue_id, tuple(label_names)))
-        for issue in (*self.candidates, *self.states.values()):
-            if issue.id == issue_id:
-                for name in label_names:
-                    if name not in issue.labels:
-                        issue.labels.append(name)
+        for issue in self._issues_with_id(issue_id):
+            for name in label_names:
+                if name not in issue.labels:
+                    issue.labels.append(name)
+            self._after_label_write(issue)
+
+    async def remove_labels(self, issue_id, label_names):
+        if self.remove_labels_error is not None:
+            raise self.remove_labels_error
+        # Mirror of add_labels: removeLabelsFromLabelable makes the label vanish
+        # from every subsequent fetch. Recomputes state + bumps updatedAt too.
+        self.labels_removed.append((issue_id, tuple(label_names)))
+        drop = set(label_names)
+        for issue in self._issues_with_id(issue_id):
+            issue.labels = [lbl for lbl in issue.labels if lbl not in drop]
+            self._after_label_write(issue)
+
+    def _issues_with_id(self, issue_id):
+        # candidates and states may hold DISTINCT Issue objects for one id (the
+        # two fetch paths); a real label write is visible on both, so apply to all.
+        return [i for i in (*self.candidates, *self.states.values())
+                if i.id == issue_id]
+
+    @staticmethod
+    def _after_label_write(issue: Issue) -> None:
+        # (2) updatedAt echo and (3) state recompute — see the class docstring.
+        _recompute_state_from_labels(issue)
+        issue.updated_at = datetime.now(UTC)
 
 
 class FakeRunner:
@@ -145,7 +200,7 @@ Work {{{{ issue.identifier }}}}: {{{{ issue.title }}}}
 """
 
 
-def _build_harness(tmp_path, monkeypatch, workflow_tmpl=WORKFLOW_TMPL):
+def _build_harness(tmp_path, monkeypatch, workflow_tmpl=WORKFLOW_TMPL, runner=None):
     monkeypatch.setattr(scheduler_mod, "CONTINUATION_DELAY_MS", 30)
     monkeypatch.setattr(scheduler_mod, "FAILURE_BASE_BACKOFF_MS", 30)
     ws_root = tmp_path / "ws"
@@ -155,7 +210,7 @@ def _build_harness(tmp_path, monkeypatch, workflow_tmpl=WORKFLOW_TMPL):
     orch = Orchestrator(wf)
     orch._load_workflow(initial=True)
     tracker = FakeTracker()
-    runner = FakeRunner()
+    runner = runner if runner is not None else FakeRunner()
     real_components = orch._components
 
     def fake_components():
@@ -296,8 +351,17 @@ async def test_session_cap_parks_issue(harness):
     assert len(tracker.comments) == 1                 # exactly one notification
     assert tracker.comments[0][0] == "node-1"
     assert "parked" in tracker.comments[0][1].lower()
-    assert tracker.labels_added == [("node-1", ("status:parked",))]  # durable marker
+    # issue #14: the todo dispatch made the claim visible (status:in-progress),
+    # then park clears it and adds the durable status:parked marker — the
+    # one-status-label contract holds across the transition.
+    assert tracker.labels_added == [
+        ("node-1", ("status:in-progress",)),          # todo dispatch: claim visible
+        ("node-1", ("status:parked",)),               # durable park marker
+    ]
+    assert ("node-1", ("status:todo",)) in tracker.labels_removed         # dispatch swap
+    assert ("node-1", ("status:in-progress",)) in tracker.labels_removed  # cleared at park
     assert "status:parked" in issue.labels            # visible on future fetches
+    assert "status:in-progress" not in issue.labels   # one-status-label contract
     assert (ws_root / "1").is_dir()                   # workspace preserved
     assert "node-1" not in orch.claimed
     assert "node-1" not in orch.retry_attempts
@@ -305,7 +369,7 @@ async def test_session_cap_parks_issue(harness):
     await orch._tick()                                # still parked: no re-dispatch
     assert orch.sessions_per_issue.get("node-1", 0) == 2
     assert len(tracker.comments) == 1
-    assert len(tracker.labels_added) == 1             # not re-labelled
+    assert len(tracker.labels_added) == 2             # not re-labelled past park
 
     # The parking comment bumped updatedAt (FakeTracker mimics GitHub); the
     # label — not updatedAt — is authoritative, so the issue STAYS parked.
@@ -772,3 +836,199 @@ async def test_agent_token_requests_ttl_covering_the_turn(harness):
 
     # WORKFLOW_TMPL sets claude.turn_timeout_ms: 5000
     assert creds.min_ttls == [5.0]
+
+
+# --- claim-visibility labels (issue #14 / AgDR-010) ---------------------------
+#
+# status:in-progress is board visibility only, NOT a lock: applied once when a
+# `todo` issue is first claimed, cleared when the claim genuinely dies. The
+# label tracks the CLAIM, not the session — continuations/retries write nothing.
+
+ALLOWED_STATUS_LABELS = {"status:todo", "status:in-progress", "status:parked"}
+FORBIDDEN_STATUS_LABELS = {  # gate/handoff/triage labels the orchestrator owns NONE of
+    "status:drafting", "status:plan-review", "status:human-review",
+    "status:blocked", "status:triage",
+}
+
+
+def _labels_written(tracker) -> set[str]:
+    return {lbl for _, names in (tracker.labels_added + tracker.labels_removed)
+            for lbl in names}
+
+
+async def test_todo_dispatch_label_write_costs_no_session(tmp_path, monkeypatch):
+    """AC (role-pin regression, AgDR-010 decision #3): the orchestrator's own
+    status:todo -> status:in-progress write must NOT trip the between-turn
+    role-pin break. A multi-turn `todo` engagement runs its turns in ONE session,
+    exactly as an equivalent `in progress` dispatch does — and writes the
+    in-progress label exactly once. The write-count AC alone would not catch this
+    (a forced turn-1 break still writes exactly once); this asserts session parity.
+    """
+    tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 3")
+
+    # todo dispatch: label swap happens, then 3 turns in one session.
+    orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+    tracker.candidates = [make_issue(1, "todo")]
+    tracker.states = {"node-1": make_issue(1, "todo")}
+    await orch._tick()
+    tracker.candidates = []  # quiesce: post-session retry finds no candidate
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+    assert len(runner.turns) == 3                       # ONE session, no forced break
+    todo_sessions = orch.sessions_per_issue.get("node-1")
+    assert todo_sessions == 1
+    assert tracker.labels_added == [("node-1", ("status:in-progress",))]   # once
+    assert tracker.labels_removed == [("node-1", ("status:todo",))]        # once
+
+    # in progress dispatch: same session count, and NO status-label writes at all.
+    orch2, tracker2, runner2, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+    tracker2.candidates = [make_issue(1, "in progress")]
+    tracker2.states = {"node-1": make_issue(1, "in progress")}
+    await orch2._tick()
+    tracker2.candidates = []
+    await wait_for(lambda: not orch2.running and not orch2.retry_attempts
+                   and "node-1" not in orch2.claimed)
+    assert len(runner2.turns) == 3
+    assert orch2.sessions_per_issue.get("node-1") == todo_sessions   # PARITY
+    assert tracker2.labels_added == []                  # already in-progress: no write
+    assert tracker2.labels_removed == []
+
+
+async def test_failure_retries_do_not_reflap_in_progress_label(tmp_path, monkeypatch):
+    """AC: the label tracks the CLAIM, not the session — between-session backoff
+    must not flap it. A `todo` issue whose sessions keep FAILING writes
+    status:in-progress exactly once across every failure retry; park then swaps
+    in the durable marker. Asserts the TOTAL label-write set."""
+    tmpl = WORKFLOW_TMPL.replace("max_sessions_per_issue: 2", "max_sessions_per_issue: 3")
+    orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+
+    async def failing_turn(workspace, prompt, resume_session_id, on_event,
+                           issue_id, agent_token=None):
+        return TurnResult(status="failed", session_id=None, error="boom")
+    runner.run_turn = failing_turn
+
+    issue = make_issue(1, "todo")
+    tracker.candidates = [issue]
+    tracker.states = {"node-1": issue}
+
+    await orch._tick()
+    await wait_for(lambda: "node-1" in orch.parked)     # 3 failed sessions -> park
+
+    assert orch.sessions_per_issue.get("node-1") == 3   # cap spent on failures
+    assert tracker.labels_added == [
+        ("node-1", ("status:in-progress",)),            # first dispatch: claim visible
+        ("node-1", ("status:parked",)),                 # durable park marker
+    ]
+    assert tracker.labels_removed.count(("node-1", ("status:todo",))) == 1
+    assert ("node-1", ("status:in-progress",)) in tracker.labels_removed   # cleared at park
+
+
+async def test_triage_dispatch_writes_no_status_label(tmp_path, monkeypatch):
+    """AC: a `triage`-state first dispatch performs ZERO status-label writes —
+    status:triage is verifier-owned and must not be clobbered (a verifier session
+    would lose its role pin)."""
+    tmpl = WORKFLOW_TMPL.replace('active_states: ["todo", "in progress"]',
+                                 'active_states: ["triage", "todo", "in progress"]')
+    orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+    issue = make_issue(1, "triage")
+    tracker.candidates = [issue]
+    tracker.states = {"node-1": make_issue(1, "triage")}
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+    assert runner.turns                                 # it WAS dispatched
+    assert tracker.labels_added == []
+    assert tracker.labels_removed == []
+    assert "status:triage" in issue.labels              # untouched
+
+
+async def test_release_in_progress_claim_reverts_with_comment(harness):
+    """AC: the shared revert helper flips status:in-progress -> status:todo and,
+    with comment=True (mid-run claim release), posts ONE honest one-line note."""
+    orch, tracker, _, _ = harness
+    issue = make_issue(1, "in progress")                # sole status:in-progress
+    await orch._release_in_progress_claim(tracker, issue, comment=True)
+    assert tracker.labels_added == [("node-1", ("status:todo",))]
+    assert tracker.labels_removed == [("node-1", ("status:in-progress",))]
+    assert issue.state == "todo"
+    assert issue.labels == ["status:todo"]
+    assert len(tracker.comments) == 1
+    assert "released its claim" in tracker.comments[0][1].lower()
+
+
+async def test_startup_sweep_reverts_stranded_claim_comment_free(harness):
+    """AC / AgDR-010 decision #5: an open status:in-progress issue with no live
+    claim is a lie on the board (a prior process crashed mid-run). The startup
+    sweep reverts it to status:todo but posts NO comment — the next tick may
+    immediately re-dispatch it, so a "nobody's working this" note would be noise."""
+    orch, tracker, _, _ = harness
+    stranded = make_issue(1, "in progress")
+    tracker.candidates = [stranded]                     # not in running/claimed/retry
+    await orch._startup_in_progress_sweep()
+    assert ("node-1", ("status:todo",)) in tracker.labels_added
+    assert ("node-1", ("status:in-progress",)) in tracker.labels_removed
+    assert stranded.state == "todo"
+    assert tracker.comments == []                       # comment-free (decision #5)
+
+
+async def test_startup_sweep_skips_live_claim(harness):
+    """The sweep only reverts STRANDED claims: an in-progress issue THIS process
+    still holds (running/claimed/retry) is left untouched."""
+    orch, tracker, _, _ = harness
+    held = make_issue(1, "in progress")
+    tracker.candidates = [held]
+    orch.claimed.add("node-1")                          # a live claim owns it
+    await orch._startup_in_progress_sweep()
+    assert tracker.labels_added == []
+    assert tracker.labels_removed == []
+    assert held.state == "in progress"
+
+
+async def test_revert_skips_when_status_already_moved(harness):
+    """AC: both revert paths NO-OP when the issue's status was already moved by a
+    human/agent (e.g. an agent handoff to status:human-review). The board already
+    reflects a real transition, so the orchestrator leaves it alone."""
+    orch, tracker, _, _ = harness
+    moved = make_issue(1, "human review")               # not sole status:in-progress
+    await orch._release_in_progress_claim(tracker, moved, comment=True)
+    assert tracker.labels_added == []
+    assert tracker.labels_removed == []
+    assert tracker.comments == []
+    assert moved.labels == ["status:human-review"]
+
+
+async def test_revert_skips_closed_issue(harness):
+    """A claim whose issue closed out from under it is not reverted (labels are
+    only meaningful while the issue is open)."""
+    orch, tracker, _, _ = harness
+    closed = make_issue(1, "in progress")
+    closed.state = "closed"
+    await orch._release_in_progress_claim(tracker, closed, comment=True)
+    assert tracker.labels_added == []
+    assert tracker.labels_removed == []
+    assert tracker.comments == []
+
+
+async def test_orchestrator_never_writes_gate_or_handoff_labels(harness):
+    """AC (guard over the label-writing call sites): across a full engagement —
+    todo dispatch, an agent handoff to status:human-review mid-session, and the
+    subsequent claim-release check — every label the orchestrator writes is one
+    of its OWNED three, and it never adds/removes a gate/handoff/triage label nor
+    reverts the human's handoff."""
+    orch, tracker, runner, _ = harness
+    issue = make_issue(1, "todo")
+    tracker.candidates = [issue]
+    # agent hands the issue off to human-review during turn 1 (role-pin ends it).
+    tracker.states = {"node-1": make_issue(1, "human review")}
+    await orch._tick()
+    # the world now shows human-review everywhere: the retry check must skip.
+    tracker.candidates = [make_issue(1, "human review")]
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+
+    written = _labels_written(tracker)
+    assert written <= ALLOWED_STATUS_LABELS             # only owned labels ever touched
+    assert not (written & FORBIDDEN_STATUS_LABELS)      # never a gate/handoff/triage label
+    assert tracker.comments == []                       # handoff not "released" — left alone
