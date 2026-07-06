@@ -127,6 +127,14 @@ mutation($labelableId: ID!, $labelIds: [ID!]!) {
 }
 """
 
+REMOVE_LABELS_MUTATION = """
+mutation($labelableId: ID!, $labelIds: [ID!]!) {
+  removeLabelsFromLabelable(input: {labelableId: $labelableId, labelIds: $labelIds}) {
+    clientMutationId
+  }
+}
+"""
+
 
 class GitHubTracker:
     """Tracker adapter bound to GitHub Issues (SPEC.md §2).
@@ -238,6 +246,21 @@ class GitHubTracker:
         label_ids = [await self._resolve_label_id(name) for name in label_names]
         await self._request(
             ADD_LABELS_MUTATION, {"labelableId": issue_id, "labelIds": label_ids}
+        )
+
+    async def remove_labels(self, issue_id: str, label_names: list[str]) -> None:
+        """Remove labels from an issue (issue #14: claim-lifecycle visibility).
+
+        The mirror of `add_labels` (`removeLabelsFromLabelable`). Used to keep
+        the one-status-label contract when the orchestrator swaps a claim's
+        status label (`status:todo` -> `status:in-progress` on dispatch, the
+        reverse on claim release, and dropping `status:in-progress` at park).
+        Like `add_labels`, a sanctioned exception to the core §11.5 no-writes
+        boundary; label node ids are resolved by name (and cached).
+        """
+        label_ids = [await self._resolve_label_id(name) for name in label_names]
+        await self._request(
+            REMOVE_LABELS_MUTATION, {"labelableId": issue_id, "labelIds": label_ids}
         )
 
     async def _resolve_label_id(self, name: str) -> str:

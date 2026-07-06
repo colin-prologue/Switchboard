@@ -22,6 +22,37 @@ orchestrator code.
 Dependencies use GitHub's native **blocked-by**; Symphony won't dispatch a
 `status:todo` issue while any blocker is unresolved.
 
+### Who writes which status label (four writers)
+
+One status label per issue is the workflow contract, and each label has exactly
+one owner. The orchestrator writes **only** its own three and never touches the
+others (issue #14 / AgDR-010):
+
+| Label(s)                                        | Written by | When |
+|-------------------------------------------------|------------|------|
+| `status:drafting`, `status:plan-review`, `status:blocked` | **humans** | authoring/approving at the gates |
+| `status:triage` → `status:todo` \| `status:drafting`      | the **triage verifier agent** | on its PASS / NEEDS WORK verdict |
+| `status:human-review`                           | **worker agents** | at handoff (WORKFLOW.md §handoff) |
+| `status:todo` → `status:in-progress`, its revert, and `status:parked` | the **orchestrator** | claim taken / claim died / session cap |
+
+`status:in-progress` is **board visibility only, not a lock** — a label cannot
+compare-and-swap, so cross-runner mutual exclusion is a separate concern
+(issue #15). The orchestrator applies it once when a `todo` issue is first
+claimed and clears it when the claim genuinely dies (mid-run release, or a
+startup sweep of claims stranded by a crash). A handoff to `status:human-review`
+is observed, never reverted: any status label other than a sole `status:in-progress`
+means a human/agent already moved the issue, so the orchestrator leaves it alone.
+
+> **Config caveat (single-runner assumption).** The `status:in-progress` swap is
+> safe under this repo's config because eligibility uses empty `required_labels`
+> and `"in progress"` is itself an active state, so the orchestrator's own write
+> keeps the issue eligible on the retry path. A config that set
+> `required_labels: ["status:todo"]` would make the orchestrator self-release on
+> its own write (the label it just removed is the one it now requires) — that
+> combination is unsupported. The startup sweep's revert of stranded claims also
+> assumes **one runner per repo**; if multi-runner lands (issue #15), the sweep
+> must be re-gated so it cannot revert a live peer's claim.
+
 ## Gates
 
 - **Gate A — intent/spec approved.** A ticket sits at `status:drafting` until a
