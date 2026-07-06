@@ -37,9 +37,13 @@ scripts/register-project.sh --slug acme-api --repo acme/api --base main
 export SB_ORCHESTRATOR_CMD="uv run --project orchestrator python -m orchestrator"
 scripts/run-project.sh acme-api
 
-# 3. File a ticket. The orchestrator picks it up.
+# 3. File a ticket against the project's repo. The orchestrator picks it up.
+#    (--repo is required here: without it new-ticket.sh falls back to
+#    SB_GITHUB_REPO or the current checkout's git remote — i.e. Switchboard
+#    itself. Alternatively, source projects/acme-api/project.env first.)
 scripts/new-ticket.sh --scaffold > body.md   # edit the skeleton
-scripts/new-ticket.sh --title "Fix retry backoff in sync worker" --body-file body.md
+scripts/new-ticket.sh --repo acme/api \
+  --title "Fix retry backoff in sync worker" --body-file body.md
 ```
 
 `scripts/list-projects.sh` shows what's registered. Prerequisites: `git`,
