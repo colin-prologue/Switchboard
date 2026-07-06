@@ -100,6 +100,24 @@ author's text stays the author's.
    session, ≤3 sessions)? If not, recommend a split with drafted child-issue bodies.
 5. **Boundaries** — are non-goals present and concrete?
 
+**Drafting-quality reject criteria (issue #14's recurring failure classes —
+name the class in the verdict so drafting and triage share one vocabulary; see
+`methodology/METHODOLOGY.md`, "Drafting-quality checklist"):**
+
+6. **Claim-vs-code drift** — does every cited mechanism carry a `file:line`
+   verified at a named HEAD sha (or stand explicitly labeled a guess)? Reject
+   citations of mechanisms that do not exist at HEAD.
+7. **Consumers of mutated state** — if the ticket mutates shared state (a
+   `status:*` label, issue state, a workspace, an env var), does it enumerate
+   every reader and how each consumes it (eligibility/dispatch path, between-turn
+   role-pin check, `updatedAt` consumers)? Reject an unenumerated state write.
+8. **Fake fidelity** — for any state the real system derives, does the ticket
+   require the fake to derive it the same way (e.g. echo the server `updatedAt`,
+   recompute issue `state` from `status:*` labels) rather than hard-code it?
+9. **AC executability** — does every acceptance criterion name a command runnable
+   under the worker allowlist (`workflow/WORKFLOW.base.md:61`) or explicitly
+   assign the step to the human merge gate? Reject an AC that strands the session.
+
 **Verdict routing (pick exactly one):**
 
 - **PASS** → relabel to `status:todo` (now dispatchable). Remove `status:triage`.

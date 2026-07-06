@@ -327,7 +327,18 @@ def test_validate_dispatch_missing_tracker_kind(tmp_path: Path):
 
 
 def test_validate_dispatch_missing_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # "No credentials" means neither the dogfood token NOR the App-path env
+    # (validate_dispatch accepts either). Clear both, or this fails whenever it
+    # runs in an App-credentialed shell (the worker environment exports SB_APP_*).
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    for _app_var in (
+        "SB_APP_ID",
+        "SB_APP_INSTALLATION_ID",
+        "SB_APP_PRIVATE_KEY_FILE",
+        "SB_APP_BOT_LOGIN",
+        "SB_APP_BOT_USER_ID",
+    ):
+        monkeypatch.delenv(_app_var, raising=False)
     defn = WorkflowDefinition(
         config={"tracker": {"kind": "github", "repo": "acme/widgets", "api_key": "$GITHUB_TOKEN"}},
         prompt_template="",
@@ -425,6 +436,61 @@ def test_real_workflow_base_file_loads_after_placeholder_substitution(tmp_path: 
     assert claude_cfg.max_budget_usd == 5.0
 
     assert "issue.identifier" in defn.prompt_template
+
+
+# --- base <-> composed conformance (issue #44) --------------------------------
+#
+# register-project.sh composes projects/switchboard-self/WORKFLOW.md from
+# workflow/WORKFLOW.base.md by sed-substituting the ALL-CAPS placeholders. That
+# script is outside the worker allowlist, so agents edit BOTH files by hand — and
+# hand-edits drift. This test performs the same substitution in-process and
+# asserts the tracked composed file matches byte-for-byte, so any edit to one file
+# without the mirror is a red suite (no human memory or script run required).
+
+
+def _parse_env(path: Path) -> dict[str, str]:
+    """Parse a project.env (KEY=value lines; ignore comments/blanks)."""
+    env: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        env[key.strip()] = value.strip()
+    return env
+
+
+def test_base_and_composed_workflow_are_in_sync():
+    repo_root = Path(__file__).resolve().parents[2]
+    base = repo_root / "workflow" / "WORKFLOW.base.md"
+    proj = repo_root / "projects" / "switchboard-self"
+    composed = proj / "WORKFLOW.md"
+
+    env = _parse_env(proj / "project.env")
+    composed_text = composed.read_text(encoding="utf-8")
+
+    # {{MAX_AGENTS}} is the one substitution value register-project.sh does not
+    # persist to project.env, so source it from the composed file's rendered
+    # scalar. (Circular only for that one number; the body-text drift this test
+    # guards is unaffected — those are literals in both files, not placeholders.)
+    max_agents = next(
+        line.split(":", 1)[1].strip()
+        for line in composed_text.splitlines()
+        if line.strip().startswith("max_concurrent_agents:")
+    )
+
+    substituted = (
+        base.read_text(encoding="utf-8")
+        .replace("{{REPO}}", env["SB_GITHUB_REPO"])
+        .replace("{{WORKSPACE_ROOT}}", env["SB_WORKSPACE_ROOT"])
+        .replace("{{MAX_AGENTS}}", max_agents)
+        .replace("{{CONVENTION_ROOT}}", env["SB_CONVENTION_ROOT"])
+    )
+
+    assert substituted == composed_text, (
+        "workflow/WORKFLOW.base.md and projects/switchboard-self/WORKFLOW.md have "
+        "drifted. Edit BOTH (register-project.sh is outside the worker allowlist)."
+    )
 
 
 # --- build_credentials() (issue #10: GitHub App identity) ---------------------
