@@ -20,6 +20,7 @@ from orchestrator.tracker import (
     CLOSED_ISSUES_QUERY,
     ISSUES_BY_IDS_QUERY,
     LABEL_ID_QUERY,
+    REMOVE_LABELS_MUTATION,
     GitHubTracker,
 )
 from orchestrator.types import TrackerConfig, TrackerError
@@ -536,6 +537,32 @@ async def test_add_labels_raises_when_label_not_provisioned():
 
     assert exc.value.code == "github_label_not_found"
     assert transport.call_count == 1                      # never reached the mutation
+
+
+@pytest.mark.asyncio
+async def test_remove_labels_resolves_id_then_posts_mutation():
+    """issue #14: pins the real removeLabelsFromLabelable request shape
+    independently of the fake (OBS-023) — mirrors the add_labels contract test."""
+    captured: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request_body(request)
+        captured.append(body)
+        if body["query"] == LABEL_ID_QUERY:
+            return graphql_response({"repository": {"label": {"id": "LA_inprog"}}})
+        return graphql_response({"removeLabelsFromLabelable": {"clientMutationId": None}})
+
+    tracker, transport = make_tracker(handler)
+    await tracker.remove_labels("I_1", ["status:in-progress"])
+
+    assert transport.call_count == 2                      # resolve id, then mutate
+    assert captured[0]["query"] == LABEL_ID_QUERY
+    assert captured[0]["variables"]["label"] == "status:in-progress"
+    assert captured[1]["query"] == REMOVE_LABELS_MUTATION
+    assert captured[1]["variables"] == {
+        "labelableId": "I_1",
+        "labelIds": ["LA_inprog"],
+    }
 
 
 @pytest.mark.asyncio
