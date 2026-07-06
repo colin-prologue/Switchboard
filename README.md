@@ -134,6 +134,34 @@ tickets never pollute the general-purpose `methodology/`. See `self/README.md`.
 
 ---
 
+## Graph review (manually-invoked analyzer)
+
+`graph-review` is a **read-only** pass that reads the open ticket board (bodies,
+comments, native `blockedBy` edges, milestones) plus recently merged PRs and
+writes evidence-cited, keyed proposals to a single rolling **Graph Review** issue
+— prose dependencies missing a native edge, likely-wrong milestones, merge/split
+candidates, assumptions a merged PR invalidated, promotable tickets. It is
+proposals-only (Phase 1): it never mutates any other ticket, and there is **no
+scheduler entry** — you run it by hand.
+
+```bash
+# Preview the ledger without writing to GitHub:
+uv run --project orchestrator python -m orchestrator.graph_review \
+  --workflow projects/switchboard-self/WORKFLOW.md --dry-run
+
+# Write/refresh the rolling Graph Review issue (idempotent — one issue, updated
+# in place; never re-raises a key you marked accepted/dismissed):
+uv run --project orchestrator python -m orchestrator.graph_review \
+  --workflow projects/switchboard-self/WORKFLOW.md
+```
+
+Structural proposals (`merge`/`split`/`resequence`) pass a skeptic *refute*
+sub-check (`--refute-command`, default `claude -p`) before being written;
+mechanical ones skip it. See `self/.switchboard/intents/graph-review.md` and
+`self/.decisions/AgDR-009-graph-review-phasing.md` for the phasing and rationale.
+
+---
+
 ## Status
 
 Phase 1 is complete: the orchestrator is implemented (from `spec/SPEC.md` +
