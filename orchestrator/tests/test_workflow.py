@@ -436,6 +436,8 @@ def _app_env(tmp_path: Path) -> dict[str, str]:
         "SB_APP_ID": "4225392",
         "SB_APP_INSTALLATION_ID": "144657149",
         "SB_APP_PRIVATE_KEY_FILE": str(pem),
+        "SB_APP_BOT_LOGIN": "switchboard-agent[bot]",
+        "SB_APP_BOT_USER_ID": "300281474",
     }
 
 
@@ -506,3 +508,19 @@ def test_validate_dispatch_partial_app_credentials_fail_loud(
     with pytest.raises(WorkflowError) as exc_info:
         validate_dispatch(cfg)
     assert exc_info.value.code == "incomplete_app_credentials"
+
+
+def test_build_credentials_missing_bot_identity_fails_loud(tmp_path: Path):
+    """Codex PR #42 P2: App mode with the minting keys but no bot identity
+    would mint bot tokens while commits author as whatever git identity the
+    workspace inherits — the half-configured identity switch again. The
+    completeness check covers all five SB_APP_* keys."""
+    from orchestrator.workflow import build_credentials
+
+    env = _app_env(tmp_path)
+    del env["SB_APP_BOT_LOGIN"]
+    cfg = _cfg_with_tracker(tmp_path)
+    with pytest.raises(WorkflowError) as exc_info:
+        build_credentials(cfg.tracker(), env, client=None)
+    assert exc_info.value.code == "incomplete_app_credentials"
+    assert "SB_APP_BOT_LOGIN" in str(exc_info.value)

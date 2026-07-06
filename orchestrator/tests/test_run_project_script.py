@@ -92,3 +92,28 @@ def test_personal_token_alone_still_works(sb_home, tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert dumped["GITHUB_TOKEN"] == "ghp_dogfood"
     assert "SB_APP_ID" not in dumped
+
+
+def test_app_env_missing_bot_identity_fails(sb_home, tmp_path):
+    """Codex PR #42 P2: the launch-time check requires the full five-key set,
+    not just the minting keys."""
+    fake_home = tmp_path / "home"
+    cfg = fake_home / ".config" / "switchboard"
+    cfg.mkdir(parents=True)
+    (cfg / "app.env").write_text(
+        "SB_APP_ID=4225392\nSB_APP_INSTALLATION_ID=144657149\n"
+        "SB_APP_PRIVATE_KEY_FILE=/tmp/app.pem\n")  # bot identity keys missing
+
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GITHUB_TOKEN", "HOME") and not k.startswith("SB_")}
+    env["HOME"] = str(fake_home)
+    env["DUMP_OUT"] = str(tmp_path / "env.out")
+    env["SB_ORCHESTRATOR_CMD"] = f"bash {tmp_path / 'dump.sh'}"
+    dump = tmp_path / "dump.sh"
+    dump.write_text("#!/bin/bash\nprintenv > \"$DUMP_OUT\"\n")
+
+    proc = subprocess.run(
+        ["bash", str(sb_home / "scripts" / "run-project.sh"), "demo"],
+        env=env, capture_output=True, text=True)
+    assert proc.returncode != 0
+    assert "credential" in proc.stderr.lower()

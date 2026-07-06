@@ -20,11 +20,13 @@ token. `orchestrator/auth.py` provides one contract, two providers:
   private key, mints an installation token, caches it, re-mints 300 s before
   the hourly expiry, and re-mints on `invalidate()`.
 
-`workflow.py:build_credentials` picks the provider: a **complete**
-`SB_APP_ID/SB_APP_INSTALLATION_ID/SB_APP_PRIVATE_KEY_FILE` set builds the App
-provider; none of them builds the static one; a **partial set fails startup
-loudly** (`incomplete_app_credentials`) — silently falling back to the
-personal token would be an unnoticed identity switch. The scheduler builds
+`workflow.py:build_credentials` picks the provider: a **complete five-key**
+`SB_APP_*` set (minting trio + `SB_APP_BOT_LOGIN`/`SB_APP_BOT_USER_ID`, which
+drive the git identity — Codex PR #42 P2) builds the App provider; none of
+them builds the static one; a **partial set fails startup loudly**
+(`incomplete_app_credentials`) — silently falling back to the personal token,
+or minting bot tokens while commits author as the inherited git identity,
+would be an unnoticed identity switch. The scheduler builds
 ONE provider per process lifetime (mint cache survives ticks; the process is
 the sole minting authority) and threads it everywhere:
 

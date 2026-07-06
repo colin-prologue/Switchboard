@@ -328,14 +328,25 @@ class Config:
 
 # --- credential provider construction (issue #10: GitHub App identity) -------
 
-_APP_ENV_KEYS = ("SB_APP_ID", "SB_APP_INSTALLATION_ID", "SB_APP_PRIVATE_KEY_FILE")
+# All five are required for App mode: the first three mint tokens; the bot
+# identity pair drives before_run.sh's git author + credential helper. Codex
+# PR #42 P2: accepting the minting keys alone would mint bot tokens while
+# commits silently author as whatever git identity the workspace inherits.
+_APP_ENV_KEYS = (
+    "SB_APP_ID",
+    "SB_APP_INSTALLATION_ID",
+    "SB_APP_PRIVATE_KEY_FILE",
+    "SB_APP_BOT_LOGIN",
+    "SB_APP_BOT_USER_ID",
+)
 
 
 def _app_credentials_env(env: Mapping[str, str]) -> dict[str, str] | None:
     """The SB_APP_* credential set from `env`: complete -> dict, absent -> None.
 
-    A PARTIAL set raises — silently falling back to the personal token would be
-    an unnoticed identity switch (agent actions attributed to the operator).
+    A PARTIAL set raises — silently falling back to the personal token (or a
+    half-configured bot) would be an unnoticed identity switch (agent actions
+    attributed to the operator).
     """
     present = {k: env.get(k, "") for k in _APP_ENV_KEYS}
     set_keys = [k for k, v in present.items() if v]
@@ -346,7 +357,7 @@ def _app_credentials_env(env: Mapping[str, str]) -> dict[str, str] | None:
         raise WorkflowError(
             "incomplete_app_credentials",
             f"GitHub App credential set is incomplete: missing {', '.join(missing)}"
-            " (set all of SB_APP_ID/SB_APP_INSTALLATION_ID/SB_APP_PRIVATE_KEY_FILE,"
+            f" (set all of {'/'.join(_APP_ENV_KEYS)},"
             " or none to use the GITHUB_TOKEN fallback)",
         )
     return present

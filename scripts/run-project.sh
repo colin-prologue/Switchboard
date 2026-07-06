@@ -37,9 +37,12 @@ if [ -f "$APP_ENV" ]; then
   echo "[run-project] App identity: ${SB_APP_BOT_LOGIN:-<unset>} (from $APP_ENV)"
 fi
 
+# All five keys (minting trio + bot identity pair) — a partial set must not
+# silently half-switch identities; the orchestrator enforces the same rule.
 if [ -z "${GITHUB_TOKEN:-}" ] && { [ -z "${SB_APP_ID:-}" ] \
-    || [ -z "${SB_APP_INSTALLATION_ID:-}" ] || [ -z "${SB_APP_PRIVATE_KEY_FILE:-}" ]; }; then
-  echo "ERROR no credentials: provide $APP_ENV with SB_APP_ID/SB_APP_INSTALLATION_ID/SB_APP_PRIVATE_KEY_FILE (preferred), or export GITHUB_TOKEN (dogfood: \"\$(gh auth token)\")" >&2
+    || [ -z "${SB_APP_INSTALLATION_ID:-}" ] || [ -z "${SB_APP_PRIVATE_KEY_FILE:-}" ] \
+    || [ -z "${SB_APP_BOT_LOGIN:-}" ] || [ -z "${SB_APP_BOT_USER_ID:-}" ]; }; then
+  echo "ERROR no credentials: provide $APP_ENV with SB_APP_ID/SB_APP_INSTALLATION_ID/SB_APP_PRIVATE_KEY_FILE/SB_APP_BOT_LOGIN/SB_APP_BOT_USER_ID (preferred), or export GITHUB_TOKEN (dogfood: \"\$(gh auth token)\")" >&2
   exit 1
 fi
 
