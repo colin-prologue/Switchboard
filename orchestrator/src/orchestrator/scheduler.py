@@ -51,6 +51,26 @@ SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
 # decision survives a process restart (AgDR-002 weakest point → resolved).
 PARK_LABEL = "status:parked"
 
+# Claim-visibility status labels (issue #14 / AgDR-010). The orchestrator OWNS
+# exactly these three status labels — gate/handoff/triage status labels belong
+# to humans, worker agents, and the verifier respectively and are NEVER written
+# here. `status:in-progress` is board visibility only, NOT a lock (a label
+# cannot compare-and-swap; cross-runner mutual exclusion is issue #15). It is
+# applied when a `todo` issue is first claimed and cleared when the claim dies.
+TODO_LABEL = "status:todo"
+IN_PROGRESS_LABEL = "status:in-progress"
+
+# Posted when the orchestrator releases a live claim mid-run and reverts the
+# board (claim-release path only — the startup sweep is comment-free per
+# AgDR-010 decision #5, since a "nobody's working this" note seconds before the
+# same runner resumes would be noise).
+CLAIM_RELEASE_COMMENT = (
+    "**Switchboard released its claim on this issue.** No worker is actively "
+    "holding it, so its status label was reverted to `" + TODO_LABEL + "` to "
+    "keep the board honest. It will be re-dispatched on a future poll if it is "
+    "still eligible."
+)
+
 CONTINUATION_PROMPT = (
     "Continue working the same issue in this workspace. Do not restart from "
     "scratch: review your progress so far, then finish the remaining work, "
@@ -199,6 +219,7 @@ class Orchestrator:
         self._build_creds()  # WorkflowError (bad key file) aborts startup (§6.3)
         try:
             await self._startup_terminal_cleanup()
+            await self._startup_in_progress_sweep()
 
             while not self._stopping:
                 try:
@@ -378,11 +399,24 @@ class Orchestrator:
             await self._park(issue, f"session cap reached ({spent}/{cap})")
             return
 
+        # Claim before any await so a concurrent tick/retry timer cannot
+        # double-dispatch while the label write below is in flight.
+        self.claimed.add(issue.id)
+        # issue #14: the FIRST dispatch of a `todo`-state issue makes the claim
+        # visible on the board (status:todo -> status:in-progress). Only the
+        # first dispatch of THIS engagement writes (attempt is None); every
+        # continuation/failure-retry re-enters with attempt set and writes
+        # nothing — the label tracks the CLAIM, not the session, so between-
+        # session backoff must not flap it. A first dispatch of a `triage`- or
+        # already-`in progress`-state issue writes no status label (the verifier
+        # owns `status:triage`; an in-progress issue needs no write).
+        if attempt is None and issue.state.lower() == "todo":
+            await self._apply_in_progress_label(issue)
+
         task = asyncio.create_task(self._worker(issue, attempt))
         entry = RunningEntry(task=task, identifier=issue.identifier, issue=issue,
                              retry_attempt=attempt)
         self.running[issue.id] = entry
-        self.claimed.add(issue.id)
         self._cancel_retry(issue.id)
         self.sessions_per_issue[issue.id] = spent + 1
         log("dispatched", issue_id=issue.id, issue_identifier=issue.identifier,
@@ -532,6 +566,13 @@ class Orchestrator:
             return
         issue = next((i for i in candidates if i.id == issue_id), None)
         if issue is None:
+            # No status-label revert here: `fetch_candidate_issues` filters to
+            # active states, and status:in-progress normalizes to the active
+            # "in progress" state — so an issue that is truly still in-progress
+            # would STILL be a candidate. Its absence means it already moved to a
+            # gate/terminal state (or was deleted), which the revert guard would
+            # decline anyway. Reverting would require a wasteful extra fetch for
+            # a guaranteed no-op (issue #14 / AgDR-010).
             self.claimed.discard(issue_id)
             log("claim released (issue no longer a candidate)", issue_id=issue_id,
                 issue_identifier=entry.identifier)
@@ -545,6 +586,12 @@ class Orchestrator:
         if self._should_dispatch(issue):
             await self._dispatch(issue, attempt=entry.attempt)
         else:
+            # The claim dies here: revert its status:in-progress board marker to
+            # status:todo with a one-line comment (issue #14 / AgDR-010). The
+            # revert is guarded — if the issue is no longer sole-in-progress (a
+            # human/agent moved it, or it carries status:parked), it is left
+            # untouched.
+            await self._release_in_progress_claim(tracker, issue, comment=True)
             log("claim released (issue no longer eligible)", issue_id=issue_id,
                 issue_identifier=entry.identifier)
 
@@ -643,6 +690,103 @@ class Orchestrator:
             log("teardown error; claim released", issue_id=issue_id,
                 issue_identifier=entry.identifier, error=repr(exc))
 
+    # -- claim-visibility labels (issue #14 / AgDR-010) -----------------------------
+
+    async def _apply_in_progress_label(self, issue: Issue) -> None:
+        """Swap status:todo -> status:in-progress for a freshly-claimed issue.
+
+        Also mutates the in-memory `issue.state`/`issue.labels` to the POST-write
+        state. This is load-bearing, not cosmetic: `_worker` captures
+        `dispatch_state` from `issue.state` and ends the session on ANY between-
+        turn state change (role-pinned sessions, SPEC.md §4). If the in-memory
+        state stayed "todo" while the tracker read back "in progress", the turn-1
+        refresh would see the orchestrator's OWN write as a state change and
+        force a one-turn session — burning one of max_sessions_per_issue on every
+        todo dispatch (AgDR-010 decision #3). A label write failure is non-fatal:
+        this is visibility, not a lock, so we log and dispatch anyway, leaving the
+        in-memory state untouched so `dispatch_state` still matches the tracker.
+        """
+        tracker, _, _ = self._components()
+        try:
+            await tracker.add_labels(issue.id, [IN_PROGRESS_LABEL])
+            await tracker.remove_labels(issue.id, [TODO_LABEL])
+        except TrackerError as exc:
+            log("in-progress label write failed on dispatch; dispatching anyway "
+                "(visibility only, not a lock)", issue_id=issue.id,
+                issue_identifier=issue.identifier, error=str(exc))
+            return
+        issue.labels = [lbl for lbl in issue.labels if lbl != TODO_LABEL]
+        if IN_PROGRESS_LABEL not in issue.labels:
+            issue.labels.append(IN_PROGRESS_LABEL)
+        issue.state = "in progress"
+
+    async def _release_in_progress_claim(self, tracker, issue: Issue, *,
+                                         comment: bool) -> None:
+        """Revert a stranded status:in-progress claim back to status:todo.
+
+        Shared by the mid-run claim-release path (comment=True) and the startup
+        reconciliation sweep (comment=False). GUARDED: only acts when
+        status:in-progress is the issue's SOLE status:* label and the issue is
+        open. If a human or agent already moved the issue (any other status:*
+        label — a handoff, a gate, triage), the board already reflects a real
+        transition, so we leave it alone. Visibility only; never a lock.
+        """
+        if issue.state.lower() == "closed":
+            return
+        status_labels = [lbl for lbl in issue.labels if lbl.startswith("status:")]
+        if status_labels != [IN_PROGRESS_LABEL]:
+            return  # human/agent already moved it — leave the board alone
+        try:
+            await tracker.add_labels(issue.id, [TODO_LABEL])
+            await tracker.remove_labels(issue.id, [IN_PROGRESS_LABEL])
+        except TrackerError as exc:
+            log("in-progress claim revert failed (visibility only)",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                error=str(exc))
+            return
+        issue.labels = [lbl for lbl in issue.labels if lbl != IN_PROGRESS_LABEL]
+        if TODO_LABEL not in issue.labels:
+            issue.labels.append(TODO_LABEL)
+        issue.state = "todo"
+        if comment:
+            try:
+                await tracker.add_issue_comment(issue.id, CLAIM_RELEASE_COMMENT)
+            except TrackerError as exc:
+                log("in-progress claim revert comment failed",
+                    issue_id=issue.id, error=str(exc))
+        log("in-progress claim reverted to todo", issue_id=issue.id,
+            issue_identifier=issue.identifier, commented=comment)
+
+    async def _startup_in_progress_sweep(self) -> None:
+        """Startup reconciliation (issue #14 / AgDR-010): an open
+        status:in-progress issue with no live claim is a lie on the board — a
+        prior process crashed mid-run and its in-memory claim died with it.
+        Revert every such issue to status:todo, COMMENT-FREE (decision #5: the
+        next tick may immediately re-dispatch it, so a "nobody's working this"
+        comment would be noise and a momentary lie).
+
+        Load-bearing premise: single-runner-per-repo (SPEC.md §2, tracker "one
+        process == one repo"). A fresh process has empty claim state and cannot
+        distinguish "stranded by my crash" from "held by a live peer", so this
+        would wrongly revert a peer's claim under multi-runner — which is
+        deliberately out of scope (issue #15). Re-gate this sweep if that lands.
+        """
+        cfg = self._cfg
+        assert cfg is not None
+        tracker, _, _ = self._components()
+        try:
+            candidates = await tracker.fetch_candidate_issues()
+        except TrackerError as exc:
+            log("startup in-progress sweep fetch failed; continuing", error=str(exc))
+            return
+        for issue in candidates:
+            if issue.state.lower() != "in progress":
+                continue
+            if (issue.id in self.running or issue.id in self.claimed
+                    or issue.id in self.retry_attempts):
+                continue  # a live claim already owns it
+            await self._release_in_progress_claim(tracker, issue, comment=False)
+
     # -- parking (owned extension, SPEC.md §4) --------------------------------------
 
     async def _park(self, issue: Issue, reason: str) -> None:
@@ -673,6 +817,18 @@ class Orchestrator:
                     workspace_preserved=True)
             await tracker.add_labels(issue.id, [PARK_LABEL])
             self.parked.add(issue.id)  # durable marker confirmed
+            # issue #14: preserve the one-status-label contract — a parked issue
+            # should show status:parked ALONE, not also status:in-progress. Done
+            # only after the durable park write succeeds; a failure here is
+            # cosmetic (the issue is already durably parked), so it never trips
+            # the cap-enforcement halt below.
+            try:
+                await tracker.remove_labels(issue.id, [IN_PROGRESS_LABEL])
+                issue.labels = [lbl for lbl in issue.labels
+                                if lbl != IN_PROGRESS_LABEL]
+            except TrackerError as exc:
+                log("could not clear status:in-progress on park (cosmetic; issue "
+                    "is durably parked)", issue_id=issue.id, error=str(exc))
         except TrackerError as exc:
             if exc.code == "github_label_not_found":
                 # The park label is unprovisioned: parking can never persist, so
