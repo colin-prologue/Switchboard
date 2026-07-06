@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 from orchestrator.types import WorkflowDefinition, WorkflowError
@@ -424,3 +425,102 @@ def test_real_workflow_base_file_loads_after_placeholder_substitution(tmp_path: 
     assert claude_cfg.max_budget_usd == 5.0
 
     assert "issue.identifier" in defn.prompt_template
+
+
+# --- build_credentials() (issue #10: GitHub App identity) ---------------------
+
+def _app_env(tmp_path: Path) -> dict[str, str]:
+    pem = tmp_path / "app.pem"
+    pem.write_text("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n")
+    return {
+        "SB_APP_ID": "4225392",
+        "SB_APP_INSTALLATION_ID": "144657149",
+        "SB_APP_PRIVATE_KEY_FILE": str(pem),
+        "SB_APP_BOT_LOGIN": "switchboard-agent[bot]",
+        "SB_APP_BOT_USER_ID": "300281474",
+    }
+
+
+async def test_build_credentials_static_provider_without_app_env(tmp_path: Path):
+    from orchestrator.auth import StaticTokenProvider
+    from orchestrator.workflow import build_credentials
+
+    cfg = _cfg_with_tracker(tmp_path)
+    async with httpx.AsyncClient() as client:
+        creds = build_credentials(cfg.tracker(), {}, client)
+        assert isinstance(creds, StaticTokenProvider)
+        assert await creds.token() == "literal-token"
+
+
+async def test_build_credentials_app_provider_with_full_app_env(tmp_path: Path):
+    from orchestrator.auth import AppInstallationTokenProvider
+    from orchestrator.workflow import build_credentials
+
+    cfg = _cfg_with_tracker(tmp_path)
+    async with httpx.AsyncClient() as client:
+        creds = build_credentials(cfg.tracker(), _app_env(tmp_path), client)
+        assert isinstance(creds, AppInstallationTokenProvider)
+
+
+def test_build_credentials_partial_app_env_fails_loud(tmp_path: Path):
+    """A half-configured App credential set must NOT silently fall back to the
+    personal token (silent identity switch); it is a config error."""
+    from orchestrator.workflow import build_credentials
+
+    env = _app_env(tmp_path)
+    del env["SB_APP_INSTALLATION_ID"]
+    cfg = _cfg_with_tracker(tmp_path)
+    with pytest.raises(WorkflowError) as exc_info:
+        build_credentials(cfg.tracker(), env, client=None)
+    assert exc_info.value.code == "incomplete_app_credentials"
+
+
+def test_build_credentials_unreadable_key_file_fails_loud(tmp_path: Path):
+    from orchestrator.workflow import build_credentials
+
+    env = _app_env(tmp_path)
+    env["SB_APP_PRIVATE_KEY_FILE"] = str(tmp_path / "nope.pem")
+    cfg = _cfg_with_tracker(tmp_path)
+    with pytest.raises(WorkflowError) as exc_info:
+        build_credentials(cfg.tracker(), env, client=None)
+    assert exc_info.value.code == "unreadable_app_private_key"
+
+
+def test_validate_dispatch_app_credentials_satisfy_missing_api_key(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """No GITHUB_TOKEN resolved, but a complete SB_APP_* set in the environment
+    is a valid credential source (the token is minted at runtime, so api_key
+    never resolves)."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    for k, v in _app_env(tmp_path).items():
+        monkeypatch.setenv(k, v)
+    cfg = _cfg_with_tracker(tmp_path, api_key="$GITHUB_TOKEN")
+    validate_dispatch(cfg)  # should not raise
+
+
+def test_validate_dispatch_partial_app_credentials_fail_loud(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("SB_APP_INSTALLATION_ID", raising=False)
+    monkeypatch.delenv("SB_APP_PRIVATE_KEY_FILE", raising=False)
+    monkeypatch.setenv("SB_APP_ID", "4225392")
+    cfg = _cfg_with_tracker(tmp_path, api_key="$GITHUB_TOKEN")
+    with pytest.raises(WorkflowError) as exc_info:
+        validate_dispatch(cfg)
+    assert exc_info.value.code == "incomplete_app_credentials"
+
+
+def test_build_credentials_missing_bot_identity_fails_loud(tmp_path: Path):
+    """Codex PR #42 P2: App mode with the minting keys but no bot identity
+    would mint bot tokens while commits author as whatever git identity the
+    workspace inherits — the half-configured identity switch again. The
+    completeness check covers all five SB_APP_* keys."""
+    from orchestrator.workflow import build_credentials
+
+    env = _app_env(tmp_path)
+    del env["SB_APP_BOT_LOGIN"]
+    cfg = _cfg_with_tracker(tmp_path)
+    with pytest.raises(WorkflowError) as exc_info:
+        build_credentials(cfg.tracker(), env, client=None)
+    assert exc_info.value.code == "incomplete_app_credentials"
+    assert "SB_APP_BOT_LOGIN" in str(exc_info.value)

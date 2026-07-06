@@ -19,6 +19,7 @@ is mutated only from the event loop; workers report outcomes, they never mutate.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,7 +37,8 @@ from .types import (
     TrackerError,
     WorkflowError,
 )
-from .workflow import Config, load_workflow, validate_dispatch
+from .auth import AppInstallationTokenProvider, StaticTokenProvider
+from .workflow import Config, build_credentials, load_workflow, validate_dispatch
 from .workspace import WorkspaceManager
 
 CONTINUATION_DELAY_MS = 1000       # core §8.4 fixed continuation delay
@@ -109,13 +111,44 @@ class Orchestrator:
         # Per-call GitHubTracker instances borrow it, so pools/handshakes are
         # reused and there is exactly one thing to close at shutdown.
         self._http: httpx.AsyncClient | None = None
+        # ONE token provider for the process lifetime (issue #10): the mint
+        # cache must survive across ticks, and this process is the sole minting
+        # authority — the same provider backs every tracker call and every
+        # token injected into agent turns. Deliberately NOT rebuilt on workflow
+        # hot-reload (credentials are env-scoped, not workflow-scoped).
+        self._creds: StaticTokenProvider | AppInstallationTokenProvider | None = None
+
+    def _build_creds(self) -> None:
+        cfg = self._cfg
+        assert cfg is not None
+        self._creds = build_credentials(cfg.tracker(), os.environ, self._http)
+
+    async def _agent_token(self) -> str | None:
+        """The bot token to inject into an agent turn (cached mint, issue #10).
+        None when no provider is wired (test harnesses) — the agent then
+        inherits the orchestrator env unchanged. A mint failure becomes a
+        WorkerFailure so the turn retries with backoff instead of launching an
+        agent with no credentials."""
+        if self._creds is None:
+            return None
+        try:
+            # The token is frozen in the subprocess env for the whole turn, so
+            # demand one that outlives the turn bound — a cached token with
+            # only the tracker's 300s skew left would expire before a long
+            # turn's final push (Codex PR #42 P1).
+            cfg = self._cfg
+            assert cfg is not None
+            min_ttl = cfg.claude().turn_timeout_ms / 1000
+            return await self._creds.token(min_ttl=min_ttl)
+        except Exception as exc:
+            raise WorkerFailure(f"token mint failed: {exc.__class__.__name__}") from exc
 
     # -- component wiring (config-derived views over shared resources) ----------
 
     def _components(self) -> tuple[GitHubTracker, WorkspaceManager, ClaudeRunner]:
         cfg = self._cfg
         assert cfg is not None
-        tracker = GitHubTracker(cfg.tracker(), client=self._http)
+        tracker = GitHubTracker(cfg.tracker(), client=self._http, creds=self._creds)
         wsm = WorkspaceManager(cfg.workspace_root(), cfg.hooks())
         runner = ClaudeRunner(cfg.claude())
         return tracker, wsm, runner
@@ -163,6 +196,7 @@ class Orchestrator:
             repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()))
 
         self._http = httpx.AsyncClient(timeout=30.0)  # core §11.2 network timeout
+        self._build_creds()  # WorkflowError (bad key file) aborts startup (§6.3)
         try:
             await self._startup_terminal_cleanup()
 
@@ -381,9 +415,13 @@ class Orchestrator:
                     prompt = render_prompt(defn.prompt_template, issue, attempt)
                 else:
                     prompt = CONTINUATION_PROMPT  # §7.1: don't resend the task prompt
+                # Fresh (cached) mint per turn: a session spanning the hourly
+                # installation-token expiry always injects a valid bot token.
+                agent_token = await self._agent_token()
                 result = await runner.run_turn(
                     ws.path, prompt, resume_session_id=session_id,
-                    on_event=self._on_agent_event, issue_id=issue.id)
+                    on_event=self._on_agent_event, issue_id=issue.id,
+                    agent_token=agent_token)
                 cumulative_cost += result.cost_usd
                 entry = self.running.get(issue.id)
                 if result.status != "succeeded":
