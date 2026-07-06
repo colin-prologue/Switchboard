@@ -115,6 +115,10 @@ class Board:
     issues: list[BoardIssue]  # OPEN issues under review (ledger excluded)
     merged_prs: list[MergedPR]
     repo_id: str | None = None
+    # >100 open issues: analysis stays capped to the first page (Phase 1), but
+    # ledger DISCOVERY must not be — run_analysis pages on from end_cursor.
+    issues_truncated: bool = False
+    end_cursor: str | None = None
 
     def by_number(self) -> dict[int, BoardIssue]:
         return {i.number: i for i in self.issues}
@@ -545,7 +549,7 @@ query($owner: String!, $name: String!, $prCount: Int!) {
         blockedBy(first: 20) { nodes { number state } }
         comments(first: 50) { nodes { author { login } body url } }
       }
-      pageInfo { hasNextPage }
+      pageInfo { hasNextPage endCursor }
     }
     pullRequests(first: $prCount, states: [MERGED], orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes {
@@ -577,6 +581,20 @@ mutation($id: ID!, $body: String!) {
 }
 """
 
+# Ledger discovery past the board's first page (Codex PR #41 P1): a light
+# scan — id/number/title/body only — so idempotency holds on 100+-issue repos
+# without paying full-board pagination (a Phase-1 non-goal for ANALYSIS only).
+_LEDGER_SCAN_QUERY = """
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 100, states: [OPEN], orderBy: {field: CREATED_AT, direction: ASC}, after: $after) {
+      nodes { id number title body }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
 
 def _parse_iso(value: str | None) -> datetime | None:
     if not value:
@@ -600,12 +618,44 @@ class GraphReviewGitHub:
         )
         repo = data.get("repository") or {}
         issues_conn = repo.get("issues") or {}
-        if (issues_conn.get("pageInfo") or {}).get("hasNextPage"):
+        page_info = issues_conn.get("pageInfo") or {}
+        truncated = bool(page_info.get("hasNextPage"))
+        if truncated:
             log("graph-review: board exceeds 100 open issues; only the first 100 "
-                "are analyzed this run (no pagination in Phase 1)")
+                "are analyzed this run (no pagination in Phase 1); ledger "
+                "discovery pages through the rest")
         issues = [self._normalize_issue(n) for n in (issues_conn.get("nodes") or [])]
         prs = [self._normalize_pr(n) for n in ((repo.get("pullRequests") or {}).get("nodes") or [])]
-        return Board(issues=issues, merged_prs=prs, repo_id=repo.get("id"))
+        return Board(issues=issues, merged_prs=prs, repo_id=repo.get("id"),
+                     issues_truncated=truncated, end_cursor=page_info.get("endCursor"))
+
+    async def scan_for_ledger(self, after: str | None) -> BoardIssue | None:
+        """Page through the remaining open issues looking for the ledger
+        (Codex PR #41 P1). Same two-tier match as find_ledger: a marker hit
+        wins immediately; an exact-title hit is remembered and returned only
+        if no marker is found by exhaustion."""
+        title_match: BoardIssue | None = None
+        while True:
+            data = await self._tracker.graphql(
+                _LEDGER_SCAN_QUERY,
+                {"owner": self._owner, "name": self._name, "after": after},
+            )
+            conn = ((data.get("repository") or {}).get("issues")) or {}
+            for raw in conn.get("nodes") or []:
+                issue = BoardIssue(
+                    number=raw["number"], node_id=raw["id"],
+                    title=raw.get("title") or "", body=raw.get("body") or "",
+                    state="open", labels=[], milestone=None, blocked_by=[],
+                    blocker_states={}, comments=[], url=None,
+                )
+                if LEDGER_MARKER in issue.body:
+                    return issue
+                if title_match is None and issue.title.strip() == LEDGER_TITLE:
+                    title_match = issue
+            page_info = conn.get("pageInfo") or {}
+            after = page_info.get("endCursor")
+            if not page_info.get("hasNextPage") or after is None:
+                return title_match
 
     @staticmethod
     def _normalize_issue(raw: dict[str, Any]) -> BoardIssue:
@@ -699,6 +749,11 @@ async def run_analysis(
     board = await io.fetch_board()
 
     ledger = find_ledger(board)
+    if ledger is None and board.issues_truncated:
+        # The ledger may sit past the first page (CREATED_AT ASC puts it late
+        # in old repos). Creating without scanning would duplicate the ledger
+        # on every run — the one thing its design promises not to do.
+        ledger = await io.scan_for_ledger(board.end_cursor)
     if ledger is not None:  # exclude the ledger itself from analysis
         board.issues = [i for i in board.issues if i.number != ledger.number]
 

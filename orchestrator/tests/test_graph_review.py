@@ -420,3 +420,91 @@ def test_detect_all_collects_every_category():
     assert "split:35" in keys
     assert "stale-assumption:31" in keys
     assert "promotable:20" in keys
+
+
+# --- Codex PR #41 P1: ledger discovery must survive >100 open issues ----------
+
+
+def _minimal_node(number, *, title="t", body=""):
+    return {"id": f"I_{number}", "number": number, "title": title, "body": body}
+
+
+class PagedRecorder(Recorder):
+    """Serves the board query (truncated) plus sequential ledger-scan pages."""
+
+    def __init__(self, board_data, scan_pages):
+        super().__init__(board_data)
+        self.scan_pages = list(scan_pages)  # [(nodes, has_next, end_cursor), ...]
+        self.scan_calls: list[str | None] = []  # `after` cursor per scan call
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        if "$prCount" in body["query"] or "createIssue" in body["query"] \
+                or "updateIssue" in body["query"]:
+            return super().handler(request)
+        # ledger-scan query
+        self.scan_calls.append(body["variables"].get("after"))
+        nodes, has_next, cursor = self.scan_pages[len(self.scan_calls) - 1]
+        return httpx.Response(200, json={"data": {"repository": {"issues": {
+            "nodes": nodes,
+            "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+        }}}})
+
+
+def _truncated_board(issue_nodes, end_cursor="CUR_1"):
+    resp = _board_response(issue_nodes)
+    resp["repository"]["issues"]["pageInfo"] = {
+        "hasNextPage": True, "endCursor": end_cursor}
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_ledger_beyond_first_page_is_updated_not_duplicated():
+    # Board is truncated at the first page and the ledger lives on page 2:
+    # discovery must page on and UPDATE it — a duplicate ledger per run was
+    # the Codex P1 failure mode.
+    ledger_body = f"{LEDGER_MARKER}\n(prior)"
+    board = _truncated_board([_issue_node(31, body="depends on #16"), _issue_node(16)])
+    rec = PagedRecorder(board, scan_pages=[
+        ([_minimal_node(200), _minimal_node(201)], True, "CUR_2"),
+        ([_minimal_node(300, title="Graph Review", body=ledger_body)], False, None),
+    ])
+    io, tracker = _io(rec)
+
+    summary, _ = await run_analysis(io, never_refute)
+
+    assert summary.created is False
+    assert len(rec.mutations) == 1
+    assert "updateIssue" in rec.mutations[0]["query"]
+    assert rec.mutations[0]["variables"]["id"] == "I_300"
+    # scan resumed FROM the board's cursor, then followed page cursors
+    assert rec.scan_calls == ["CUR_1", "CUR_2"]
+    await tracker.aclose()
+
+
+@pytest.mark.asyncio
+async def test_truncated_board_with_no_ledger_anywhere_creates_once():
+    board = _truncated_board([_issue_node(31)])
+    rec = PagedRecorder(board, scan_pages=[([_minimal_node(200)], False, None)])
+    io, tracker = _io(rec)
+
+    summary, _ = await run_analysis(io, never_refute)
+
+    assert summary.created is True
+    assert len(rec.mutations) == 1
+    assert "createIssue" in rec.mutations[0]["query"]
+    assert rec.scan_calls == ["CUR_1"]  # exhausted the scan before creating
+    await tracker.aclose()
+
+
+@pytest.mark.asyncio
+async def test_untruncated_board_never_issues_scan_query():
+    # The common case (<100 open issues) must stay a single board query.
+    board = _board_response([_issue_node(31)])
+    rec = PagedRecorder(board, scan_pages=[])
+    io, tracker = _io(rec)
+
+    await run_analysis(io, never_refute)
+
+    assert rec.scan_calls == []
+    await tracker.aclose()
