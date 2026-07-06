@@ -32,6 +32,49 @@ explicitly non-portable. What carries over is:
    rather than porting is that you may find better shapes for Jira and for
    multi-operator than Switchboard's single-operator shapes.
 
+## Transport (Colin: moving this to the L&W machine)
+
+The kit is self-contained: every cross-reference resolves inside this folder,
+and nothing in it links back to the Switchboard repo. Copy **only this
+folder** — the predecessor's source, specs, and decision records deliberately
+do not cross the boundary; everything portable from them is already distilled
+here.
+
+```bash
+# from the Switchboard repo root, after the PR is merged:
+git archive main handoff/jira-port-kit | tar -x
+# then move handoff/jira-port-kit/ to the L&W machine (USB, scp, however
+# files legitimately cross that boundary for you)
+```
+
+On the L&W side, drop the folder at the root of a **new, empty repo** that
+will become the system's home, commit it as the first commit, and start the
+fresh session there. Keeping the kit in that repo's history (rather than
+pasting it into a prompt) is deliberate: it stays reviewable by teammates and
+becomes the provenance record for every ADR the new session writes against it.
+
+## Prerequisites for the fresh session (verify before kickoff)
+
+The kickoff assumes the session can actually reach the three surfaces it
+must work against. Confirm on the L&W machine:
+
+- **Claude Code** (or equivalent harness) running, with enough permission to
+  read/write the new repo.
+- **jira-mcp connected and authenticated as you** — the session's first real
+  task is probing its capability surface (CONSTRAINTS-TO-ESTABLISH §2), which
+  requires a live connection to the actual board, not documentation.
+- **GitHub access**: `gh` CLI authenticated (or equivalent), able to see the
+  org, target repos, and branch-protection settings it must evaluate
+  (CONSTRAINTS-TO-ESTABLISH §4).
+- **A ticket sandbox**: one throwaway Jira issue (or a scratch project if you
+  can get one) the session may mutate while probing transitions, assignee
+  writes, and read-after-write behavior. Do not probe against live team
+  tickets.
+
+If any of these is missing, the session can still read the kit and draft the
+design conversation, but constraint resolution — the gate before designing —
+will stall.
+
 ## Kickoff prompt (Colin: paste this to start the fresh session)
 
 > You are building v1 of a system that lets any number of engineers on my team
