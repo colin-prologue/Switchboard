@@ -59,10 +59,19 @@ agent:
 # deferred (candidate ticket).
 claude:
   command: "claude -p --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
-  max_turns: 20
+  # max_turns 20 -> 100 (2026-07-06): implementation-scale sessions burned 20
+  # CLI-internal turns in ~7-9 min and exited error_max_turns; the failure path
+  # spawns a fresh session with NO --resume, so tasks needing >20 turns were
+  # structurally uncompletable (#14 parked twice on this wall). Budget still
+  # bounds each invocation. Structural fix (error_max_turns => resume) is
+  # ticketed separately.
+  max_turns: 100
   max_budget_usd: 5
   turn_timeout_ms: 3600000
-  read_timeout_ms: 5000
+  # read_timeout 5000 -> 30000 (2026-07-06): 5s to first protocol line kills
+  # real `claude` cold starts (two evidence-free instant failures at 19:17Z
+  # burned #14's session budget in ~60s).
+  read_timeout_ms: 30000
   stall_timeout_ms: 300000
 ---
 
