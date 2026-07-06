@@ -17,9 +17,12 @@ set -uo pipefail
 # Ground-truth transcript capture (issue #30, blocks #20b / #16).
 # Copy this session's CLI transcript(s) into the workspace's .run/transcripts/
 # so a fresh fail-review verifier reads them FROM DISK (ADR-013 inversion)
-# instead of trusting returned summaries. Transcripts carry secrets: .run/ is
-# gitignored and their content is NEVER committed or posted to GitHub — this
-# writes to local disk only.
+# instead of trusting returned summaries. Transcripts carry secrets and their
+# content is NEVER committed or posted to GitHub — this writes to local disk
+# only. Registered projects' repos generally do NOT ignore `.run/` in their
+# own .gitignore, so the copy is made git-invisible via the clone's repo-local
+# `.git/info/exclude` (works in every clone, touches no tracked file, and an
+# agent's `git add -A` stages nothing from it).
 #
 # The project-dir name is derivable from the workspace path (safety invariant:
 # cwd == the per-issue workspace), so no session id is needed. Claude Code
@@ -27,6 +30,9 @@ set -uo pipefail
 {
   transcript_src="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
   if [ -d "$transcript_src" ]; then
+    if [ -d .git/info ] && ! grep -qxF '.run/' .git/info/exclude 2>/dev/null; then
+      echo '.run/' >> .git/info/exclude
+    fi
     mkdir -p .run/transcripts
     # Overwrite-safe on a reused workspace; no-op if the glob matches nothing.
     cp -f "$transcript_src"/*.jsonl .run/transcripts/ 2>/dev/null || true

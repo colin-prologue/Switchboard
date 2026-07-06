@@ -143,3 +143,38 @@ def test_transcript_content_never_reaches_git(
 def test_repo_gitignore_lists_run_dir() -> None:
     # Guards the .gitignore edit: `.run/` must stay ignored repo-wide.
     assert ".run/" in (REPO_ROOT / ".gitignore").read_text().splitlines()
+
+
+def test_transcripts_unstageable_in_repos_that_do_not_ignore_run_dir(
+    workspace: Path, claude_config_dir: Path
+) -> None:
+    # Codex PR #36 P1: registered projects' repos generally do NOT ignore
+    # `.run/` — only Switchboard's own .gitignore was updated. The hook must
+    # make the copy invisible to git in ANY clone (repo-local exclude), or an
+    # agent's `git add -A` could stage and push secret-bearing transcripts.
+    subprocess.run(["git", "init", "-q"], cwd=str(workspace), check=True)
+    # No .gitignore at all — the worst-case target repo.
+
+    src = _make_source(claude_config_dir, workspace)
+    (src / "session.jsonl").write_text('{"secret":"token"}\n')
+
+    assert _run_hook(workspace, claude_config_dir).returncode == 0
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=str(workspace),
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert ".run" not in status
+
+    # Even a blanket add stages nothing from .run/.
+    subprocess.run(["git", "add", "-A"], cwd=str(workspace), check=True)
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"], cwd=str(workspace),
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert ".run" not in staged
+
+    # And the hook is idempotent about the exclude entry on reused workspaces.
+    assert _run_hook(workspace, claude_config_dir).returncode == 0
+    exclude = (workspace / ".git" / "info" / "exclude").read_text()
+    assert exclude.count(".run/") == 1
