@@ -25,4 +25,19 @@ else
   git checkout -B "$BRANCH" "origin/$SB_BASE_BRANCH"
 fi
 
+# issue #10: author workspace commits as the Switchboard bot and push with the
+# per-turn installation token. Set only when the App bot identity is exported
+# (run-project.sh sources ~/.config/switchboard/app.env); absent it, git falls
+# back to the operator's identity (documented personal-token dogfood path).
+if [ -n "${SB_APP_BOT_LOGIN:-}" ] && [ -n "${SB_APP_BOT_USER_ID:-}" ]; then
+  git config user.name  "$SB_APP_BOT_LOGIN"
+  git config user.email "${SB_APP_BOT_USER_ID}+${SB_APP_BOT_LOGIN}@users.noreply.github.com"
+  # x-access-token is GitHub's username for installation-token HTTPS auth. The
+  # single quotes are load-bearing: $GITHUB_TOKEN must resolve AT PUSH TIME in
+  # the agent's env (the orchestrator injects a fresh mint per turn), never be
+  # baked in here where it would go stale within the hour.
+  git config credential.helper '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'
+  echo "[before_run] commit identity: $SB_APP_BOT_LOGIN"
+fi
+
 echo "[before_run] ready on $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
