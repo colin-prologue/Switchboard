@@ -283,6 +283,20 @@ class GitHubTracker:
             after = end_cursor
         return results
 
+    # --- shared transport (owned extension: graph-review adapter) ------------
+
+    async def graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        """Run one GraphQL request through the vetted transport, returning `data`.
+
+        Public passthrough over `_request` so out-of-band tools (the read-only
+        graph-review analyzer, issue #37) can reuse this adapter's auth, timeout,
+        and error mapping without re-implementing transport. It performs no
+        writes itself — the caller owns query construction. The core §11.5
+        no-tracker-writes boundary is about the *scheduler*; a separate,
+        manually-invoked analyzer reusing the transport does not cross it.
+        """
+        return await self._request(query, variables)
+
     # --- transport --------------------------------------------------------------
 
     async def _post(self, query: str, variables: dict[str, Any]) -> httpx.Response:
