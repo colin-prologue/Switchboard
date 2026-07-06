@@ -43,13 +43,14 @@ here.
 ```bash
 # from the Switchboard repo root, after the PR is merged:
 git archive main handoff/jira-port-kit | tar -x
-# then move handoff/jira-port-kit/ to the L&W machine (USB, scp, however
-# files legitimately cross that boundary for you)
+# this extracts handoff/jira-port-kit/ — carry the inner jira-port-kit/
+# folder to the L&W machine (USB, scp, however files legitimately cross
+# that boundary for you); the handoff/ parent does not travel
 ```
 
-On the L&W side, drop the folder at the root of a **new, empty repo** that
-will become the system's home, commit it as the first commit, and start the
-fresh session there. Keeping the kit in that repo's history (rather than
+On the L&W side, place the folder at the root of a **new, empty repo** as
+`jira-port-kit/` (that exact name — the kickoff prompt below refers to it),
+commit it as the first commit, and start the fresh session there. Keeping the kit in that repo's history (rather than
 pasting it into a prompt) is deliberate: it stays reviewable by teammates and
 becomes the provenance record for every ADR the new session writes against it.
 
@@ -81,7 +82,8 @@ will stall.
 > run autonomous Claude coding agents from their own machines, coordinated
 > through our shared Jira board (self-hosted Jira Data Center, reached via our
 > existing jira-mcp), with code on GitHub. A kit of principles and hard
-> learnings from a predecessor system is in `jira-port-kit/` — read its
+> learnings from a predecessor system is in this repo's `jira-port-kit/`
+> directory (if it lives at a different path here, use that path) — read its
 > README and follow the consumption order before proposing anything. The
 > constitution binds; the lessons inform; the predecessor's mechanics are
 > explicitly not to be copied. Operating model for v1: engineers practice the
