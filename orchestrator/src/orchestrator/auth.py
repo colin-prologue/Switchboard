@@ -54,6 +54,9 @@ class StaticTokenProvider:
     async def token(self) -> str:
         return self._token
 
+    def invalidate(self) -> None:
+        """No-op: a static token cannot be re-minted (401 recovery contract)."""
+
 
 class AppInstallationTokenProvider:
     """Mints a GitHub App installation token from the App key + installation id."""
@@ -91,6 +94,9 @@ class AppInstallationTokenProvider:
                 "Accept": "application/vnd.github+json",
             },
         )
+        # Fail as an httpx error callers can classify — never a KeyError from
+        # the missing "token" field of an error body.
+        resp.raise_for_status()
         data = resp.json()
         self._cached = data["token"]
         self._expires_at = _parse_expiry(data["expires_at"])

@@ -109,3 +109,28 @@ async def test_invalidate_forces_remint_on_next_call():
     provider.invalidate()  # e.g. after a 401
     await provider.token()
     assert len(records) == 2
+
+
+async def test_static_provider_invalidate_is_noop():
+    # The tracker calls invalidate() on any 401; a static personal token has
+    # nothing to re-mint, so the call must be a safe no-op.
+    provider = StaticTokenProvider("ghp_fixed_token")
+    provider.invalidate()
+    assert await provider.token() == "ghp_fixed_token"
+
+
+async def test_mint_failure_raises_httpx_status_error():
+    # A failed mint (e.g. revoked installation -> 401/404) must surface as an
+    # httpx error the tracker can wrap into TrackerError — never a bare
+    # KeyError from the missing "token" field.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    priv, _ = _keypair()
+    provider = AppInstallationTokenProvider(
+        app_id="4225392", private_key_pem=priv, installation_id="99",
+        client=client, now=lambda: _T0,
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await provider.token()

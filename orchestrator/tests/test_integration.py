@@ -678,3 +678,27 @@ async def test_worker_failure_uses_backoff_then_releases_when_gone(harness):
     tracker.candidates = []  # issue disappears -> retry path releases the claim
     await wait_for(lambda: "node-1" not in orch.claimed
                    and "node-1" not in orch.retry_attempts)
+
+
+# --- credential provider wiring (issue #10) -----------------------------------
+
+
+async def test_components_share_one_credential_provider(tmp_path, monkeypatch):
+    """Every tracker construction must reuse the process-lifetime provider —
+    a per-tick provider would lose the mint cache and re-mint every poll."""
+    import httpx
+
+    ws_root = tmp_path / "ws"
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text(WORKFLOW_TMPL.format(ws_root=ws_root))
+    orch = Orchestrator(wf)
+    orch._load_workflow(initial=True)
+    async with httpx.AsyncClient() as client:
+        orch._http = client
+        orch._build_creds()
+        assert orch._creds is not None
+        t1, _, _ = orch._components()
+        t2, _, _ = orch._components()
+        assert t1._creds is orch._creds
+        assert t2._creds is orch._creds
+    orch._http = None

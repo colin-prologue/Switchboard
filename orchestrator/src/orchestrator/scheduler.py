@@ -19,6 +19,7 @@ is mutated only from the event loop; workers report outcomes, they never mutate.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,7 +37,8 @@ from .types import (
     TrackerError,
     WorkflowError,
 )
-from .workflow import Config, load_workflow, validate_dispatch
+from .auth import AppInstallationTokenProvider, StaticTokenProvider
+from .workflow import Config, build_credentials, load_workflow, validate_dispatch
 from .workspace import WorkspaceManager
 
 CONTINUATION_DELAY_MS = 1000       # core §8.4 fixed continuation delay
@@ -109,13 +111,24 @@ class Orchestrator:
         # Per-call GitHubTracker instances borrow it, so pools/handshakes are
         # reused and there is exactly one thing to close at shutdown.
         self._http: httpx.AsyncClient | None = None
+        # ONE token provider for the process lifetime (issue #10): the mint
+        # cache must survive across ticks, and this process is the sole minting
+        # authority — the same provider backs every tracker call and every
+        # token injected into agent turns. Deliberately NOT rebuilt on workflow
+        # hot-reload (credentials are env-scoped, not workflow-scoped).
+        self._creds: StaticTokenProvider | AppInstallationTokenProvider | None = None
+
+    def _build_creds(self) -> None:
+        cfg = self._cfg
+        assert cfg is not None
+        self._creds = build_credentials(cfg.tracker(), os.environ, self._http)
 
     # -- component wiring (config-derived views over shared resources) ----------
 
     def _components(self) -> tuple[GitHubTracker, WorkspaceManager, ClaudeRunner]:
         cfg = self._cfg
         assert cfg is not None
-        tracker = GitHubTracker(cfg.tracker(), client=self._http)
+        tracker = GitHubTracker(cfg.tracker(), client=self._http, creds=self._creds)
         wsm = WorkspaceManager(cfg.workspace_root(), cfg.hooks())
         runner = ClaudeRunner(cfg.claude())
         return tracker, wsm, runner
@@ -163,6 +176,7 @@ class Orchestrator:
             repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()))
 
         self._http = httpx.AsyncClient(timeout=30.0)  # core §11.2 network timeout
+        self._build_creds()  # WorkflowError (bad key file) aborts startup (§6.3)
         try:
             await self._startup_terminal_cleanup()
 
