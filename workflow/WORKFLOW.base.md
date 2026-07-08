@@ -102,16 +102,20 @@ author's text stays the author's.
 
 **Verdict routing (pick exactly one):**
 
-- **PASS** → relabel to `status:todo` (now dispatchable). Remove `status:triage`.
+- **PASS** → relabel to `status:todo` (now dispatchable) and stamp the
+  `gate:triage-passed` provenance marker in the SAME command — it is the durable
+  proof triage promoted this issue, and the orchestrator dispatch guard refuses
+  to claim a `status:todo` that lacks it (issue #29). Remove `status:triage`.
   ```
-  gh issue edit {{ issue.identifier }} --repo {{REPO}} --remove-label status:triage --add-label status:todo
+  gh issue edit {{ issue.identifier }} --repo {{REPO}} --remove-label status:triage --add-label status:todo,gate:triage-passed
   ```
 - **NEEDS WORK** → post a feedback comment whose first line is the exact heading
   `## Triage verdict` (grep-able), listing each failed rubric check and the fix,
-  then relabel to `status:drafting`.
+  then relabel to `status:drafting`. Clear `gate:triage-passed` in the same
+  command (every route back to drafting drops the marker — idempotent if absent).
   ```
   gh issue comment {{ issue.identifier }} --repo {{REPO}} --body "## Triage verdict"...
-  gh issue edit {{ issue.identifier }} --repo {{REPO}} --remove-label status:triage --add-label status:drafting
+  gh issue edit {{ issue.identifier }} --repo {{REPO}} --remove-label status:triage,gate:triage-passed --add-label status:drafting
   ```
 - **SPLIT** → file child issues at `status:drafting` with drafted bodies, chain
   each to this parent with native blocked-by, and park this parent at

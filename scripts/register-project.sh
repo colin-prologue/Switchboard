@@ -95,8 +95,15 @@ mklabel "status:todo"         "0E8A16" "Approved & dispatchable"
 mklabel "status:in-progress"  "1D76DB" "Agent working"
 mklabel "status:plan-review"  "D93F0B" "Gate B: plan/ADR awaiting approval (not dispatched)"
 mklabel "status:human-review" "5319E7" "Gate C: implementation done, awaiting human merge"
-mklabel "status:blocked"      "B60205" "Parked / dependency unmet"
+# C2 (2026-07-05): status:blocked is advisory only — the orchestrator gates on
+# GitHub-native blocked-by, NOT this label. Reworded so it no longer collides
+# with status:parked (cap-park). Human/board-managed; the dispatch guard ignores it.
+mklabel "status:blocked"      "B60205" "Advisory only (human/board-managed); orchestrator gates on native blocked-by, not this label"
 mklabel "status:parked"       "E99695" "Cap-park: orchestrator halted at session cap — remove to re-dispatch"
+# Provenance marker (issue #29): applied automatically by triage on PASS. Its
+# presence is the durable proof an issue passed triage; the dispatch guard
+# refuses to claim a status:todo that lacks it. Not a status:* state.
+mklabel "gate:triage-passed"  "0E8A16" "Provenance: promoted by triage (PASS). Dispatch guard requires it on status:todo"
 
 cat <<EOF
 

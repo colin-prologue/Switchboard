@@ -122,7 +122,7 @@ async def test_required_label_removed_between_turns_stops_continuation(
         tmp_path, monkeypatch, workflow_tmpl=tmpl)
 
     labeled = make_issue(1)
-    labeled.labels = ["status:todo", "sb"]
+    labeled.labels = ["status:todo", "gate:triage-passed", "sb"]
     unlabeled = make_issue(1)
     unlabeled.labels = ["status:todo"]  # same active state, label pulled
 
@@ -141,7 +141,7 @@ async def test_required_label_removed_midrun_releases_worker(tmp_path, monkeypat
     runner.hold = True
 
     labeled = make_issue(1)
-    labeled.labels = ["status:todo", "sb"]
+    labeled.labels = ["status:todo", "gate:triage-passed", "sb"]
     tracker.candidates = [labeled]
     tracker.states = {"node-1": labeled}
     await orch._tick()

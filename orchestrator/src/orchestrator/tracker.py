@@ -127,6 +127,27 @@ mutation($labelableId: ID!, $labelIds: [ID!]!) {
 """
 
 
+def normalize_status_state(labels: list[str], *, closed: bool) -> str:
+    """Derive the workflow state from an issue's labels (SPEC.md §2).
+
+    The single source of truth for status:* -> state mapping so test fakes can
+    assert fidelity against it instead of hard-coding states: closed issues are
+    terminal "closed"; otherwise the sorted-first `status:*` label wins (one
+    status label per issue is the contract; ties resolve deterministically),
+    "status:" is stripped and "-" -> " "; no status label -> "none".
+
+    Labels are assumed already normalized (stripped, lower-cased) as
+    `_normalize_issue` produces them. Pure — the multi-label diagnostic lives in
+    `_normalize_issue`, which has the issue number to log.
+    """
+    if closed:
+        return "closed"
+    status_labels = sorted(l for l in labels if l.startswith("status:"))
+    if status_labels:
+        return status_labels[0][len("status:") :].replace("-", " ")
+    return "none"
+
+
 class GitHubTracker:
     """Tracker adapter bound to GitHub Issues (SPEC.md §2).
 
@@ -322,20 +343,16 @@ class GitHubTracker:
         label_nodes = (raw.get("labels") or {}).get("nodes") or []
         labels = [n["name"].strip().lower() for n in label_nodes]
 
-        if gh_state == "CLOSED":
-            state = "closed"
-        else:
+        closed = gh_state == "CLOSED"
+        if not closed and len([l for l in labels if l.startswith("status:")]) > 1:
+            # One status label per issue is the workflow contract; more than one
+            # resolves deterministically (sorted-first) but the winner is
+            # semantically arbitrary — surface it. Derivation itself is delegated
+            # to the shared normalize_status_state helper.
             status_labels = sorted(l for l in labels if l.startswith("status:"))
-            if len(status_labels) > 1:
-                # One status label per issue is the workflow contract; more
-                # than one resolves deterministically (sorted-first) but the
-                # winner is semantically arbitrary — surface it.
-                log("issue carries multiple status:* labels; using sorted-first",
-                    issue_number=raw.get("number"), labels=",".join(status_labels))
-            if status_labels:
-                state = status_labels[0][len("status:") :].replace("-", " ")
-            else:
-                state = "none"
+            log("issue carries multiple status:* labels; using sorted-first",
+                issue_number=raw.get("number"), labels=",".join(status_labels))
+        state = normalize_status_state(labels, closed=closed)
 
         blocked_by = [
             BlockerRef(

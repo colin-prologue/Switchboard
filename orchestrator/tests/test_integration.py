@@ -38,11 +38,17 @@ UTC = timezone.utc
 
 def make_issue(n: int, state: str = "todo", blockers: list[BlockerRef] | None = None,
                updated: str = "2026-07-01T10:00:00+00:00") -> Issue:
+    # A dispatchable todo has passed triage, so it carries gate:triage-passed
+    # (issue #29): the orchestrator dispatch guard refuses a status:todo without
+    # it. Other states don't require the marker.
+    labels = [f"status:{state.replace(' ', '-')}"]
+    if state == "todo":
+        labels.append("gate:triage-passed")
     return Issue(
         id=f"node-{n}", identifier=str(n), title=f"Issue {n}",
         description="body", priority=None, state=state, branch_name=None,
         url=f"https://github.com/acme/api/issues/{n}",
-        labels=[f"status:{state.replace(' ', '-')}"],
+        labels=labels,
         blocked_by=blockers or [],
         created_at=datetime(2026, 6, 1, tzinfo=UTC) + timedelta(minutes=n),
         updated_at=datetime.fromisoformat(updated),
