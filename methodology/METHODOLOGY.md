@@ -102,7 +102,10 @@ tollbooth:
 - **Skip triage** for trivial/low-risk tickets whose criteria are already
   bounded and checkable (a one-line fix, a typo, a config bump). File them
   straight at `status:todo`. Forcing triage onto a five-minute bug is the same
-  mis-set-entry-state mistake as forcing Gate A/B onto it.
+  mis-set-entry-state mistake as forcing Gate A/B onto it. Use
+  `scripts/new-ticket.sh --entry todo` — it stamps the `gate:triage-passed`
+  marker alongside the label (the filer is the out-of-band verification;
+  the dispatch guard refuses an unstamped `status:todo`).
 - **File at `status:triage`** when a ticket is new, author-fresh, or its criteria
   smell unbounded ("all/every/comprehensive"), its assumptions are unstated, or
   its size is uncertain — exactly the cases where an unverified contract can burn

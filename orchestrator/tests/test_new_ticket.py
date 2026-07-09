@@ -93,7 +93,9 @@ def test_dry_run_maps_all_flags_to_payload() -> None:
     out = proc.stdout
     assert "repo:       owner/name" in out
     assert "title:      Fix the thing" in out
-    assert "labels:     status:todo" in out          # --entry -> status: label
+    # --entry todo self-stamps the triage-PASS marker (issue #29): direct-entry
+    # todos must be dispatchable, and the dispatch guard refuses unstamped ones.
+    assert "labels:     status:todo,gate:triage-passed" in out
     assert "milestone:  Sprint 3" in out
     assert "blocked-by: 12 34 56" in out              # parsed & normalized
     assert "hello body" in out                        # body from stdin
@@ -226,7 +228,8 @@ def test_missing_title_fails() -> None:
 def test_all_valid_entry_states_map(entry: str) -> None:
     proc = run("--dry-run", "--title", "T", "--repo", "o/n", "--entry", entry)
     assert proc.returncode == 0, proc.stderr
-    assert f"labels:     status:{entry}" in proc.stdout
+    expected = f"status:{entry}" + (",gate:triage-passed" if entry == "todo" else "")
+    assert f"labels:     {expected}" in proc.stdout
 
 
 def test_invalid_entry_state_rejected() -> None:
