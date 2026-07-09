@@ -22,6 +22,37 @@ orchestrator code.
 Dependencies use GitHub's native **blocked-by**; Symphony won't dispatch a
 `status:todo` issue while any blocker is unresolved.
 
+### Who writes which status label (four writers)
+
+One status label per issue is the workflow contract, and each label has exactly
+one owner. The orchestrator writes **only** its own three and never touches the
+others (issue #14 / AgDR-010):
+
+| Label(s)                                        | Written by | When |
+|-------------------------------------------------|------------|------|
+| `status:drafting`, `status:plan-review`, `status:blocked` | **humans** | authoring/approving at the gates |
+| `status:triage` → `status:todo` \| `status:drafting`      | the **triage verifier agent** | on its PASS / NEEDS WORK verdict |
+| `status:human-review`                           | **worker agents** | at handoff (WORKFLOW.md §handoff) |
+| `status:todo` → `status:in-progress`, its revert, and `status:parked` | the **orchestrator** | claim taken / claim died / session cap |
+
+`status:in-progress` is **board visibility only, not a lock** — a label cannot
+compare-and-swap, so cross-runner mutual exclusion is a separate concern
+(issue #15). The orchestrator applies it once when a `todo` issue is first
+claimed and clears it when the claim genuinely dies (mid-run release, or a
+startup sweep of claims stranded by a crash). A handoff to `status:human-review`
+is observed, never reverted: any status label other than a sole `status:in-progress`
+means a human/agent already moved the issue, so the orchestrator leaves it alone.
+
+> **Config caveat (single-runner assumption).** The `status:in-progress` swap is
+> safe under this repo's config because eligibility uses empty `required_labels`
+> and `"in progress"` is itself an active state, so the orchestrator's own write
+> keeps the issue eligible on the retry path. A config that set
+> `required_labels: ["status:todo"]` would make the orchestrator self-release on
+> its own write (the label it just removed is the one it now requires) — that
+> combination is unsupported. The startup sweep's revert of stranded claims also
+> assumes **one runner per repo**; if multi-runner lands (issue #15), the sweep
+> must be re-gated so it cannot revert a live peer's claim.
+
 ## Gates
 
 - **Gate A — intent/spec approved.** A ticket sits at `status:drafting` until a
@@ -106,3 +137,46 @@ For gated work, the issue body should contain:
 Acceptance criteria are the agent's definition of done; non-goals are boundaries
 it must not cross. (Product-intent files, the verification contract, and the
 elicitation front door arrive in later roadmap phases.)
+
+## Drafting-quality checklist — the recurring failure classes
+
+Issue #14 took four triage rounds to reach dispatch; eight of its nine findings
+collapse into a handful of failure classes that are checkable at *drafting* time,
+not rediscovered one triage round at a time. Encode them here (prose for readers)
+and in the executable surfaces that reach every author — the `new-ticket.sh
+--scaffold` skeleton and the `status:triage` rubric — so drafting and triage share
+one vocabulary. (Attribution, not a pass condition: OBS-023 is the fake-fidelity
+observation these rules generalize; issue #14's four-pass verdict trail is the
+worked example that motivated them. Neither is resolvable inside a workspace
+clone, so treat them as provenance only.)
+
+1. **Claim-vs-code drift.** Every cited mechanism carries a `file:line` verified
+   at a named HEAD sha, or is explicitly labeled a guess. A ticket that cites a
+   transition table, a re-fetch, or a "reused" sweep that does not exist at HEAD
+   burns the implementing session rediscovering that the claim is fiction.
+
+2. **Consumers of mutated state.** For any state a ticket mutates — a `status:*`
+   label, issue state, a workspace, an env var — enumerate *who else reads it and
+   how*. This is one question asked repeatedly across #14's deepest findings.
+   Worked example: a ticket that writes a `status:*` label must enumerate the
+   eligibility/dispatch path (does relabeling make the issue dispatchable, or
+   pull it from the active set?), the between-turn role-pin check (a state change
+   ends the pinned session at the next turn boundary — see AgDR-005), and any
+   `updatedAt` consumers (a label write bumps the issue's `updatedAt`, which
+   ordering/polling logic may key on).
+
+3. **Fake fidelity.** *Any state the real system derives, the fake must derive the
+   same way.* A fake that hard-codes what the real system computes passes its own
+   tests and lies about the system. Known instances: a comment write echoes the
+   server-assigned `updatedAt` (the fake must echo it, not invent one); an issue's
+   `state` is recomputed from its `status:*` labels (the fake must recompute it
+   from labels, not store a separate field).
+
+4. **AC executability under the worker's capability envelope.** Every acceptance
+   criterion names a command the dispatched agent can actually run under the
+   worker allowlist (`workflow/WORKFLOW.base.md:61`: `git`, `gh`, and the two
+   pinned `uv run --project orchestrator ... pytest` prefixes), *or* explicitly
+   assigns that step to the human merge gate. An AC naming a command outside the
+   allowlist (a bare `pytest`, a `register-project.sh` run, a `cd … &&` chain) is
+   unsatisfiable at runtime and strands the session — the July-2 #10/#11
+   permission-wall incident, and #14's AC3 as first drafted.

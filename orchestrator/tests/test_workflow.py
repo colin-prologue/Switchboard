@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 from orchestrator.types import WorkflowDefinition, WorkflowError
@@ -326,7 +327,18 @@ def test_validate_dispatch_missing_tracker_kind(tmp_path: Path):
 
 
 def test_validate_dispatch_missing_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # "No credentials" means neither the dogfood token NOR the App-path env
+    # (validate_dispatch accepts either). Clear both, or this fails whenever it
+    # runs in an App-credentialed shell (the worker environment exports SB_APP_*).
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    for _app_var in (
+        "SB_APP_ID",
+        "SB_APP_INSTALLATION_ID",
+        "SB_APP_PRIVATE_KEY_FILE",
+        "SB_APP_BOT_LOGIN",
+        "SB_APP_BOT_USER_ID",
+    ):
+        monkeypatch.delenv(_app_var, raising=False)
     defn = WorkflowDefinition(
         config={"tracker": {"kind": "github", "repo": "acme/widgets", "api_key": "$GITHUB_TOKEN"}},
         prompt_template="",
@@ -424,3 +436,157 @@ def test_real_workflow_base_file_loads_after_placeholder_substitution(tmp_path: 
     assert claude_cfg.max_budget_usd == 5.0
 
     assert "issue.identifier" in defn.prompt_template
+
+
+# --- base <-> composed conformance (issue #44) --------------------------------
+#
+# register-project.sh composes projects/switchboard-self/WORKFLOW.md from
+# workflow/WORKFLOW.base.md by sed-substituting the ALL-CAPS placeholders. That
+# script is outside the worker allowlist, so agents edit BOTH files by hand — and
+# hand-edits drift. This test performs the same substitution in-process and
+# asserts the tracked composed file matches byte-for-byte, so any edit to one file
+# without the mirror is a red suite (no human memory or script run required).
+
+
+def _parse_env(path: Path) -> dict[str, str]:
+    """Parse a project.env (KEY=value lines; ignore comments/blanks)."""
+    env: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        env[key.strip()] = value.strip()
+    return env
+
+
+def test_base_and_composed_workflow_are_in_sync():
+    repo_root = Path(__file__).resolve().parents[2]
+    base = repo_root / "workflow" / "WORKFLOW.base.md"
+    proj = repo_root / "projects" / "switchboard-self"
+    composed = proj / "WORKFLOW.md"
+
+    env = _parse_env(proj / "project.env")
+    composed_text = composed.read_text(encoding="utf-8")
+
+    # {{MAX_AGENTS}} is the one substitution value register-project.sh does not
+    # persist to project.env, so source it from the composed file's rendered
+    # scalar. (Circular only for that one number; the body-text drift this test
+    # guards is unaffected — those are literals in both files, not placeholders.)
+    max_agents = next(
+        line.split(":", 1)[1].strip()
+        for line in composed_text.splitlines()
+        if line.strip().startswith("max_concurrent_agents:")
+    )
+
+    substituted = (
+        base.read_text(encoding="utf-8")
+        .replace("{{REPO}}", env["SB_GITHUB_REPO"])
+        .replace("{{WORKSPACE_ROOT}}", env["SB_WORKSPACE_ROOT"])
+        .replace("{{MAX_AGENTS}}", max_agents)
+        .replace("{{CONVENTION_ROOT}}", env["SB_CONVENTION_ROOT"])
+    )
+
+    assert substituted == composed_text, (
+        "workflow/WORKFLOW.base.md and projects/switchboard-self/WORKFLOW.md have "
+        "drifted. Edit BOTH (register-project.sh is outside the worker allowlist)."
+    )
+
+
+# --- build_credentials() (issue #10: GitHub App identity) ---------------------
+
+def _app_env(tmp_path: Path) -> dict[str, str]:
+    pem = tmp_path / "app.pem"
+    pem.write_text("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n")
+    return {
+        "SB_APP_ID": "4225392",
+        "SB_APP_INSTALLATION_ID": "144657149",
+        "SB_APP_PRIVATE_KEY_FILE": str(pem),
+        "SB_APP_BOT_LOGIN": "switchboard-agent[bot]",
+        "SB_APP_BOT_USER_ID": "300281474",
+    }
+
+
+async def test_build_credentials_static_provider_without_app_env(tmp_path: Path):
+    from orchestrator.auth import StaticTokenProvider
+    from orchestrator.workflow import build_credentials
+
+    cfg = _cfg_with_tracker(tmp_path)
+    async with httpx.AsyncClient() as client:
+        creds = build_credentials(cfg.tracker(), {}, client)
+        assert isinstance(creds, StaticTokenProvider)
+        assert await creds.token() == "literal-token"
+
+
+async def test_build_credentials_app_provider_with_full_app_env(tmp_path: Path):
+    from orchestrator.auth import AppInstallationTokenProvider
+    from orchestrator.workflow import build_credentials
+
+    cfg = _cfg_with_tracker(tmp_path)
+    async with httpx.AsyncClient() as client:
+        creds = build_credentials(cfg.tracker(), _app_env(tmp_path), client)
+        assert isinstance(creds, AppInstallationTokenProvider)
+
+
+def test_build_credentials_partial_app_env_fails_loud(tmp_path: Path):
+    """A half-configured App credential set must NOT silently fall back to the
+    personal token (silent identity switch); it is a config error."""
+    from orchestrator.workflow import build_credentials
+
+    env = _app_env(tmp_path)
+    del env["SB_APP_INSTALLATION_ID"]
+    cfg = _cfg_with_tracker(tmp_path)
+    with pytest.raises(WorkflowError) as exc_info:
+        build_credentials(cfg.tracker(), env, client=None)
+    assert exc_info.value.code == "incomplete_app_credentials"
+
+
+def test_build_credentials_unreadable_key_file_fails_loud(tmp_path: Path):
+    from orchestrator.workflow import build_credentials
+
+    env = _app_env(tmp_path)
+    env["SB_APP_PRIVATE_KEY_FILE"] = str(tmp_path / "nope.pem")
+    cfg = _cfg_with_tracker(tmp_path)
+    with pytest.raises(WorkflowError) as exc_info:
+        build_credentials(cfg.tracker(), env, client=None)
+    assert exc_info.value.code == "unreadable_app_private_key"
+
+
+def test_validate_dispatch_app_credentials_satisfy_missing_api_key(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """No GITHUB_TOKEN resolved, but a complete SB_APP_* set in the environment
+    is a valid credential source (the token is minted at runtime, so api_key
+    never resolves)."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    for k, v in _app_env(tmp_path).items():
+        monkeypatch.setenv(k, v)
+    cfg = _cfg_with_tracker(tmp_path, api_key="$GITHUB_TOKEN")
+    validate_dispatch(cfg)  # should not raise
+
+
+def test_validate_dispatch_partial_app_credentials_fail_loud(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("SB_APP_INSTALLATION_ID", raising=False)
+    monkeypatch.delenv("SB_APP_PRIVATE_KEY_FILE", raising=False)
+    monkeypatch.setenv("SB_APP_ID", "4225392")
+    cfg = _cfg_with_tracker(tmp_path, api_key="$GITHUB_TOKEN")
+    with pytest.raises(WorkflowError) as exc_info:
+        validate_dispatch(cfg)
+    assert exc_info.value.code == "incomplete_app_credentials"
+
+
+def test_build_credentials_missing_bot_identity_fails_loud(tmp_path: Path):
+    """Codex PR #42 P2: App mode with the minting keys but no bot identity
+    would mint bot tokens while commits author as whatever git identity the
+    workspace inherits — the half-configured identity switch again. The
+    completeness check covers all five SB_APP_* keys."""
+    from orchestrator.workflow import build_credentials
+
+    env = _app_env(tmp_path)
+    del env["SB_APP_BOT_LOGIN"]
+    cfg = _cfg_with_tracker(tmp_path)
+    with pytest.raises(WorkflowError) as exc_info:
+        build_credentials(cfg.tracker(), env, client=None)
+    assert exc_info.value.code == "incomplete_app_credentials"
+    assert "SB_APP_BOT_LOGIN" in str(exc_info.value)

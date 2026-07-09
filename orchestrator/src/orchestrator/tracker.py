@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 
+from orchestrator.auth import AppInstallationTokenProvider, StaticTokenProvider
 from orchestrator.log import log
 from orchestrator.types import BlockerRef, Issue, TrackerConfig, TrackerError
 
@@ -126,6 +127,14 @@ mutation($labelableId: ID!, $labelIds: [ID!]!) {
 }
 """
 
+REMOVE_LABELS_MUTATION = """
+mutation($labelableId: ID!, $labelIds: [ID!]!) {
+  removeLabelsFromLabelable(input: {labelableId: $labelableId, labelIds: $labelIds}) {
+    clientMutationId
+  }
+}
+"""
+
 
 def normalize_status_state(labels: list[str], *, closed: bool) -> str:
     """Derive the workflow state from an issue's labels (SPEC.md §2).
@@ -154,11 +163,21 @@ class GitHubTracker:
     implements: core §11.1 (required operations) / overridden by: SPEC.md §2
     """
 
-    def __init__(self, cfg: TrackerConfig, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        cfg: TrackerConfig,
+        client: httpx.AsyncClient | None = None,
+        creds: StaticTokenProvider | AppInstallationTokenProvider | None = None,
+    ) -> None:
         self._cfg = cfg
         self._owned_client = client is None
         # core §11.2: network timeout 30000 ms.
         self._client = client or httpx.AsyncClient(timeout=30.0)
+        # issue #10: the token comes from a provider (App installation token
+        # preferred, minted/re-minted at runtime). Absent an explicit provider,
+        # fall back to the statically-resolved cfg.api_key so the tracker stays
+        # usable standalone/in tests without wiring the scheduler.
+        self._creds = creds or StaticTokenProvider(cfg.api_key)
         # label name -> node id; labels are immutable ids per repo, safe to cache.
         self._label_id_cache: dict[str, str] = {}
 
@@ -250,6 +269,21 @@ class GitHubTracker:
             ADD_LABELS_MUTATION, {"labelableId": issue_id, "labelIds": label_ids}
         )
 
+    async def remove_labels(self, issue_id: str, label_names: list[str]) -> None:
+        """Remove labels from an issue (issue #14: claim-lifecycle visibility).
+
+        The mirror of `add_labels` (`removeLabelsFromLabelable`). Used to keep
+        the one-status-label contract when the orchestrator swaps a claim's
+        status label (`status:todo` -> `status:in-progress` on dispatch, the
+        reverse on claim release, and dropping `status:in-progress` at park).
+        Like `add_labels`, a sanctioned exception to the core §11.5 no-writes
+        boundary; label node ids are resolved by name (and cached).
+        """
+        label_ids = [await self._resolve_label_id(name) for name in label_names]
+        await self._request(
+            REMOVE_LABELS_MUTATION, {"labelableId": issue_id, "labelIds": label_ids}
+        )
+
     async def _resolve_label_id(self, name: str) -> str:
         if name in self._label_id_cache:
             return self._label_id_cache[name]
@@ -293,22 +327,51 @@ class GitHubTracker:
             after = end_cursor
         return results
 
+    # --- shared transport (owned extension: graph-review adapter) ------------
+
+    async def graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        """Run one GraphQL request through the vetted transport, returning `data`.
+
+        Public passthrough over `_request` so out-of-band tools (the read-only
+        graph-review analyzer, issue #37) can reuse this adapter's auth, timeout,
+        and error mapping without re-implementing transport. It performs no
+        writes itself — the caller owns query construction. The core §11.5
+        no-tracker-writes boundary is about the *scheduler*; a separate,
+        manually-invoked analyzer reusing the transport does not cross it.
+        """
+        return await self._request(query, variables)
+
     # --- transport --------------------------------------------------------------
+
+    async def _post(self, query: str, variables: dict[str, Any]) -> httpx.Response:
+        """One authenticated GraphQL POST. Raises TrackerError on transport
+        failure; returns the raw response (status handled by the caller so a
+        401 can drive a token re-mint)."""
+        try:
+            token = await self._creds.token()
+            return await self._client.post(
+                self._cfg.endpoint,
+                json={"query": query, "variables": variables},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        except httpx.HTTPError as exc:
+            raise TrackerError("github_api_request", f"transport error: {exc.__class__.__name__}") from exc
 
     async def _request(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         """POST one GraphQL request; return the `data` object or raise TrackerError.
 
+        The token is fetched per request from the provider (issue #10: App
+        installation tokens expire hourly, so a token resolved once at startup
+        would 401 mid-run). On a 401, invalidate the cached token and retry
+        exactly once — the fresh mint recovers an expiry-boundary race; for a
+        static token the invalidate is a no-op and the retry just confirms.
+
         Never logs or includes the token in error messages (core §11.4).
         """
-        headers = {"Authorization": f"Bearer {self._cfg.api_key}"}
-        try:
-            response = await self._client.post(
-                self._cfg.endpoint,
-                json={"query": query, "variables": variables},
-                headers=headers,
-            )
-        except httpx.HTTPError as exc:
-            raise TrackerError("github_api_request", f"transport error: {exc.__class__.__name__}") from exc
+        response = await self._post(query, variables)
+        if response.status_code == 401:
+            self._creds.invalidate()
+            response = await self._post(query, variables)
 
         if response.status_code != 200:
             raise TrackerError("github_api_status", f"unexpected status {response.status_code}")

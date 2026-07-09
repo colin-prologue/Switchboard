@@ -14,10 +14,10 @@
 #   - `requires_marker`  — per-state provenance markers the dispatch guard demands
 #                          before it will claim an issue in that state. This is the
 #                          ONLY section the orchestrator reads (it can observe the
-#                          current state + labels — no `from` needed). See AgDR-009.
+#                          current state + labels — no `from` needed). See AgDR-011.
 #
 # Ratified 2026-07-05, amended 2026-07-07. See methodology/METHODOLOGY.md for the
-# gate semantics and self/.decisions/AgDR-009-* for the dispatch-guard exception.
+# gate semantics and self/.decisions/AgDR-011-* for the dispatch-guard exception.
 #
 # Actor note: every actor is `colin-prologue` today; actor-conditional
 # enforcement needs #10 (provenance). v1 records the actor for documentation and
@@ -150,7 +150,7 @@ edges:
 # --- requires_marker: the ONLY section the orchestrator dispatch guard reads ---
 # Per-state provenance markers that must be present on an issue before the guard
 # will claim it in that state. Keyed by current state (normalized, spaces not
-# dashes — matches tracker.py state derivation). See AgDR-009 for why this narrow
+# dashes — matches tracker.py state derivation). See AgDR-011 for why this narrow
 # config-driven check is a bounded exception to AgDR-006.
 requires_marker:
   todo:

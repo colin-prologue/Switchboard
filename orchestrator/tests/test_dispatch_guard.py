@@ -48,6 +48,7 @@ class FakeTracker:
         self.states: dict[str, Issue] = {}
         self.comments: list[tuple[str, str]] = []
         self.labels_added: list[tuple[str, tuple[str, ...]]] = []
+        self.labels_removed: list[tuple[str, tuple[str, ...]]] = []
 
     async def fetch_candidate_issues(self):
         return list(self.candidates)
@@ -61,8 +62,34 @@ class FakeTracker:
     async def add_issue_comment(self, issue_id, body):
         self.comments.append((issue_id, body))
 
+    def _issues_with_id(self, issue_id):
+        seen = []
+        for issue in [*self.candidates, *self.states.values()]:
+            if issue.id == issue_id and not any(issue is s for s in seen):
+                seen.append(issue)
+        return seen
+
+    def _after_label_write(self, issue):
+        # Fake fidelity (issue #29 AC): state is DERIVED from labels via the
+        # same normalization the real tracker uses, never hard-coded.
+        issue.state = normalize_status_state(issue.labels, closed=False)
+
     async def add_labels(self, issue_id, label_names):
         self.labels_added.append((issue_id, tuple(label_names)))
+        for issue in self._issues_with_id(issue_id):
+            for name in label_names:
+                if name not in issue.labels:
+                    issue.labels.append(name)
+            self._after_label_write(issue)
+
+    async def remove_labels(self, issue_id, label_names):
+        # issue #14 (AgDR-010): the claim swap calls this on every first todo
+        # dispatch; mirror of add_labels, recomputing derived state.
+        self.labels_removed.append((issue_id, tuple(label_names)))
+        drop = set(label_names)
+        for issue in self._issues_with_id(issue_id):
+            issue.labels = [lbl for lbl in issue.labels if lbl not in drop]
+            self._after_label_write(issue)
 
 
 class FakeRunner:
@@ -71,7 +98,8 @@ class FakeRunner:
         self.release = asyncio.Event()
         self.turns: list[tuple[str, str | None, str]] = []
 
-    async def run_turn(self, workspace, prompt, resume_session_id, on_event, issue_id):
+    async def run_turn(self, workspace, prompt, resume_session_id, on_event,
+                       issue_id, agent_token=None):
         self.turns.append((issue_id, resume_session_id, prompt))
         if self.hold:
             await self.release.wait()

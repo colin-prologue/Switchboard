@@ -59,10 +59,19 @@ agent:
 # deferred (candidate ticket).
 claude:
   command: "claude -p --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
-  max_turns: 20
+  # max_turns 20 -> 100 (2026-07-06): implementation-scale sessions burned 20
+  # CLI-internal turns in ~7-9 min and exited error_max_turns; the failure path
+  # spawns a fresh session with NO --resume, so tasks needing >20 turns were
+  # structurally uncompletable (#14 parked twice on this wall). Budget still
+  # bounds each invocation. Structural fix (error_max_turns => resume) is
+  # ticketed separately.
+  max_turns: 100
   max_budget_usd: 5
   turn_timeout_ms: 3600000
-  read_timeout_ms: 5000
+  # read_timeout 5000 -> 30000 (2026-07-06): 5s to first protocol line kills
+  # real `claude` cold starts (two evidence-free instant failures at 19:17Z
+  # burned #14's session budget in ~60s).
+  read_timeout_ms: 30000
   stall_timeout_ms: 300000
 ---
 
@@ -96,22 +105,44 @@ author's text stays the author's.
    quantifiers ("all/every/comprehensive") unless the set is enumerated.
 3. **Testing asks** — does new behaviour name its test and the suite command?
    External behaviour must be verified by evidence, not author-written fakes alone.
-4. **Sizing** — does it fit one focused PR within budget (≤20 turns / $5 per
+4. **Sizing** — does it fit one focused PR within budget (≤100 turns / $5 per
    session, ≤3 sessions)? If not, recommend a split with drafted child-issue bodies.
 5. **Boundaries** — are non-goals present and concrete?
 
+**Drafting-quality reject criteria (issue #14's recurring failure classes —
+name the class in the verdict so drafting and triage share one vocabulary; see
+`methodology/METHODOLOGY.md`, "Drafting-quality checklist"):**
+
+6. **Claim-vs-code drift** — does every cited mechanism carry a `file:line`
+   verified at a named HEAD sha (or stand explicitly labeled a guess)? Reject
+   citations of mechanisms that do not exist at HEAD.
+7. **Consumers of mutated state** — if the ticket mutates shared state (a
+   `status:*` label, issue state, a workspace, an env var), does it enumerate
+   every reader and how each consumes it (eligibility/dispatch path, between-turn
+   role-pin check, `updatedAt` consumers)? Reject an unenumerated state write.
+8. **Fake fidelity** — for any state the real system derives, does the ticket
+   require the fake to derive it the same way (e.g. echo the server `updatedAt`,
+   recompute issue `state` from `status:*` labels) rather than hard-code it?
+9. **AC executability** — does every acceptance criterion name a command runnable
+   under the worker allowlist (`workflow/WORKFLOW.base.md:61`) or explicitly
+   assign the step to the human merge gate? Reject an AC that strands the session.
+
 **Verdict routing (pick exactly one):**
 
-- **PASS** → relabel to `status:todo` (now dispatchable). Remove `status:triage`.
+- **PASS** → relabel to `status:todo` (now dispatchable) and stamp the
+  `gate:triage-passed` provenance marker in the SAME command — it is the durable
+  proof triage promoted this issue, and the orchestrator dispatch guard refuses
+  to claim a `status:todo` that lacks it (issue #29). Remove `status:triage`.
   ```
-  gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:triage --add-label status:todo
+  gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:triage --add-label status:todo,gate:triage-passed
   ```
 - **NEEDS WORK** → post a feedback comment whose first line is the exact heading
   `## Triage verdict` (grep-able), listing each failed rubric check and the fix,
-  then relabel to `status:drafting`.
+  then relabel to `status:drafting`. Clear `gate:triage-passed` in the same
+  command (every route back to drafting drops the marker — idempotent if absent).
   ```
   gh issue comment {{ issue.identifier }} --repo colin-prologue/Switchboard --body "## Triage verdict"...
-  gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:triage --add-label status:drafting
+  gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:triage,gate:triage-passed --add-label status:drafting
   ```
 - **SPLIT** → file child issues at `status:drafting` with drafted bodies, chain
   each to this parent with native blocked-by, and park this parent at

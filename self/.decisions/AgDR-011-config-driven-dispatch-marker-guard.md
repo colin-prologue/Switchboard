@@ -1,4 +1,4 @@
-# AgDR-009: Config-driven dispatch-marker guard — a bounded AgDR-006 exception
+# AgDR-011: Config-driven dispatch-marker guard — a bounded AgDR-006 exception
 
 - **Status:** proposed by the issue #29 implementing session (2026-07-07);
   awaiting ratification at the PR merge gate.

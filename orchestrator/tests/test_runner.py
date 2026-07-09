@@ -312,3 +312,40 @@ async def test_workspace_must_exist(tmp_path: Path):
 
     with pytest.raises(ValueError):
         await runner.run_turn(missing, "prompt", None, recorder, "issue-1")
+
+
+# --- agent token injection (issue #10) ----------------------------------------
+
+
+async def test_agent_token_injected_as_github_and_gh_token(
+        workspace: Path, monkeypatch, tmp_path: Path):
+    env_file = tmp_path / "env.json"
+    monkeypatch.setenv("FAKE_SCENARIO", "success")
+    monkeypatch.setenv("FAKE_ENV_FILE", str(env_file))
+    monkeypatch.setenv("GITHUB_TOKEN", "operator-token")
+    runner = ClaudeRunner(make_cfg())
+
+    result = await runner.run_turn(workspace, "go", None, EventRecorder(),
+                                   "issue-1", agent_token="ghs_fresh_mint")
+
+    assert result.status == "succeeded"
+    seen = json.loads(env_file.read_text())
+    # Both spellings: `gh` reads GH_TOKEN first, git credential helpers and
+    # most tooling read GITHUB_TOKEN.
+    assert seen == {"GITHUB_TOKEN": "ghs_fresh_mint", "GH_TOKEN": "ghs_fresh_mint"}
+
+
+async def test_no_agent_token_inherits_orchestrator_env(
+        workspace: Path, monkeypatch, tmp_path: Path):
+    env_file = tmp_path / "env.json"
+    monkeypatch.setenv("FAKE_SCENARIO", "success")
+    monkeypatch.setenv("FAKE_ENV_FILE", str(env_file))
+    monkeypatch.setenv("GITHUB_TOKEN", "operator-token")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    runner = ClaudeRunner(make_cfg())
+
+    result = await runner.run_turn(workspace, "go", None, EventRecorder(), "issue-1")
+
+    assert result.status == "succeeded"
+    seen = json.loads(env_file.read_text())
+    assert seen == {"GITHUB_TOKEN": "operator-token", "GH_TOKEN": None}

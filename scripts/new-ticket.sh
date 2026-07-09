@@ -54,9 +54,17 @@ if [ "$SCAFFOLD" -eq 1 ]; then
 
 - <a hard scope boundary this ticket must not cross>
 
+## Consumers of mutated state
+<!-- delete this section only if the ticket writes NO shared state: labels, issue state, workspaces, env -->
+
+<enumerate every reader of state this ticket mutates, and how each consumes it.
+e.g. a ticket that writes a `status:*` label must list the eligibility/dispatch
+path, the between-turn role-pin check, and any `updatedAt` consumers.>
+
 ## Assumptions
 
 - <something taken as given; if false, stop and flag — the ticket is void>
+- Every cited mechanism carries a `file:line` verified at a named HEAD sha; uncitable claims are labeled guesses.
 SKELETON
   exit 0
 fi
@@ -124,6 +132,10 @@ fi
 command -v gh >/dev/null || { echo "ERROR gh CLI not found" >&2; exit 1; }
 
 # Milestone: attach by number; create via gh api if it does not exist.
+# Initialized empty so the no-milestone path has an array to expand. NOTE: the
+# empty init alone is NOT enough — bash < 4.4 (incl. macOS system bash 3.2)
+# treats "${arr[@]}" on an empty array as unbound under `set -u`. The call site
+# below guards with "${MILESTONE_ARGS[@]+...}" to stay safe on old bash.
 MILESTONE_ARGS=()
 if [ -n "$MILESTONE" ]; then
   # Title goes in via env, not string interpolation — a quote in the
@@ -147,7 +159,7 @@ issue_url="$(gh issue create \
   --title "$TITLE" \
   --body-file "$tmp_body" \
   --label "$LABEL" \
-  "${MILESTONE_ARGS[@]}")"
+  "${MILESTONE_ARGS[@]+"${MILESTONE_ARGS[@]}"}")"
 echo "created: $issue_url"
 
 new_number="${issue_url##*/}"

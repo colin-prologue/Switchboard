@@ -7,7 +7,7 @@ single-path-constant AC guards against). The orchestrator consumes only the
 current state + labels it observes); the `edges` section is for #52's Action,
 which sees both transition endpoints in its event payload.
 
-See self/.decisions/AgDR-009-* for why the marker check is a bounded, config-
+See self/.decisions/AgDR-011-* for why the marker check is a bounded, config-
 driven exception to AgDR-006 ("gates cost zero orchestrator code").
 """
 
