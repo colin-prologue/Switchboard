@@ -186,6 +186,23 @@ Structural proposals (merge/split/resequence) pass a skeptic refute sub-check
 
 ---
 
+## Verify the orchestrator
+
+After installing (or before touching orchestrator code), run the full test
+suite from the repository root:
+
+```bash
+uv run --project orchestrator python -m pytest orchestrator/tests -q
+```
+
+Pass the explicit `orchestrator/tests` path rather than a bare `pytest`. The
+path makes pytest discover `orchestrator/pyproject.toml` — including its
+`asyncio_mode = "auto"` configuration — instead of the repository root, where
+the async tests would fail to collect. This is the same command `SETUP.md` uses
+to verify a fresh install.
+
+---
+
 ## Layout
 
 ```
