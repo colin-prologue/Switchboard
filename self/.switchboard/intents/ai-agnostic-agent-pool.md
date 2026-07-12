@@ -20,8 +20,8 @@
 - **Last verified source commit:** Stage 2 commit `615036f`, based on merged
   `main` at `cc62087`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 276 passed in 9.28s on 2026-07-12 after independent
-  Stage 2 review fixes.
+  orchestrator/tests -q` - 276 passed in 8.72s on 2026-07-12 after independent
+  Stage 2 review and CI-fixture fixes.
 - **Last end-to-end evidence:** issue #62 -> PR #63 ->
   `status:human-review`; CI `test` passed. The worker used Claude session
   `7c58c430-8e39-4684-93f6-1436cf65408e` and needed no workspace repair.
@@ -198,8 +198,11 @@ startup, last-known-good hot reload, and full suite.
   overrides. Final re-review reported no remaining actionable findings; the PR
   human gate remains.
 - Stage 2 handoff: issue [#67](https://github.com/colin-prologue/Switchboard/issues/67)
-  is `status:human-review`; [PR #68](https://github.com/colin-prologue/Switchboard/pull/68)
-  is open for human ratification.
+  returned to `status:in-progress` after [PR #68](https://github.com/colin-prologue/Switchboard/pull/68)
+  exposed a CI-only Stage 1 success-contract flake: its fake subprocess had a
+  1-second cold-start deadline. The fixture now uses production-like startup
+  bounds; dedicated timeout tests remain unchanged. Re-verify CI before restoring
+  the human-review handoff.
 
 ### Stage 3 - Injectable scheduler
 
