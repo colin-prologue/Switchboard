@@ -1,6 +1,6 @@
 """graph-review analyzer (Phase 1, MVP).
 
-implements: self/.switchboard/intents/graph-review.md + AgDR-009.
+implements: self/.switchboard/intents/graph-review.md + AgDR-012.
 
 A manually-invoked, read-only pass that reads the open ticket board — bodies,
 comments, native `blockedBy` edges, milestones — plus recently merged PRs, and

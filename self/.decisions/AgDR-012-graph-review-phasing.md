@@ -1,4 +1,7 @@
-# AgDR-009: graph-review ships proposals-only (Phase 1) before any mutation
+# AgDR-012: graph-review ships proposals-only (Phase 1) before any mutation
+
+> Renumbered from AgDR-009 (2026-07-12): a parallel worker session took the
+> same number for the App-identity decision, which merged first and keeps it.
 
 - **Status:** accepted (2026-07-05). Authored in-session with issue #37 (the
   design branch `docs/v0.2-graph-review-design` was not reachable from the

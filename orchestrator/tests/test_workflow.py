@@ -6,6 +6,7 @@ the GitHub/Claude bindings per SPEC.md §1-2.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import httpx
@@ -491,6 +492,38 @@ def test_base_and_composed_workflow_are_in_sync():
         "workflow/WORKFLOW.base.md and projects/switchboard-self/WORKFLOW.md have "
         "drifted. Edit BOTH (register-project.sh is outside the worker allowlist)."
     )
+
+
+# --- decision-record numbering (self/.decisions) -------------------------------
+#
+# Parallel worker sessions each pick "next free AgDR number on their own branch",
+# so two branches can mint the same number and both merge green (each passes in
+# isolation). This test can't stop the collision pre-merge, but it turns the
+# merged result into a red suite immediately instead of silent duplicate IDs —
+# same posture as the base<->composed conformance test above.
+
+
+def test_decision_record_numbers_are_unique_and_match_headings():
+    decisions = Path(__file__).resolve().parents[2] / "self" / ".decisions"
+    pattern = re.compile(r"^(ADR|AgDR)-(\d+)-.+\.md$")
+
+    seen: dict[tuple[str, int], str] = {}
+    for path in sorted(decisions.glob("*.md")):
+        m = pattern.match(path.name)
+        assert m, f"{path.name}: does not match (ADR|AgDR)-NNN-<slug>.md"
+        key = (m.group(1), int(m.group(2)))
+        assert key not in seen, (
+            f"duplicate {m.group(1)}-{m.group(2)}: {seen[key]} and {path.name}. "
+            "A parallel branch minted the same number — renumber the later-merged "
+            "file to the next free number and update its cross-references."
+        )
+        seen[key] = path.name
+
+        heading = path.read_text(encoding="utf-8").splitlines()[0]
+        assert heading.startswith(f"# {m.group(1)}-{m.group(2)}"), (
+            f"{path.name}: H1 heading {heading!r} does not carry the filename's "
+            f"number {m.group(1)}-{m.group(2)} (renumbered file without its heading?)"
+        )
 
 
 # --- build_credentials() (issue #10: GitHub App identity) ---------------------
