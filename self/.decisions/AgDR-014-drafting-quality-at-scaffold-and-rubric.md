@@ -1,4 +1,7 @@
-# AgDR-010: Encode #14's failure classes at scaffold + rubric, enforce base↔composed parity mechanically
+# AgDR-014: Encode #14's failure classes at scaffold + rubric, enforce base↔composed parity mechanically
+
+> Renumbered from AgDR-010 (2026-07-12): a parallel worker session took the
+> same number for the claim-visibility decision, which merged first and keeps it.
 
 - **Status:** proposed by the issue-#44 implementation session (2026-07-06);
   awaiting ratification at the PR merge gate.

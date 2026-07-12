@@ -4,7 +4,7 @@
 - **Status:** active (Phase 1 landing with issue #37).
 - **Authored in-session note:** the binding design was expected to arrive on
   branch `docs/v0.2-graph-review-design`. That branch was not reachable from the
-  worker (only `main` exists on the remote), so this file and `AgDR-009` were
+  worker (only `main` exists on the remote), so this file and `AgDR-012` were
   authored **in-session** from the issue #37 contract, per the ticket's stated
   fallback ("the intent must be reachable — push the design branch **or
   implement in-session**"). Ratify or overturn at the merge gate.
@@ -19,7 +19,7 @@ eventually notices these by hand. **graph-review** is the pass that surfaces
 them mechanically as evidence-cited proposals a human can accept or dismiss.
 
 The system is delivered in **three phases**, gated on measured proposal quality
-(see `AgDR-009`):
+(see `AgDR-012`):
 
 1. **Phase 1 (MVP, this intent's initial scope):** a manually-invoked analyzer
    that reads the board and writes evidence-cited, keyed proposals to a single

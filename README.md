@@ -182,7 +182,7 @@ uv run --project orchestrator python -m orchestrator.graph_review \
 
 Structural proposals (merge/split/resequence) pass a skeptic refute sub-check
 (`--refute-command`, default `claude -p`) before being written. Rationale:
-`self/.decisions/AgDR-009-graph-review-phasing.md`.
+`self/.decisions/AgDR-012-graph-review-phasing.md`.
 
 ---
 

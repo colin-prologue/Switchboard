@@ -1,4 +1,7 @@
-# AgDR-010: Worker turn budget 20→100; protocol read timeout 5s→30s
+# AgDR-013: Worker turn budget 20→100; protocol read timeout 5s→30s
+
+> Renumbered from AgDR-010 (2026-07-12): a parallel worker session took the
+> same number for the claim-visibility decision, which merged first and keeps it.
 
 **Status:** accepted (2026-07-06)
 **Surfaces:** `workflow/WORKFLOW.base.md` (claude block), composed `projects/switchboard-self/WORKFLOW.md`
