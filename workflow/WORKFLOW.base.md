@@ -131,8 +131,12 @@ name the class in the verdict so drafting and triage share one vocabulary; see
    dependency is *natively chained* so the scheduler will actually gate on it. The
    scheduler reads blockers from the **`blockedBy`** issue-dependencies connection
    (`orchestrator/src/orchestrator/tracker.py:13-14`), NOT GitHub's task-list
-   hierarchy. To check for a native edge, query the `blockedBy` connection —
-   `gh api repos/{{REPO}}/issues/N/dependencies/blocked_by` — and **NOT**
+   hierarchy. To check for a native edge, query the blockers of **the ticket
+   under triage** (direction matters: `blocked_by` edges hang off the DEPENDENT
+   issue, mirroring the write path in `scripts/new-ticket.sh:174-179`) —
+   `gh api repos/{{REPO}}/issues/{{ issue.identifier }}/dependencies/blocked_by`
+   — and verify `#N` appears in the returned blockers. Querying `/issues/N/...`
+   lists what blocks the *blocker*, the wrong direction. Do **NOT** use
    `trackedIssues`/`trackedInIssues` (the task-list hierarchy, a different feature
    the scheduler ignores). A dependency living only in prose (no `blockedBy` edge)
    won't gate dispatch — flag it so the edge gets added rather than concluding it
