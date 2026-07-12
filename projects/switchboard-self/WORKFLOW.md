@@ -126,6 +126,17 @@ name the class in the verdict so drafting and triage share one vocabulary; see
 9. **AC executability** — does every acceptance criterion name a command runnable
    under the worker allowlist (`workflow/WORKFLOW.base.md:61`) or explicitly
    assign the step to the human merge gate? Reject an AC that strands the session.
+10. **Native dependency edges** — if the ticket states a hard dependency on
+   another issue ("blocked by #N", "must land after #N"), verify whether that
+   dependency is *natively chained* so the scheduler will actually gate on it. The
+   scheduler reads blockers from the **`blockedBy`** issue-dependencies connection
+   (`orchestrator/src/orchestrator/tracker.py:13-14`), NOT GitHub's task-list
+   hierarchy. To check for a native edge, query the `blockedBy` connection —
+   `gh api repos/colin-prologue/Switchboard/issues/N/dependencies/blocked_by` — and **NOT**
+   `trackedIssues`/`trackedInIssues` (the task-list hierarchy, a different feature
+   the scheduler ignores). A dependency living only in prose (no `blockedBy` edge)
+   won't gate dispatch — flag it so the edge gets added rather than concluding it
+   "lives only in prose."
 
 **Verdict routing (pick exactly one):**
 
