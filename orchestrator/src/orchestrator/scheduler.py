@@ -26,6 +26,7 @@ from pathlib import Path
 
 import httpx
 
+from .agent_runner import AgentRunner
 from .log import log
 from .prompt import render_prompt
 from .runner import ClaudeRunner
@@ -174,7 +175,7 @@ class Orchestrator:
 
     # -- component wiring (config-derived views over shared resources) ----------
 
-    def _components(self) -> tuple[GitHubTracker, WorkspaceManager, ClaudeRunner]:
+    def _components(self) -> tuple[GitHubTracker, WorkspaceManager, AgentRunner]:
         cfg = self._cfg
         assert cfg is not None
         tracker = GitHubTracker(cfg.tracker(), client=self._http, creds=self._creds)

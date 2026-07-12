@@ -1,32 +1,35 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 0 complete, Stage 1 ready after this intent and
-  AgDR-016 pass human review.
+- **Status:** active; Stage 1 implementation complete and awaiting human review
+  on PR #66.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 1 - neutral runner contract, awaiting approval of the
-  migration intent and authentication decision.
+- **Current stage:** Stage 1 - neutral runner contract at the human-review gate
+  on issue #65 / PR #66.
 - **Production mode:** Claude-only. No Codex runner is dispatchable.
 - **What is enabled:** the existing `claude:` workflow binding and
   `ClaudeRunner` path only.
 - **What remains deliberately disabled:** provider-neutral configuration,
   Codex execution, pool selection, provider fallback, and mixed dispatch.
-- **Last verified source commit:** `bcab2c9` plus Stage 0 worker commit
-  `5741a82` on PR #63 (not merged at time of recording).
-- **Last passing command:** `uv run --project orchestrator pytest
-  orchestrator/tests -q` - 256 passed in 9.30s on 2026-07-12.
+- **Last verified source commit:** Stage 1 commit `41e396e`, based on merged
+  `main` at `aab0719`.
+- **Last passing command:** `uv run --project orchestrator python -m pytest
+  orchestrator/tests -q` - 258 passed in 9.03s on 2026-07-12 after independent
+  review fixes.
 - **Last end-to-end evidence:** issue #62 -> PR #63 ->
   `status:human-review`; CI `test` passed. The worker used Claude session
   `7c58c430-8e39-4684-93f6-1436cf65408e` and needed no workspace repair.
-- **Next single task:** review and merge this intent/AgDR branch, then file the
-  Stage 1 ticket from the draft below on a fresh branch from updated `main`.
-- **Do not advance until:** the migration records and PR #63 are ratified at
-  their human review gates. Keep the orchestrator stopped meanwhile.
+- **Next single task:** review and merge PR #66, delete its branch, then create
+  a fresh Stage 2 branch from updated `main` and file the dual-read provider
+  configuration ticket.
+- **Do not advance until:** PR #66 is merged. Its CI `test` check passes; human
+  ratification remains. Keep the orchestrator stopped; provider configuration
+  remains a Stage 2 concern.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -128,6 +131,29 @@ adapter's commands and behavior.
 
 **Test:** Claude passes the shared runner contract; generated commands remain
 unchanged; scheduler construction remains Claude-only; full suite passes.
+
+**Working evidence (2026-07-12, base `aab0719`, issue #65):**
+
+- The new contract test first failed at collection because
+  `orchestrator.agent_runner` did not exist.
+- After the minimal protocol extraction,
+  `test_agent_runner_contract.py` passed (2 tests: shared behavior and explicit
+  Claude-only scheduler construction).
+- Contract + existing Claude runner + scheduler integration suites passed
+  together; the final focused gate also includes dispatch-guard fakes (55 tests
+  in 4.39s).
+- Full `orchestrator/tests` passed after review fixes (258 tests in 9.03s).
+- Independent Terra 5.6 High review identified overly strict neutral event
+  ordering, a misleading runtime-checkable Protocol assertion, and fake runners
+  missing provider identity. These were resolved by allowing optional expected
+  session IDs, requiring only the neutral terminal event ordering, relying on
+  static Protocol typing plus explicit behavioral assertions, and adding
+  `provider_id = "fake"` to scheduler substitutes. The exact six-parameter call
+  shape remains deliberate: adapter-specific options belong in constructor
+  configuration. Stage 1 is not complete until the PR passes its human gate.
+- Stage 1 handoff: issue [#65](https://github.com/colin-prologue/Switchboard/issues/65)
+  is `status:human-review`; [PR #66](https://github.com/colin-prologue/Switchboard/pull/66)
+  is open and its CI `test` check passes.
 
 **Ticket draft:**
 

@@ -108,6 +108,8 @@ class ClaudeRunner:
     prompt rendering are the caller's responsibility (core §10.7 steps 1-2).
     """
 
+    provider_id = "claude"
+
     def __init__(self, cfg: ClaudeConfig) -> None:
         self.cfg = cfg
 

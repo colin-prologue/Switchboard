@@ -161,6 +161,8 @@ class FakeRunner:
     assert the scheduler resumes with the LATEST session id, not a stale one.
     """
 
+    provider_id = "fake"
+
     def __init__(self, hold: bool = False):
         self.hold = hold
         self.release = asyncio.Event()
