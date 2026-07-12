@@ -1,0 +1,157 @@
+# Switchboard status-transition table — single source of truth (issue #29, part A).
+#
+# GitHub has no native workflow-rule engine, so the lifecycle rules that the
+# status:* labels imply are declared here, in ONE committed file, and consumed
+# by whichever component can observe what a given section describes:
+#
+#   - `edges`            — full (from -> to) rule set, incl. actor and phase
+#                          annotations. Consumed by #52's `labeled`-event Action,
+#                          which sees BOTH endpoints in the event payload. The
+#                          orchestrator CANNOT read this section usefully: it
+#                          polls *current* state and has no `from` (cross-restart
+#                          edge reconstruction is the durability trap AgDR-008
+#                          escaped), so it never reads `edges`.
+#   - `requires_marker`  — per-state provenance markers the dispatch guard demands
+#                          before it will claim an issue in that state. This is the
+#                          ONLY section the orchestrator reads (it can observe the
+#                          current state + labels — no `from` needed). See AgDR-011.
+#
+# Ratified 2026-07-05, amended 2026-07-07. See methodology/METHODOLOGY.md for the
+# gate semantics and self/.decisions/AgDR-011-* for the dispatch-guard exception.
+#
+# Actor note: every actor is `colin-prologue` today; actor-conditional
+# enforcement needs #10 (provenance). v1 records the actor for documentation and
+# for #52, but nothing enforces it yet.
+
+edges:
+  # --- Gate A: intent/spec authoring -----------------------------------------
+  - from: drafting
+    to: triage
+    actor: human
+
+  # --- Triage: adversarial ticket verification (active state, AgDR-006) ------
+  # PASS stamps the durable provenance marker in the SAME gh edit as the state
+  # relabel (workflow/WORKFLOW.base.md). The marker is what the dispatch guard
+  # keys on; see requires_marker below.
+  - from: triage
+    to: todo
+    actor: triage-verifier
+    verdict: PASS
+    add_marker: gate:triage-passed
+  - from: triage
+    to: drafting
+    actor: triage-verifier
+    verdict: needs-work
+    remove_marker: gate:triage-passed   # cleared on every route back to drafting
+  - from: triage
+    to: drafting
+    actor: triage-verifier
+    verdict: SPLIT
+    note: "children filed @drafting (native blocked-by), parent parked @drafting"
+
+  # --- todo: dispatchable ----------------------------------------------------
+  - from: todo
+    to: in-progress
+    actor: orchestrator
+    note: "orchestrator claim (AgDR-010, in-progress-claim-visibility)"
+  - from: todo
+    to: plan-review
+    actor: human
+    note: "Symphony Gate B (architecture-touching work)"
+  - from: todo
+    to: human-review
+    actor: orchestrator
+    degraded: true
+    note: >-
+      degraded path only: the claim-label write (todo -> in-progress) failed,
+      which is non-fatal by design, so a completing worker hands off straight to
+      human-review without the in-progress hop. Not a normal edge — kept so #52
+      does not flag the handoff as illegal.
+
+  # --- Gate B: plan/architecture review --------------------------------------
+  - from: plan-review
+    to: in-progress
+    actor: human
+    verdict: approved
+  - from: plan-review
+    to: drafting
+    actor: human
+    verdict: rejected
+
+  # --- in-progress: an agent is working it -----------------------------------
+  - from: in-progress
+    to: human-review
+    actor: worker
+    note: "worker handoff at completion (workflow/WORKFLOW.base.md)"
+  - from: in-progress
+    to: todo
+    actor: orchestrator
+    note: "claim release / startup stranded-claim sweep"
+  - from: in-progress
+    to: parked
+    actor: orchestrator
+    trigger: cap-hit
+    note: "session cap reached -> durable park (phase-1 active routing, AgDR-002/008)"
+
+  # --- parked: cap-halt awaiting human ---------------------------------------
+  - from: parked
+    to: drafting
+    actor: human
+    verdict: revise
+    remove_marker: gate:triage-passed   # re-scope re-enters triage, so clear it
+  - from: parked
+    to: todo
+    actor: human
+    note: "human accepts with a verdict in hand (no re-triage; marker survives)"
+
+  # --- Gate C: final review --------------------------------------------------
+  - from: human-review
+    to: closed
+    actor: human
+    verdict: merged
+  - from: human-review
+    to: todo
+    actor: human
+    verdict: changes-requested
+    note: "re-enters dispatch WITHOUT re-triage; marker deliberately survives"
+
+  # === Phase 2 — INACTIVE until #20b (fail-review hub) lands ==================
+  # Annotated, NOT enforced. Today a cap-hit parks (the active in-progress->parked
+  # edge above); no component performs fail-review routing, so the table must not
+  # encode it as live (verdict 2026-07-06 finding 3). #16's taxonomy is the
+  # authority for the retry/re-scope/hold classes below.
+  - from: in-progress
+    to: fail-review
+    actor: orchestrator
+    trigger: cap-hit
+    active: false
+    requires: "#20b"
+    note: "phase 2: cap-hit routes to fail-review instead of parked"
+  - from: fail-review
+    to: todo
+    actor: human
+    verdict: retry
+    active: false
+    requires: "#20b"
+    note: "retry + #16 brief"
+  - from: fail-review
+    to: drafting
+    actor: human
+    verdict: re-scope
+    active: false
+    requires: "#20b"
+  - from: fail-review
+    to: parked
+    actor: human
+    verdict: hold
+    active: false
+    requires: "#20b"
+
+# --- requires_marker: the ONLY section the orchestrator dispatch guard reads ---
+# Per-state provenance markers that must be present on an issue before the guard
+# will claim it in that state. Keyed by current state (normalized, spaces not
+# dashes — matches tracker.py state derivation). See AgDR-011 for why this narrow
+# config-driven check is a bounded exception to AgDR-006.
+requires_marker:
+  todo:
+    - gate:triage-passed   # a todo is only dispatchable if triage promoted it

@@ -129,3 +129,38 @@ def test_absent_triage_label_selects_implementer_branch():
     out = render_prompt(_real_base_body(), make_issue(labels=["bug", "status:todo"]), attempt=None)
     assert "## How to work it" in out
     assert "Triage mode" not in out
+
+
+# --- triage PASS/NEEDS-WORK stamp the gate:triage-passed marker (issue #29) ----
+
+def _pass_command_line(rendered: str) -> str:
+    """The single `gh issue edit ... --add-label status:todo...` PASS line."""
+    for line in rendered.splitlines():
+        if "gh issue edit" in line and "status:todo" in line:
+            return line
+    raise AssertionError("PASS relabel command not found in rendered verifier prompt")
+
+
+def _needs_work_edit_line(rendered: str) -> str:
+    """The `gh issue edit ... --add-label status:drafting` NEEDS-WORK line."""
+    for line in rendered.splitlines():
+        if "gh issue edit" in line and "status:drafting" in line:
+            return line
+    raise AssertionError("NEEDS-WORK relabel command not found in rendered verifier prompt")
+
+
+def test_triage_pass_adds_marker_in_same_command_as_todo():
+    out = render_prompt(_real_base_body(), make_issue(labels=["status:triage"]), attempt=None)
+    line = _pass_command_line(out)
+    # The marker must ride the SAME gh edit that adds status:todo (one atomic
+    # relabel), not a separate command.
+    assert "--add-label status:todo,gate:triage-passed" in line
+    assert "--remove-label status:triage" in line
+
+
+def test_triage_needs_work_removes_marker_in_same_command():
+    out = render_prompt(_real_base_body(), make_issue(labels=["status:triage"]), attempt=None)
+    line = _needs_work_edit_line(out)
+    # Routing back to drafting drops the provenance marker in the same command.
+    assert "--remove-label status:triage,gate:triage-passed" in line
+    assert "--add-label status:drafting" in line

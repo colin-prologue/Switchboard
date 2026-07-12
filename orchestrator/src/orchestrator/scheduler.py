@@ -30,6 +30,7 @@ from .log import log
 from .prompt import render_prompt
 from .runner import ClaudeRunner
 from .tracker import GitHubTracker
+from .transitions import load_requires_marker
 from .types import (
     AgentEvent,
     Issue,
@@ -123,6 +124,14 @@ class Orchestrator:
         self._park_notified: set[str] = set()  # comment posted once per park episode
         self._park_label_missing: str | None = None  # §5.5-style dispatch block when
                                                      # PARK_LABEL is unprovisioned
+
+        # Config-driven dispatch guard (issue #29 / AgDR-011): per-state provenance
+        # markers an issue must carry before it can be claimed. Read from the ONE
+        # committed transitions.yml (no table literal in this file). The guard is a
+        # bounded exception to AgDR-006 — it checks a marker against observed state,
+        # it does not reconstruct transition edges.
+        self._requires_marker: dict[str, list[str]] = load_requires_marker()
+        self._marker_refused: set[str] = set()  # refusal comment posted once per issue
 
         self._stopping = False
         self._workflow_broken: str | None = None  # §5.5 dispatch block reason
@@ -391,6 +400,18 @@ class Orchestrator:
     async def _dispatch(self, issue: Issue, attempt: int | None) -> None:
         cfg = self._cfg
         assert cfg is not None
+        # Config-driven dispatch guard (issue #29 / AgDR-011): refuse to claim an
+        # issue whose current state requires a provenance marker it lacks (e.g. a
+        # `status:todo` that never passed triage, so it carries no triage marker).
+        # Refusal leaves the issue untouched — no claim, no label writes — and
+        # posts ONE guarded comment (repost-guarded like _park_notified). Placed
+        # ahead of the cap/claim logic so both the poll and retry dispatch paths
+        # funnel through it.
+        missing = self._missing_marker(issue)
+        if missing is not None:
+            await self._refuse_missing_marker(issue, missing)
+            return
+        self._marker_refused.discard(issue.id)  # eligible again -> re-arm the notice
         # The cap is always positive (workflow.py coerces invalid values back
         # to the default) — parking cannot be configured off.
         cap = cfg.agent().max_sessions_per_issue
@@ -689,6 +710,52 @@ class Orchestrator:
             self.claimed.discard(issue_id)
             log("teardown error; claim released", issue_id=issue_id,
                 issue_identifier=entry.identifier, error=repr(exc))
+
+    # -- dispatch guard (issue #29 / AgDR-011) --------------------------------------
+
+    def _missing_marker(self, issue: Issue) -> str | None:
+        """Return the first required provenance marker `issue` lacks for its
+        current state, or None if it satisfies every marker its state requires.
+
+        The requirement map comes from the committed transitions.yml
+        `requires_marker` section — the guard observes only current state +
+        labels (no `from`), so it reads that section and never `edges`."""
+        for marker in self._requires_marker.get(issue.state.lower(), ()):
+            if marker not in issue.labels:
+                return marker
+        return None
+
+    async def _refuse_missing_marker(self, issue: Issue, marker: str) -> None:
+        """Decline to dispatch and post ONE guarded refusal comment.
+
+        No claim, no label writes — the issue is left untouched for a human (or
+        triage) to remedy by applying the marker. The comment is repost-guarded
+        like `_park_notified` so poll ticks don't spam the issue; the guard set
+        is cleared in `_dispatch` once the issue becomes eligible again."""
+        tracker, _, _ = self._components()
+        if issue.id in self._marker_refused:
+            return
+        body = (
+            f"**Switchboard did not dispatch this issue** — its state "
+            f"`{issue.state}` requires the `{marker}` marker, which is absent.\n\n"
+            f"That marker is applied automatically by triage on PASS. A "
+            f"`status:todo` without it reached this state without passing "
+            f"triage/sizing. Route the issue through `status:triage` (or apply the "
+            f"marker if it was verified out-of-band) to make it dispatchable. The "
+            f"orchestrator left the issue untouched and will not comment again "
+            f"until it becomes eligible."
+        )
+        try:
+            await tracker.add_issue_comment(issue.id, body)
+            self._marker_refused.add(issue.id)
+            log("dispatch refused: required marker absent", issue_id=issue.id,
+                issue_identifier=issue.identifier, state=issue.state,
+                missing_marker=marker)
+        except TrackerError as exc:
+            # Comment write failed: leave the id out of _marker_refused so the
+            # next tick retries the notice (the issue is still untouched).
+            log("marker-refusal comment failed; will retry next tick",
+                issue_id=issue.id, issue_identifier=issue.identifier, error=str(exc))
 
     # -- claim-visibility labels (issue #14 / AgDR-010) -----------------------------
 

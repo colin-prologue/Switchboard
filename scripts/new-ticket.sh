@@ -75,6 +75,13 @@ case "$ENTRY" in
   *) echo "ERROR --entry must be one of: drafting, triage, todo (got '$ENTRY')" >&2; exit 2;;
 esac
 LABEL="status:$ENTRY"
+# --entry todo skips triage by design (trivial, bounded criteria — see README
+# "Which entry state?"): the human filing it IS the out-of-band verification,
+# so stamp the triage-PASS provenance marker the dispatch guard requires
+# (issue #29 / AgDR-011). An unstamped status:todo is refused, never dispatched.
+if [ "$ENTRY" = "todo" ]; then
+  LABEL="$LABEL,gate:triage-passed"
+fi
 
 [ -n "$TITLE" ] || { echo "ERROR --title required" >&2; exit 2; }
 

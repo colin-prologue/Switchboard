@@ -128,7 +128,9 @@ The path a ticket takes *is* the risk control — match it to the risk:
 
 - **Trivial / low-risk** (one-line fix, typo, config bump) with already-bounded,
   checkable criteria → file straight at `--entry todo`. Forcing triage onto a
-  five-minute bug is mis-set ceremony.
+  five-minute bug is mis-set ceremony. (`new-ticket.sh` stamps
+  `gate:triage-passed` on this path — the human filing it is the out-of-band
+  verification; an unstamped `status:todo` is refused by the dispatch guard.)
 - **New, author-fresh, or uncertain** — criteria smell unbounded
   ("all/every/comprehensive"), assumptions unstated, size unclear → file at
   `--entry triage` (the default). A verifier session adversarially reviews the
