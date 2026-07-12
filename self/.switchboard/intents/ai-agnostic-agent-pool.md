@@ -1,32 +1,35 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 1 implementation in progress on issue #65.
+- **Status:** active; Stage 1 implementation complete and awaiting human review
+  on PR #66.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 1 - neutral runner contract, implementation and
-  independent review on `codex/stage1-agent-runner-contract`.
+- **Current stage:** Stage 1 - neutral runner contract at the human-review gate
+  on issue #65 / PR #66.
 - **Production mode:** Claude-only. No Codex runner is dispatchable.
 - **What is enabled:** the existing `claude:` workflow binding and
   `ClaudeRunner` path only.
 - **What remains deliberately disabled:** provider-neutral configuration,
   Codex execution, pool selection, provider fallback, and mixed dispatch.
-- **Last verified source commit:** merged `main` at `aab0719`; Stage 1 working
-  tree based on that commit.
+- **Last verified source commit:** Stage 1 commit `41e396e`, based on merged
+  `main` at `aab0719`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
   orchestrator/tests -q` - 258 passed in 9.03s on 2026-07-12 after independent
   review fixes.
 - **Last end-to-end evidence:** issue #62 -> PR #63 ->
   `status:human-review`; CI `test` passed. The worker used Claude session
   `7c58c430-8e39-4684-93f6-1436cf65408e` and needed no workspace repair.
-- **Next single task:** commit, push, and open the issue #65 PR with focused,
-  full-suite, and independent-review evidence.
-- **Do not advance until:** the Stage 1 PR passes CI and human review. Keep the
-  orchestrator stopped; provider configuration remains a Stage 2 concern.
+- **Next single task:** review and merge PR #66, delete its branch, then create
+  a fresh Stage 2 branch from updated `main` and file the dual-read provider
+  configuration ticket.
+- **Do not advance until:** PR #66 is merged. Its CI `test` check passes; human
+  ratification remains. Keep the orchestrator stopped; provider configuration
+  remains a Stage 2 concern.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -148,6 +151,9 @@ unchanged; scheduler construction remains Claude-only; full suite passes.
   `provider_id = "fake"` to scheduler substitutes. The exact six-parameter call
   shape remains deliberate: adapter-specific options belong in constructor
   configuration. Stage 1 is not complete until the PR passes its human gate.
+- Stage 1 handoff: issue [#65](https://github.com/colin-prologue/Switchboard/issues/65)
+  is `status:human-review`; [PR #66](https://github.com/colin-prologue/Switchboard/pull/66)
+  is open and its CI `test` check passes.
 
 **Ticket draft:**
 
