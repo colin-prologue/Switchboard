@@ -18,7 +18,7 @@
 - **What remains deliberately disabled:** Codex provider configuration and
   execution, pool selection, provider fallback, and mixed dispatch.
 - **Last verified source commit:** Stage 2 commit `615036f`, based on merged
-  `main` at `cc62087`.
+  `main` at `cc62087`; CI fixture follow-up `4b0ffbe`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
   orchestrator/tests -q` - 276 passed in 8.72s on 2026-07-12 after independent
   Stage 2 review and CI-fixture fixes.
@@ -28,8 +28,8 @@
 - **Next single task:** review and merge PR #68, delete its branch, then create
   a fresh Stage 3 branch from updated `main` and file the injectable-scheduler
   ticket.
-- **Do not advance until:** PR #68 passes CI and is merged. Keep the orchestrator
-  stopped; scheduler injection remains a Stage 3 concern.
+- **Do not advance until:** PR #68 is merged. Its final CI `test` check passes.
+  Keep the orchestrator stopped; scheduler injection remains a Stage 3 concern.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -198,11 +198,11 @@ startup, last-known-good hot reload, and full suite.
   overrides. Final re-review reported no remaining actionable findings; the PR
   human gate remains.
 - Stage 2 handoff: issue [#67](https://github.com/colin-prologue/Switchboard/issues/67)
-  returned to `status:in-progress` after [PR #68](https://github.com/colin-prologue/Switchboard/pull/68)
-  exposed a CI-only Stage 1 success-contract flake: its fake subprocess had a
-  1-second cold-start deadline. The fixture now uses production-like startup
-  bounds; dedicated timeout tests remain unchanged. Re-verify CI before restoring
-  the human-review handoff.
+  is `status:human-review`; [PR #68](https://github.com/colin-prologue/Switchboard/pull/68)
+  is green and open for human ratification. Its first CI run exposed a Stage 1
+  success-contract flake: the fake subprocess had a 1-second cold-start
+  deadline. Follow-up `4b0ffbe` uses production-like startup bounds while
+  leaving dedicated timeout tests unchanged; the subsequent CI run passed.
 
 ### Stage 3 - Injectable scheduler
 
