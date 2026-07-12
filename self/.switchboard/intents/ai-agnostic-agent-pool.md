@@ -1,35 +1,33 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 1 implementation complete and awaiting human review
-  on PR #66.
+- **Status:** active; Stage 2 implementation in progress on issue #67.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 1 - neutral runner contract at the human-review gate
-  on issue #65 / PR #66.
+- **Current stage:** Stage 2 - dual-read provider configuration, implementation
+  and independent review on `codex/stage2-dual-read-provider-config`.
 - **Production mode:** Claude-only. No Codex runner is dispatchable.
 - **What is enabled:** the existing `claude:` workflow binding and
-  `ClaudeRunner` path only.
-- **What remains deliberately disabled:** provider-neutral configuration,
-  Codex execution, pool selection, provider fallback, and mixed dispatch.
-- **Last verified source commit:** Stage 1 commit `41e396e`, based on merged
-  `main` at `aab0719`.
+  `ClaudeRunner` runtime path, plus dual-read parsing for strict
+  `providers.claude` configuration. Shipped workflows remain on `claude:`.
+- **What remains deliberately disabled:** Codex provider configuration and
+  execution, pool selection, provider fallback, and mixed dispatch.
+- **Last verified source commit:** merged `main` at `cc62087`; Stage 2 working
+  tree based on that commit.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 258 passed in 9.03s on 2026-07-12 after independent
-  review fixes.
+  orchestrator/tests -q` - 276 passed in 9.28s on 2026-07-12 after independent
+  Stage 2 review fixes.
 - **Last end-to-end evidence:** issue #62 -> PR #63 ->
   `status:human-review`; CI `test` passed. The worker used Claude session
   `7c58c430-8e39-4684-93f6-1436cf65408e` and needed no workspace repair.
-- **Next single task:** review and merge PR #66, delete its branch, then create
-  a fresh Stage 2 branch from updated `main` and file the dual-read provider
-  configuration ticket.
-- **Do not advance until:** PR #66 is merged. Its CI `test` check passes; human
-  ratification remains. Keep the orchestrator stopped; provider configuration
-  remains a Stage 2 concern.
+- **Next single task:** resolve the independent Stage 2 diff review, then commit,
+  push, and open the issue #67 PR with focused/full-suite evidence.
+- **Do not advance until:** the Stage 2 PR passes CI and human review. Keep the
+  orchestrator stopped; scheduler injection remains a Stage 3 concern.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -150,10 +148,10 @@ unchanged; scheduler construction remains Claude-only; full suite passes.
   static Protocol typing plus explicit behavioral assertions, and adding
   `provider_id = "fake"` to scheduler substitutes. The exact six-parameter call
   shape remains deliberate: adapter-specific options belong in constructor
-  configuration. Stage 1 is not complete until the PR passes its human gate.
+  configuration. Stage 1 passed its human gate and merged as `cc62087`.
 - Stage 1 handoff: issue [#65](https://github.com/colin-prologue/Switchboard/issues/65)
-  is `status:human-review`; [PR #66](https://github.com/colin-prologue/Switchboard/pull/66)
-  is open and its CI `test` check passes.
+  and [PR #66](https://github.com/colin-prologue/Switchboard/pull/66) completed
+  the human-review gate; CI passed and the branch was deleted after merge.
 
 **Ticket draft:**
 
@@ -176,6 +174,27 @@ unchanged; scheduler construction remains Claude-only; full suite passes.
 
 **Test:** old/new config equivalence, conflict rejection, unchanged project
 startup, last-known-good hot reload, and full suite.
+
+**Working evidence (2026-07-12, base `cc62087`, issue #67):**
+
+- The new workflow/reload tests first failed in eight expected places: provider
+  blocks were ignored, conflicts did not raise, invalid envelopes were accepted,
+  and a conflicting hot reload continued dispatch.
+- `providers.claude` now resolves through the same path-aware typed parser as
+  legacy `claude:`; semantically equal dual forms pass and unequal forms fail.
+- Focused workflow + integration + reload suites passed after review fixes
+  (106 tests in 3.48s).
+- Full `orchestrator/tests` passed after review fixes (276 tests in 9.28s).
+- `workflow/WORKFLOW.base.md` and the composed project workflow remain on the
+  legacy form; scheduler construction remains Claude-only.
+- Independent Terra 5.6 High review found malformed provider fields that could
+  remove the cost cap, duplicate YAML keys that could bypass conflict detection,
+  and stale resume wording. Strict provider validation, duplicate-key rejection,
+  and this ledger correction resolve those findings. Re-review then caught
+  duplicate detection running after YAML merge expansion; detection now runs on
+  textual keys before SafeLoader preserves `<<` inheritance and explicit
+  overrides. Final re-review reported no remaining actionable findings; the PR
+  human gate remains.
 
 ### Stage 3 - Injectable scheduler
 

@@ -33,6 +33,47 @@ from .types import (
 )
 
 
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """SafeLoader variant that rejects silent last-key-wins mappings."""
+
+    def construct_mapping(self, node, deep=False):
+        if not isinstance(node, yaml.nodes.MappingNode):
+            raise yaml.constructor.ConstructorError(
+                None,
+                None,
+                f"expected a mapping node, got {node.id}",
+                node.start_mark,
+            )
+        # Inspect the textual mapping before SafeLoader flattens `<<` merges.
+        # After flattening, an explicit override correctly appears twice and is
+        # indistinguishable from a literal duplicate key.
+        seen = set()
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                key = key_node.value
+            else:
+                key = self.construct_object(key_node, deep=deep)
+            identity = (key_node.tag, key)
+            try:
+                duplicate = identity in seen
+            except TypeError as exc:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "found an unhashable key",
+                    key_node.start_mark,
+                ) from exc
+            if duplicate:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            seen.add(identity)
+        return super().construct_mapping(node, deep=deep)
+
+
 # --- loading (core §5.1/5.2) --------------------------------------------------
 
 def load_workflow(path: Path) -> WorkflowDefinition:
@@ -67,7 +108,7 @@ def load_workflow(path: Path) -> WorkflowDefinition:
             body = "".join(lines[end_idx + 1:])
 
         try:
-            raw = yaml.safe_load(front_matter_text)
+            raw = yaml.load(front_matter_text, Loader=_UniqueKeySafeLoader)
         except yaml.YAMLError as e:
             raise WorkflowError("workflow_parse_error", str(e)) from e
 
@@ -277,11 +318,46 @@ class Config:
             max_sessions_per_issue=max_sessions_per_issue,
         )
 
-    # -- claude (SPEC.md §1: pass-through execution block) ----------------------
+    # -- execution providers (SPEC.md §1; AgDR-017 dual-read migration) ---------
 
-    def claude(self) -> ClaudeConfig:
-        raw = self._config.get("claude")
-        raw = raw if isinstance(raw, dict) else {}
+    @staticmethod
+    def _parse_claude(
+        raw: dict[str, Any],
+        path: str,
+        *,
+        strict: bool = False,
+    ) -> ClaudeConfig:
+        """Parse one legacy or provider-enveloped Claude settings block."""
+
+        if strict:
+            allowed = {
+                "kind",
+                "command",
+                "max_turns",
+                "max_budget_usd",
+                "turn_timeout_ms",
+                "read_timeout_ms",
+                "stall_timeout_ms",
+            }
+            unknown = [key for key in raw if key not in allowed]
+            if unknown:
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    f"{path} contains unknown fields: "
+                    f"{', '.join(sorted(map(str, unknown)))}",
+                )
+            if "command" in raw and not isinstance(raw["command"], str):
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    f"{path}.command must be a string, got "
+                    f"{type(raw['command']).__name__}",
+                )
+            budget = raw.get("max_budget_usd")
+            if isinstance(budget, bool):
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    f"{path}.max_budget_usd must be numeric or null, got {budget!r}",
+                )
 
         command = raw.get("command")
         command = command if isinstance(command, str) else "claude -p --verbose --output-format stream-json"
@@ -290,7 +366,7 @@ class Config:
         if isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns <= 0:
             raise WorkflowError(
                 "workflow_parse_error",
-                f"claude.max_turns must be a positive integer, got {max_turns!r}",
+                f"{path}.max_turns must be a positive integer, got {max_turns!r}",
             )
 
         max_budget_usd_raw = raw.get("max_budget_usd")
@@ -304,7 +380,7 @@ class Config:
         else:
             raise WorkflowError(
                 "workflow_parse_error",
-                f"claude.max_budget_usd must be numeric, got {max_budget_usd_raw!r}",
+                f"{path}.max_budget_usd must be numeric, got {max_budget_usd_raw!r}",
             )
 
         def _timeout(key: str, default: int) -> int:
@@ -312,7 +388,7 @@ class Config:
             if isinstance(v, bool) or not isinstance(v, int):
                 raise WorkflowError(
                     "workflow_parse_error",
-                    f"claude.{key} must be an integer, got {v!r}",
+                    f"{path}.{key} must be an integer, got {v!r}",
                 )
             return v
 
@@ -324,6 +400,72 @@ class Config:
             read_timeout_ms=_timeout("read_timeout_ms", 5000),
             stall_timeout_ms=_timeout("stall_timeout_ms", 300000),
         )
+
+    def claude(self) -> ClaudeConfig:
+        """Return canonical Claude config from the legacy or provider envelope.
+
+        Stage 2 deliberately supports only the canonical provider id `claude`
+        and kind `claude-cli`. Runtime selection remains Claude-only; accepting
+        another provider here before its adapter exists would make a workflow
+        look deployable while silently ignoring that provider.
+        """
+        legacy_present = "claude" in self._config
+        legacy_raw = self._config.get("claude")
+        # Preserve the legacy getter's established coercion: a non-map block is
+        # treated as an empty block and receives defaults.
+        legacy_map = legacy_raw if isinstance(legacy_raw, dict) else {}
+        legacy_cfg = self._parse_claude(legacy_map, "claude")
+
+        if "providers" not in self._config:
+            return legacy_cfg
+
+        providers = self._config["providers"]
+        if not isinstance(providers, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"providers must be a map, got {type(providers).__name__}",
+            )
+
+        unsupported = [provider_id for provider_id in providers if provider_id != "claude"]
+        if unsupported:
+            raise WorkflowError(
+                "unsupported_provider_id",
+                f"providers contains unsupported provider ids: "
+                f"{', '.join(sorted(map(str, unsupported)))}; Stage 2 supports only 'claude'",
+            )
+
+        if "claude" not in providers:
+            raise WorkflowError(
+                "missing_provider_config",
+                "providers.claude is required while Claude is the only runtime provider",
+            )
+
+        provider_raw = providers["claude"]
+        if not isinstance(provider_raw, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"providers.claude must be a map, got {type(provider_raw).__name__}",
+            )
+
+        kind = provider_raw.get("kind")
+        if kind != "claude-cli":
+            raise WorkflowError(
+                "unsupported_provider_kind",
+                f"providers.claude.kind must be 'claude-cli', got {kind!r}",
+            )
+
+        provider_cfg = self._parse_claude(
+            provider_raw,
+            "providers.claude",
+            strict=True,
+        )
+        if legacy_present and legacy_cfg != provider_cfg:
+            raise WorkflowError(
+                "conflicting_provider_config",
+                "claude and providers.claude resolve to different settings; "
+                "make them equivalent or configure only one form",
+            )
+        return provider_cfg
 
 
 # --- credential provider construction (issue #10: GitHub App identity) -------
