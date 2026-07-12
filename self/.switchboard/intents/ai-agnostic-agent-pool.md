@@ -1,33 +1,35 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 2 implementation in progress on issue #67.
+- **Status:** active; Stage 2 implementation complete and awaiting human review
+  on PR #68.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 2 - dual-read provider configuration, implementation
-  and independent review on `codex/stage2-dual-read-provider-config`.
+- **Current stage:** Stage 2 - dual-read provider configuration at the
+  human-review gate on issue #67 / PR #68.
 - **Production mode:** Claude-only. No Codex runner is dispatchable.
 - **What is enabled:** the existing `claude:` workflow binding and
   `ClaudeRunner` runtime path, plus dual-read parsing for strict
   `providers.claude` configuration. Shipped workflows remain on `claude:`.
 - **What remains deliberately disabled:** Codex provider configuration and
   execution, pool selection, provider fallback, and mixed dispatch.
-- **Last verified source commit:** merged `main` at `cc62087`; Stage 2 working
-  tree based on that commit.
+- **Last verified source commit:** Stage 2 commit `615036f`, based on merged
+  `main` at `cc62087`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
   orchestrator/tests -q` - 276 passed in 9.28s on 2026-07-12 after independent
   Stage 2 review fixes.
 - **Last end-to-end evidence:** issue #62 -> PR #63 ->
   `status:human-review`; CI `test` passed. The worker used Claude session
   `7c58c430-8e39-4684-93f6-1436cf65408e` and needed no workspace repair.
-- **Next single task:** resolve the independent Stage 2 diff review, then commit,
-  push, and open the issue #67 PR with focused/full-suite evidence.
-- **Do not advance until:** the Stage 2 PR passes CI and human review. Keep the
-  orchestrator stopped; scheduler injection remains a Stage 3 concern.
+- **Next single task:** review and merge PR #68, delete its branch, then create
+  a fresh Stage 3 branch from updated `main` and file the injectable-scheduler
+  ticket.
+- **Do not advance until:** PR #68 passes CI and is merged. Keep the orchestrator
+  stopped; scheduler injection remains a Stage 3 concern.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -195,6 +197,9 @@ startup, last-known-good hot reload, and full suite.
   textual keys before SafeLoader preserves `<<` inheritance and explicit
   overrides. Final re-review reported no remaining actionable findings; the PR
   human gate remains.
+- Stage 2 handoff: issue [#67](https://github.com/colin-prologue/Switchboard/issues/67)
+  is `status:human-review`; [PR #68](https://github.com/colin-prologue/Switchboard/pull/68)
+  is open for human ratification.
 
 ### Stage 3 - Injectable scheduler
 
