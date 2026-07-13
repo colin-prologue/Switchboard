@@ -29,8 +29,11 @@ async def test_claude_runner_satisfies_agent_runner_contract(
             command=f"python3 {FAKE_CLAUDE}",
             max_turns=5,
             max_budget_usd=None,
-            turn_timeout_ms=5000,
-            read_timeout_ms=1000,
+            # This is the success contract, not the timeout test. Use the
+            # production cold-start bound so loaded CI runners do not turn a
+            # subprocess scheduling delay into a protocol failure.
+            turn_timeout_ms=30000,
+            read_timeout_ms=30000,
             stall_timeout_ms=0,
         )
     )

@@ -38,9 +38,39 @@ not exact JSON names. We implement that over the Claude CLI.
 | cost accounting                     | `result` message `total_cost_usd` drives budget enforcement; `--max-budget-usd` as a hard per-run cost ceiling |
 | client-side tracker tool            | the agent's `gh` tooling; the token is never **written** into the workspace (clone auth via `gh auth setup-git`). The agent process does inherit the orchestrator's environment — Bash-level access to `$GITHUB_TOKEN` is inside the documented v1 guard scope (AgDR-004). |
 
-The front-matter execution block is named **`claude:`** (pass-through, same role as
-the core's codex block): `command`, `max_turns`, `max_budget_usd`, `turn_timeout_ms`,
-`read_timeout_ms`, `stall_timeout_ms`.
+The provider-instance form of the front-matter execution block is
+**`providers.claude`**, with `kind: claude-cli` plus the pass-through fields
+`command`, `max_turns`, `max_budget_usd`, `turn_timeout_ms`, `read_timeout_ms`,
+and `stall_timeout_ms`:
+
+```yaml
+providers:
+  claude:
+    kind: claude-cli
+    command: "claude -p --verbose --output-format stream-json"
+    max_turns: 100
+    max_budget_usd: 5
+    turn_timeout_ms: 3600000
+    read_timeout_ms: 30000
+    stall_timeout_ms: 300000
+```
+
+The top-level **`claude:`** block remains a supported legacy form with the same
+fields and defaults. During the dual-read migration (AgDR-017), either form may
+be used. If both are present, they must resolve to equal typed `ClaudeConfig`
+values; otherwise startup/reload fails with `conflicting_provider_config`
+instead of choosing one silently. A provider envelope must contain the canonical
+`claude` id with `kind: claude-cli`. Until another adapter is implemented, other
+provider ids and kinds fail validation rather than being ignored. The shipped
+workflow template remains on the legacy form during Stage 2 to continuously
+exercise backward compatibility; provider selection is not introduced here.
+Provider-enveloped Claude settings are strict: unknown fields, malformed field
+types, and boolean `max_budget_usd` values fail parsing instead of falling back
+to defaults. Legacy coercions remain unchanged for compatibility. The workflow
+loader also rejects textual duplicate YAML mapping keys; a duplicate must never
+erase an earlier `claude` or `providers` value before dual-form conflict
+detection runs. Standard YAML merge-key inheritance and explicit overrides
+remain supported.
 
 **Win over the Codex path:** `--max-budget-usd` gives an always-on orchestrator a
 hard per-run cost stop the original lacks. Budget is enforced at two layers:
