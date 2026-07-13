@@ -36,7 +36,7 @@ from .types import (
 class _UniqueKeySafeLoader(yaml.SafeLoader):
     """SafeLoader variant that rejects silent last-key-wins mappings."""
 
-    def construct_mapping(self, node, deep=False):
+    def _check_mapping_keys(self, node, *, deep=False, checked=None):
         if not isinstance(node, yaml.nodes.MappingNode):
             raise yaml.constructor.ConstructorError(
                 None,
@@ -44,11 +44,18 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
                 f"expected a mapping node, got {node.id}",
                 node.start_mark,
             )
+        if checked is None:
+            checked = set()
+        node_id = id(node)
+        if node_id in checked:
+            return
+        checked.add(node_id)
+
         # Inspect the textual mapping before SafeLoader flattens `<<` merges.
         # After flattening, an explicit override correctly appears twice and is
         # indistinguishable from a literal duplicate key.
         seen = set()
-        for key_node, _ in node.value:
+        for key_node, value_node in node.value:
             if key_node.tag == "tag:yaml.org,2002:merge":
                 key = key_node.value
             else:
@@ -71,6 +78,22 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
                     key_node.start_mark,
                 )
             seen.add(identity)
+
+            if key_node.tag != "tag:yaml.org,2002:merge":
+                continue
+            if isinstance(value_node, yaml.nodes.MappingNode):
+                self._check_mapping_keys(
+                    value_node, deep=deep, checked=checked
+                )
+            elif isinstance(value_node, yaml.nodes.SequenceNode):
+                for merge_source in value_node.value:
+                    if isinstance(merge_source, yaml.nodes.MappingNode):
+                        self._check_mapping_keys(
+                            merge_source, deep=deep, checked=checked
+                        )
+
+    def construct_mapping(self, node, deep=False):
+        self._check_mapping_keys(node, deep=deep)
         return super().construct_mapping(node, deep=deep)
 
 

@@ -117,6 +117,25 @@ def test_yaml_merge_override_remains_valid_for_legacy_workflow(tmp_path: Path):
     assert cfg.claude().max_turns == 20
 
 
+def test_duplicate_key_inside_inline_merge_source_raises(tmp_path: Path):
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "providers:\n"
+        "  claude:\n"
+        "    <<: {kind: claude-cli, command: first, command: second}\n"
+        "---\n"
+        "body\n"
+    )
+
+    with pytest.raises(WorkflowError) as exc_info:
+        load_workflow(p)
+
+    assert exc_info.value.code == "workflow_parse_error"
+    assert "duplicate key" in str(exc_info.value)
+    assert "command" in str(exc_info.value)
+
+
 def test_empty_front_matter_yields_empty_config(tmp_path: Path):
     p = tmp_path / "WORKFLOW.md"
     p.write_text("---\n---\nbody\n")
