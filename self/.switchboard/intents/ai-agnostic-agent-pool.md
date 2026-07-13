@@ -17,11 +17,11 @@
   `providers.claude` configuration. Shipped workflows remain on `claude:`.
 - **What remains deliberately disabled:** Codex provider configuration and
   execution, pool selection, provider fallback, and mixed dispatch.
-- **Last verified source commit:** Stage 2 commit `615036f`, based on merged
-  `main` at `cc62087`; CI fixture follow-up `4b0ffbe`.
+- **Last verified source commit:** Stage 2 review-fix commit `ebeb575`, based on
+  merged `main` at `cc62087`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 276 passed in 8.72s on 2026-07-12 after independent
-  Stage 2 review and CI-fixture fixes.
+  orchestrator/tests -q` - 277 passed in 9.43s on 2026-07-12 after the PR
+  review fix for duplicate keys inside YAML merge sources.
 - **Last end-to-end evidence:** issue #62 -> PR #63 ->
   `status:human-review`; CI `test` passed. The worker used Claude session
   `7c58c430-8e39-4684-93f6-1436cf65408e` and needed no workspace repair.
@@ -185,8 +185,8 @@ startup, last-known-good hot reload, and full suite.
 - `providers.claude` now resolves through the same path-aware typed parser as
   legacy `claude:`; semantically equal dual forms pass and unequal forms fail.
 - Focused workflow + integration + reload suites passed after review fixes
-  (106 tests in 3.48s).
-- Full `orchestrator/tests` passed after review fixes (276 tests in 9.28s).
+  (107 tests in 3.52s).
+- Full `orchestrator/tests` passed after review fixes (277 tests in 9.43s).
 - `workflow/WORKFLOW.base.md` and the composed project workflow remain on the
   legacy form; scheduler construction remains Claude-only.
 - Independent Terra 5.6 High review found malformed provider fields that could
@@ -195,8 +195,9 @@ startup, last-known-good hot reload, and full suite.
   and this ledger correction resolve those findings. Re-review then caught
   duplicate detection running after YAML merge expansion; detection now runs on
   textual keys before SafeLoader preserves `<<` inheritance and explicit
-  overrides. Final re-review reported no remaining actionable findings; the PR
-  human gate remains.
+  overrides. PR review then identified that merge-only source mappings still
+  escaped inspection; commit `ebeb575` recursively checks merge sources before
+  flattening and adds a focused regression. The PR human gate remains.
 - Stage 2 handoff: issue [#67](https://github.com/colin-prologue/Switchboard/issues/67)
   is `status:human-review`; [PR #68](https://github.com/colin-prologue/Switchboard/pull/68)
   is green and open for human ratification. Its first CI run exposed a Stage 1
