@@ -203,12 +203,40 @@ to verify a fresh install.
 
 ---
 
+## Experimental Codex-only canary
+
+The normal process remains Claude-only. Stage 5 adds an explicit Codex canary
+mode for isolated test projects; it does not enable a mixed pool. The canary
+workflow must use only the strict provider envelope:
+
+```yaml
+providers:
+  codex:
+    kind: codex-cli
+    # command and timeout fields are optional; safe subscription defaults apply.
+```
+
+Confirm the host has a persisted ChatGPT login, then opt in at process start:
+
+```bash
+codex login status
+uv run --project orchestrator python -m orchestrator \
+  --workflow projects/<isolated-canary>/WORKFLOW.md --provider codex
+```
+
+Without `--provider codex`, startup still validates and selects Claude. Codex
+mode rejects legacy execution blocks and mixed `providers` maps. Use it only
+against a separate canary repository until the Stage 5 live-ticket evidence is
+complete; provider weighting, fallback, and per-issue overrides are later work.
+
+---
+
 ## Layout
 
 ```
 switchboard/
   spec/            # SPEC.md (owned bindings) + SPEC.core.md (vendored) + PROVENANCE.md
-  orchestrator/    # Python/asyncio implementation: scheduler, Claude runner,
+  orchestrator/    # Python/asyncio implementation: scheduler, CLI runners,
                    #   GitHub tracker, workspace mgr; pytest suite in tests/
   workflow/        # WORKFLOW.base.md — shared methodology base (defaults + prompt)
   methodology/     # METHODOLOGY.md — the IDSD workflow agents follow

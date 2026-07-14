@@ -1,37 +1,45 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 4 standalone Codex adapter complete on issue #73,
-  awaiting PR CI and human review.
+- **Status:** active; Stage 5A opt-in Codex-only process mode implemented on
+  issue #75, awaiting PR CI and human review.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 4 - standalone Codex adapter implemented on issue #73;
-  production dispatch remains Claude-only.
-- **Production mode:** Claude-only. No Codex runner is dispatchable.
-- **What is enabled:** dual-read Claude configuration, injected runner selection,
-  and a directly testable `CodexRunner` over `codex exec --json`. The production
-  selector still always returns `ClaudeRunner`; shipped workflows remain legacy.
-- **What remains deliberately disabled:** Codex provider configuration and
-  execution, pool selection, provider fallback, and mixed dispatch.
-- **Last verified source commit:** Stage 4 implementation commit `cda3cf9`, based
-  on merged Stage 3 `main` at `6d18b04`.
-- **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 297 passed in 9.56s on 2026-07-13. Focused Stage 4
-  adapter/contract/selector/workflow tests: 85 passed in 1.27s.
+- **Current stage:** Stage 5A - opt-in Codex-only process mode implemented on
+  issue #75; live GitHub canary provisioning is the separate Stage 5B gate.
+- **Production mode:** Claude-only by default. Existing commands, workflows,
+  and project bindings do not pass `--provider codex` and remain unchanged.
+- **What is enabled:** a process may explicitly select `--provider codex` with
+  a strict, Codex-only `providers.codex` workflow. Startup, hot reload,
+  timeout/stall/budget policy, credentials, continuation, retry, cancellation,
+  capacity, parking, and lifecycle logs all use the selected runner.
+- **What remains deliberately disabled:** mixed provider maps, weighted or
+  per-issue selection, fallback, registration-script support, and any Codex
+  process against an existing production repository.
+- **Last verified source commit:** Stage 5A implementation commit `2408749`,
+  based on merged Stage 4 `main` at `330d5c9`.
+- **Last passing command:** `orchestrator/.venv/bin/python -m pytest -q` from
+  `orchestrator/` - 312 passed in 10.02s on 2026-07-13. Focused workflow,
+  selector, contract, CLI, and integration tests: 119 passed in 3.61s.
 - **Last end-to-end evidence:** issue #71 -> PR #72 ->
   `status:human-review`; CI `test` passed. The selector dispatched
   `provider_id=claude`, session `0efa3a2c-db48-45d0-83d8-a4f7f1be77b8`
   committed `e6d7d98`, and no workspace repair was needed.
-- **Next single task:** push `codex/stage4-standalone-codex-adapter`, open the
-  issue #73 PR, and wait for CI before moving it to human review. PR #72 remains
-  a separate docs-only Stage 3 canary artifact.
-- **Do not advance until:** the Stage 4 PR is green, human-approved, and merged.
-  Stage 5 also requires a separate canary repository and an explicit safe git
-  handoff design; do not register Codex merely because the adapter exists.
+- **Local git capability evidence:** a disposable Codex run under the merged
+  `workspace-write` profile created and committed `handoff.txt` successfully in
+  `/tmp/switchboard-stage5-git-probe.HtYewt` (commit `0385556`, session
+  `019f5e0e-1c7c-7001-9ad8-ee21c0382c05`). This is host evidence, not a
+  portability guarantee; `.git` may be protected in other environments.
+- **Next single task:** push `codex/stage5-codex-canary`, open the issue #75 PR,
+  and wait for CI and human review.
+- **Do not advance until:** the Stage 5A PR is green, human-approved, and
+  merged. Stage 5B then requires explicit operator confirmation of the new
+  canary repository's owner/name, visibility, and GitHub App installation. Do
+  not create that repository or point Codex at an existing project beforehand.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -286,10 +294,14 @@ registry still cannot select Codex.
   succeeded under session `019f5e05-d112-72e3-96a1-cea187a3b7f7`, producing
   exactly the two requested lines in one untracked file and no other changes.
 - AgDR-019 records the non-registration boundary. Current `workspace-write` may
-  protect `.git`, so Stage 5 must externalize git handoff or add an independent
-  isolation layer; unrestricted local execution is not an acceptable shortcut.
+  protect `.git`; unrestricted local execution is not an acceptable shortcut.
+  A Stage 5 host probe later demonstrated git writes under the current profile,
+  but the canary still has to verify this in its deployed environment.
 - `providers.codex` remains rejected, `ClaudeOnlyRunnerSelector` remains the
   only production selector, and no shipped workflow changed.
+- [PR #74](https://github.com/colin-prologue/Switchboard/pull/74) passed CI and
+  the human gate, then merged as `42a1f24`. PR #72 merged afterward, making
+  `330d5c9` the Stage 5 base. Both branches were deleted.
 
 ### Stage 5 - Codex canary project
 
@@ -300,6 +312,61 @@ process using ChatGPT subscription authentication.
 timeout/retry, session cap/parking, credential refresh behavior, transcript
 capture, and restart with an in-progress workspace. Several tickets must finish
 without manual repair.
+
+#### Stage 5A - opt-in process mode
+
+**Purpose:** make the standalone adapter dispatchable only when an operator
+explicitly starts a Codex-only process, while preserving the existing
+Claude-only command and workflow behavior.
+
+**Working evidence (2026-07-13, base `330d5c9`, issue #75):**
+
+- New tests first failed at collection because `CodexOnlyRunnerSelector` did
+  not exist. `--provider codex` now selects it; omitting the flag still creates
+  `ClaudeOnlyRunnerSelector`.
+- `providers.codex` is strict and Codex-only (`kind: codex-cli`). Legacy Codex,
+  legacy-plus-Codex, mixed provider maps, unsupported kinds, unknown fields,
+  and empty commands fail startup. Normal Claude validation is unchanged.
+- Timeout, stall, and optional cumulative budget are runner policy. Token TTL
+  uses the selected runner's turn timeout, and running entries pin their stall
+  limit at dispatch so a hot reload cannot mutate an in-flight session.
+- Fake Codex-process integration covers dispatch, multi-turn resume, token
+  refresh/TTL, provider logs, failure retry/release, capacity, terminal
+  cancellation, and session-cap parking. Existing Claude integration coverage
+  remains green.
+- Focused workflow + selector + runner-contract + CLI + integration tests passed
+  (119 tests in 3.61s). Full `orchestrator/tests` passed (312 tests in 10.02s).
+- No project binding, registration script, GitHub repository, App installation,
+  or production process changed. Mixed routing remains Stage 6 work.
+
+**Return-session test gate:** run the focused 119-test command first to restore
+context around the changed boundaries, then the full suite. Confirm a normal
+launch without `--provider` still rejects a Codex-only workflow and accepts the
+existing Claude workflow. Do not treat fake-runner coverage as live canary
+evidence.
+
+```bash
+uv run --project orchestrator python -m pytest \
+  orchestrator/tests/test_workflow.py \
+  orchestrator/tests/test_runner_selector.py \
+  orchestrator/tests/test_agent_runner_contract.py \
+  orchestrator/tests/test_main.py \
+  orchestrator/tests/test_integration.py -q
+uv run --project orchestrator python -m pytest orchestrator/tests -q
+```
+
+#### Stage 5B - isolated live canary
+
+**Purpose:** provision one separate GitHub repository and project binding, then
+run real subscription-authenticated Codex tickets without exposing an existing
+board to startup reconciliation or worker mutation.
+
+**Operator gate before any mutation:** confirm repository owner/name,
+visibility, and GitHub App installation access. Then test `codex login status`,
+one synthetic issue through PR handoff, continuation, failure retry, parking,
+credential refresh, transcript capture, restart recovery, and git writes under
+the deployed sandbox. Several tickets must finish without manual repair before
+Stage 6 planning starts.
 
 ### Stage 6 - Mixed pool
 
