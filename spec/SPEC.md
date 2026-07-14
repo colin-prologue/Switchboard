@@ -82,6 +82,17 @@ instance. The selected provider id is retained on the running entry and emitted
 in worker lifecycle logs. Unsupported provider ids remain startup/reload errors;
 this boundary does not enable Codex, pooling, fallback, or issue overrides.
 
+Stage 4 adds a standalone `CodexRunner` over the documented non-interactive
+`codex exec --json` stream (AgDR-019). It captures `thread.started` identity,
+normalizes terminal `turn.completed` / `turn.failed` events, and resumes with
+`codex exec resume <SESSION_ID>`. The default uses saved ChatGPT authentication,
+approval policy `never`, and the `workspace-write` sandbox; inline API-key
+environment overrides are removed from the child. This adapter is directly
+testable but is not accepted by workflow parsing and is not registered with
+`ClaudeOnlyRunnerSelector`. Therefore no production dispatch can select Codex.
+The safe sandbox may protect `.git` as read-only, so Codex ticket-to-PR handoff
+remains a Stage 5 design gate rather than an implied Stage 4 capability.
+
 **Win over the Codex path:** `--max-budget-usd` gives an always-on orchestrator a
 hard per-run cost stop the original lacks. Budget is enforced at two layers:
 the flag caps each `claude -p` invocation, and the worker additionally tracks
