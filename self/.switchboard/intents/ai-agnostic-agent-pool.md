@@ -1,8 +1,8 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 5A opt-in Codex-only process mode implemented on
-  issue #75, awaiting PR CI and human review.
+- **Status:** active; Stage 5A opt-in Codex-only process mode is ready for human
+  review on issue #75 and PR #76; CI run 69 passed.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
@@ -20,8 +20,8 @@
 - **What remains deliberately disabled:** mixed provider maps, weighted or
   per-issue selection, fallback, registration-script support, and any Codex
   process against an existing production repository.
-- **Last verified source commit:** Stage 5A implementation commit `2408749`,
-  based on merged Stage 4 `main` at `330d5c9`.
+- **Last verified source commit:** Stage 5A code/spec head `1747be5`, based on
+  merged Stage 4 `main` at `330d5c9`.
 - **Last passing command:** `orchestrator/.venv/bin/python -m pytest -q` from
   `orchestrator/` - 312 passed in 10.58s on 2026-07-13. Focused workflow,
   selector, contract, CLI, and integration tests: 119 passed in 3.61s.
@@ -34,8 +34,9 @@
   `/tmp/switchboard-stage5-git-probe.HtYewt` (commit `0385556`, session
   `019f5e0e-1c7c-7001-9ad8-ee21c0382c05`). This is host evidence, not a
   portability guarantee; `.git` may be protected in other environments.
-- **Next single task:** push `codex/stage5-codex-canary`, open the issue #75 PR,
-  and wait for CI and human review.
+- **Next single task:** review and merge
+  [PR #76](https://github.com/colin-prologue/Switchboard/pull/76), then delete
+  `codex/stage5-codex-canary`.
 - **Do not advance until:** the Stage 5A PR is green, human-approved, and
   merged. Stage 5B then requires explicit operator confirmation of the new
   canary repository's owner/name, visibility, and GitHub App installation. Do
