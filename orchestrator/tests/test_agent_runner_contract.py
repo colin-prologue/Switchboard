@@ -7,7 +7,7 @@ from pathlib import Path
 from orchestrator.agent_runner import AgentRunner
 from orchestrator.runner import ClaudeRunner
 from orchestrator.scheduler import Orchestrator
-from orchestrator.types import ClaudeConfig, WorkflowDefinition
+from orchestrator.types import ClaudeConfig, Issue, WorkflowDefinition
 from orchestrator.workflow import Config
 
 from agent_runner_contract import assert_success_contract
@@ -61,7 +61,18 @@ def test_scheduler_components_still_construct_claude_only(tmp_path: Path) -> Non
         tmp_path,
     )
 
-    _, _, runner = orchestrator._components()
+    runner = orchestrator._select_runner(
+        Issue(
+            id="node-1",
+            identifier="1",
+            title="Contract test",
+            description=None,
+            priority=None,
+            state="todo",
+            branch_name=None,
+            url=None,
+        )
+    )
 
     typed_runner: AgentRunner = runner
     assert isinstance(runner, ClaudeRunner)

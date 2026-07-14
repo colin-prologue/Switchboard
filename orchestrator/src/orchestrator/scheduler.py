@@ -29,7 +29,7 @@ import httpx
 from .agent_runner import AgentRunner
 from .log import log
 from .prompt import render_prompt
-from .runner import ClaudeRunner
+from .runner_selector import AgentRunnerSelector, ClaudeOnlyRunnerSelector
 from .tracker import GitHubTracker
 from .transitions import load_requires_marker
 from .types import (
@@ -90,6 +90,7 @@ class RunningEntry:
     task: asyncio.Task
     identifier: str
     issue: Issue
+    provider_id: str
     session_id: str | None = None
     last_event_at: datetime | None = None  # stall-detection anchor (§8.5)
     retry_attempt: int | None = None
@@ -104,8 +105,18 @@ class WorkerFailure(Exception):
 
 
 class Orchestrator:
-    def __init__(self, workflow_path: Path):
+    def __init__(
+        self,
+        workflow_path: Path,
+        *,
+        runner_selector: AgentRunnerSelector | None = None,
+    ):
         self.workflow_path = workflow_path.resolve()
+        self._runner_selector = (
+            runner_selector
+            if runner_selector is not None
+            else ClaudeOnlyRunnerSelector()
+        )
         self._defn = None
         self._cfg: Config | None = None
         self._workflow_mtime: float | None = None
@@ -175,13 +186,17 @@ class Orchestrator:
 
     # -- component wiring (config-derived views over shared resources) ----------
 
-    def _components(self) -> tuple[GitHubTracker, WorkspaceManager, AgentRunner]:
+    def _components(self) -> tuple[GitHubTracker, WorkspaceManager]:
         cfg = self._cfg
         assert cfg is not None
         tracker = GitHubTracker(cfg.tracker(), client=self._http, creds=self._creds)
         wsm = WorkspaceManager(cfg.workspace_root(), cfg.hooks())
-        runner = ClaudeRunner(cfg.claude())
-        return tracker, wsm, runner
+        return tracker, wsm
+
+    def _select_runner(self, issue: Issue) -> AgentRunner:
+        cfg = self._cfg
+        assert cfg is not None
+        return self._runner_selector.select(cfg, issue)
 
     # -- workflow load / reload (core §5.1, §6.2) -------------------------------
 
@@ -276,7 +291,7 @@ class Orchestrator:
         """core §8.6: remove workspaces for issues already terminal."""
         cfg = self._cfg
         assert cfg is not None
-        tracker, wsm, _ = self._components()
+        tracker, wsm = self._components()
         try:
             terminal = await tracker.fetch_issues_by_states(cfg.tracker().terminal_states)
         except TrackerError as exc:
@@ -314,7 +329,7 @@ class Orchestrator:
             log("dispatch preflight failed; skipping dispatch this tick", error=str(exc))
             return
 
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         try:
             issues = await tracker.fetch_candidate_issues()
         except TrackerError as exc:
@@ -421,6 +436,11 @@ class Orchestrator:
             await self._park(issue, f"session cap reached ({spent}/{cap})")
             return
 
+        # Select before claiming or writing tracker state. A selector failure
+        # must leave the issue untouched so a later tick can retry safely.
+        runner = self._select_runner(issue)
+        provider_id = runner.provider_id
+
         # Claim before any await so a concurrent tick/retry timer cannot
         # double-dispatch while the label write below is in flight.
         self.claimed.add(issue.id)
@@ -435,24 +455,30 @@ class Orchestrator:
         if attempt is None and issue.state.lower() == "todo":
             await self._apply_in_progress_label(issue)
 
-        task = asyncio.create_task(self._worker(issue, attempt))
+        task = asyncio.create_task(self._worker(issue, attempt, runner))
         entry = RunningEntry(task=task, identifier=issue.identifier, issue=issue,
-                             retry_attempt=attempt)
+                             provider_id=provider_id, retry_attempt=attempt)
         self.running[issue.id] = entry
         self._cancel_retry(issue.id)
         self.sessions_per_issue[issue.id] = spent + 1
         log("dispatched", issue_id=issue.id, issue_identifier=issue.identifier,
-            attempt=attempt, session_number=spent + 1)
+            provider_id=provider_id, attempt=attempt,
+            session_number=spent + 1)
         task.add_done_callback(
             lambda t, iid=issue.id: self._on_worker_done(iid, t))
 
-    async def _worker(self, issue: Issue, attempt: int | None) -> None:
+    async def _worker(
+        self,
+        issue: Issue,
+        attempt: int | None,
+        runner: AgentRunner,
+    ) -> None:
         """One worker session: workspace -> before_run -> turn loop (core §16.5)."""
         cfg = self._cfg
         assert cfg is not None
         defn = self._defn
         assert defn is not None
-        tracker, wsm, runner = self._components()
+        tracker, wsm = self._components()
         claude_cfg = cfg.claude()
 
         ws = await wsm.create_for_issue(issue.identifier)          # WorkspaceError -> abnormal
@@ -528,7 +554,7 @@ class Orchestrator:
         if entry.cancelled_by_reconciliation or task.cancelled():
             self.claimed.discard(issue_id)
             log("worker cancelled", issue_id=issue_id,
-                issue_identifier=entry.identifier)
+                issue_identifier=entry.identifier, provider_id=entry.provider_id)
             return
 
         exc = task.exception()
@@ -537,14 +563,16 @@ class Orchestrator:
                                  delay_ms=CONTINUATION_DELAY_MS)
             log("worker completed", issue_id=issue_id,
                 issue_identifier=entry.identifier,
-                session_id=entry.session_id, outcome="completed")
+                provider_id=entry.provider_id, session_id=entry.session_id,
+                outcome="completed")
         else:
             attempt = (entry.retry_attempt or 0) + 1
             self._schedule_retry(issue_id, entry.identifier, attempt=attempt,
                                  delay_ms=self._failure_backoff_ms(attempt))
             log("worker failed", issue_id=issue_id,
                 issue_identifier=entry.identifier,
-                session_id=entry.session_id, outcome="failed", error=str(exc))
+                provider_id=entry.provider_id, session_id=entry.session_id,
+                outcome="failed", error=str(exc))
 
     def _failure_backoff_ms(self, attempt: int) -> int:
         cfg = self._cfg
@@ -574,7 +602,7 @@ class Orchestrator:
         entry = self.retry_attempts.pop(issue_id, None)
         if entry is None or self._stopping:
             return
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         try:
             candidates = await tracker.fetch_candidate_issues()
         except Exception as exc:
@@ -631,13 +659,13 @@ class Orchestrator:
                 if (now - anchor).total_seconds() * 1000 > stall_ms:
                     log("stalled session; terminating and retrying",
                         issue_id=issue_id, issue_identifier=entry.identifier,
-                        session_id=entry.session_id)
+                        provider_id=entry.provider_id, session_id=entry.session_id)
                     self._terminate(issue_id, cleanup=False, retry=True)
 
         if not self.running:
             return
         # Part B: tracker state refresh
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         try:
             refreshed = await tracker.fetch_issue_states_by_ids(list(self.running))
         except TrackerError as exc:
@@ -733,7 +761,7 @@ class Orchestrator:
         triage) to remedy by applying the marker. The comment is repost-guarded
         like `_park_notified` so poll ticks don't spam the issue; the guard set
         is cleared in `_dispatch` once the issue becomes eligible again."""
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         if issue.id in self._marker_refused:
             return
         body = (
@@ -774,7 +802,7 @@ class Orchestrator:
         this is visibility, not a lock, so we log and dispatch anyway, leaving the
         in-memory state untouched so `dispatch_state` still matches the tracker.
         """
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         try:
             await tracker.add_labels(issue.id, [IN_PROGRESS_LABEL])
             await tracker.remove_labels(issue.id, [TODO_LABEL])
@@ -841,7 +869,7 @@ class Orchestrator:
         """
         cfg = self._cfg
         assert cfg is not None
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         try:
             candidates = await tracker.fetch_candidate_issues()
         except TrackerError as exc:
@@ -859,7 +887,7 @@ class Orchestrator:
 
     async def _park(self, issue: Issue, reason: str) -> None:
         self._cancel_retry(issue.id)
-        tracker, wsm, _ = self._components()
+        tracker, wsm = self._components()
         body = (
             f"**Switchboard parked this issue** — {reason}.\n\n"
             f"The orchestrator will not dispatch it again while it carries the "
@@ -922,4 +950,5 @@ class Orchestrator:
             if sid:
                 entry.session_id = sid
                 log("session started", issue_id=issue_id,
-                    issue_identifier=entry.identifier, session_id=sid)
+                    issue_identifier=entry.identifier,
+                    provider_id=entry.provider_id, session_id=sid)
