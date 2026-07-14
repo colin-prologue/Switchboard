@@ -110,6 +110,14 @@ class FakeRunner:
                           num_turns=1)
 
 
+class FixedRunnerSelector:
+    def __init__(self, runner):
+        self.runner = runner
+
+    def select(self, cfg, issue):
+        return self.runner
+
+
 WORKFLOW_TMPL = """---
 tracker:
   kind: github
@@ -143,15 +151,15 @@ def _build_harness(tmp_path, monkeypatch):
     ws_root = tmp_path / "ws"
     wf = tmp_path / "WORKFLOW.md"
     wf.write_text(WORKFLOW_TMPL.format(ws_root=ws_root))
-    orch = Orchestrator(wf)
+    runner = FakeRunner()
+    orch = Orchestrator(wf, runner_selector=FixedRunnerSelector(runner))
     orch._load_workflow(initial=True)
     tracker = FakeTracker()
-    runner = FakeRunner()
     real_components = orch._components
 
     def fake_components():
-        _, wsm, _ = real_components()
-        return tracker, wsm, runner
+        _, wsm = real_components()
+        return tracker, wsm
 
     orch._components = fake_components
     return orch, tracker, runner, ws_root

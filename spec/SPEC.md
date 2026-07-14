@@ -62,8 +62,9 @@ values; otherwise startup/reload fails with `conflicting_provider_config`
 instead of choosing one silently. A provider envelope must contain the canonical
 `claude` id with `kind: claude-cli`. Until another adapter is implemented, other
 provider ids and kinds fail validation rather than being ignored. The shipped
-workflow template remains on the legacy form during Stage 2 to continuously
-exercise backward compatibility; provider selection is not introduced here.
+workflow template remains on the legacy form to continuously exercise backward
+compatibility. Stage 2 introduced no provider selection; the Claude-only Stage
+3 boundary is specified below.
 Provider-enveloped Claude settings are strict: unknown fields, malformed field
 types, and boolean `max_budget_usd` values fail parsing instead of falling back
 to defaults. Legacy coercions remain unchanged for compatibility. The workflow
@@ -71,6 +72,26 @@ loader also rejects textual duplicate YAML mapping keys; a duplicate must never
 erase an earlier `claude` or `providers` value before dual-form conflict
 detection runs. Standard YAML merge-key inheritance and explicit overrides
 remain supported.
+
+At dispatch, the scheduler selects one `AgentRunner` through an injected
+`AgentRunnerSelector(Config, Issue)` boundary (AgDR-018). The production
+selector remains Claude-only and returns `ClaudeRunner(cfg.claude())` for both
+configuration forms. Selection happens before claim or tracker mutation, once
+per worker session; all continuation turns in that session use the same runner
+instance. The selected provider id is retained on the running entry and emitted
+in worker lifecycle logs. Unsupported provider ids remain startup/reload errors;
+this boundary does not enable Codex, pooling, fallback, or issue overrides.
+
+Stage 4 adds a standalone `CodexRunner` over the documented non-interactive
+`codex exec --json` stream (AgDR-019). It captures `thread.started` identity,
+normalizes terminal `turn.completed` / `turn.failed` events, and resumes with
+`codex exec resume <SESSION_ID>`. The default uses saved ChatGPT authentication,
+approval policy `never`, and the `workspace-write` sandbox; inline API-key
+environment overrides are removed from the child. This adapter is directly
+testable but is not accepted by workflow parsing and is not registered with
+`ClaudeOnlyRunnerSelector`. Therefore no production dispatch can select Codex.
+The safe sandbox may protect `.git` as read-only, so Codex ticket-to-PR handoff
+remains a Stage 5 design gate rather than an implied Stage 4 capability.
 
 **Win over the Codex path:** `--max-budget-usd` gives an always-on orchestrator a
 hard per-run cost stop the original lacks. Budget is enforced at two layers:
