@@ -91,6 +91,7 @@ class RunningEntry:
     identifier: str
     issue: Issue
     provider_id: str
+    stall_timeout_ms: int
     session_id: str | None = None
     last_event_at: datetime | None = None  # stall-detection anchor (§8.5)
     retry_attempt: int | None = None
@@ -164,7 +165,7 @@ class Orchestrator:
         assert cfg is not None
         self._creds = build_credentials(cfg.tracker(), os.environ, self._http)
 
-    async def _agent_token(self) -> str | None:
+    async def _agent_token(self, turn_timeout_ms: int) -> str | None:
         """The bot token to inject into an agent turn (cached mint, issue #10).
         None when no provider is wired (test harnesses) — the agent then
         inherits the orchestrator env unchanged. A mint failure becomes a
@@ -177,9 +178,7 @@ class Orchestrator:
             # demand one that outlives the turn bound — a cached token with
             # only the tracker's 300s skew left would expire before a long
             # turn's final push (Codex PR #42 P1).
-            cfg = self._cfg
-            assert cfg is not None
-            min_ttl = cfg.claude().turn_timeout_ms / 1000
+            min_ttl = turn_timeout_ms / 1000
             return await self._creds.token(min_ttl=min_ttl)
         except Exception as exc:
             raise WorkerFailure(f"token mint failed: {exc.__class__.__name__}") from exc
@@ -205,7 +204,7 @@ class Orchestrator:
             mtime = self.workflow_path.stat().st_mtime
             defn = load_workflow(self.workflow_path)
             cfg = Config(defn, self.workflow_path.parent)
-            validate_dispatch(cfg)
+            validate_dispatch(cfg, provider_id=self._runner_selector.provider_id)
         except (WorkflowError, OSError) as exc:
             if initial:
                 raise
@@ -324,7 +323,7 @@ class Orchestrator:
         cfg = self._cfg
         assert cfg is not None
         try:
-            validate_dispatch(cfg)
+            validate_dispatch(cfg, provider_id=self._runner_selector.provider_id)
         except WorkflowError as exc:
             log("dispatch preflight failed; skipping dispatch this tick", error=str(exc))
             return
@@ -457,7 +456,9 @@ class Orchestrator:
 
         task = asyncio.create_task(self._worker(issue, attempt, runner))
         entry = RunningEntry(task=task, identifier=issue.identifier, issue=issue,
-                             provider_id=provider_id, retry_attempt=attempt)
+                             provider_id=provider_id,
+                             stall_timeout_ms=runner.stall_timeout_ms,
+                             retry_attempt=attempt)
         self.running[issue.id] = entry
         self._cancel_retry(issue.id)
         self.sessions_per_issue[issue.id] = spent + 1
@@ -479,7 +480,6 @@ class Orchestrator:
         defn = self._defn
         assert defn is not None
         tracker, wsm = self._components()
-        claude_cfg = cfg.claude()
 
         ws = await wsm.create_for_issue(issue.identifier)          # WorkspaceError -> abnormal
         try:
@@ -499,7 +499,7 @@ class Orchestrator:
                     prompt = CONTINUATION_PROMPT  # §7.1: don't resend the task prompt
                 # Fresh (cached) mint per turn: a session spanning the hourly
                 # installation-token expiry always injects a valid bot token.
-                agent_token = await self._agent_token()
+                agent_token = await self._agent_token(runner.turn_timeout_ms)
                 result = await runner.run_turn(
                     ws.path, prompt, resume_session_id=session_id,
                     on_event=self._on_agent_event, issue_id=issue.id,
@@ -533,8 +533,8 @@ class Orchestrator:
                     log("required label removed; ending session normally",
                         issue_id=issue.id, issue_identifier=issue.identifier)
                     break
-                if claude_cfg.max_budget_usd is not None \
-                        and cumulative_cost >= claude_cfg.max_budget_usd:
+                if runner.max_budget_usd is not None \
+                        and cumulative_cost >= runner.max_budget_usd:
                     log("worker budget ceiling reached; ending session normally",
                         issue_id=issue.id, issue_identifier=issue.identifier,
                         cost_usd=round(cumulative_cost, 4))
@@ -651,16 +651,16 @@ class Orchestrator:
         cfg = self._cfg
         assert cfg is not None
         # Part A: stall detection
-        stall_ms = cfg.claude().stall_timeout_ms
-        if stall_ms > 0:
-            now = datetime.now(timezone.utc)
-            for issue_id, entry in list(self.running.items()):
-                anchor = entry.last_event_at or entry.started_at
-                if (now - anchor).total_seconds() * 1000 > stall_ms:
-                    log("stalled session; terminating and retrying",
-                        issue_id=issue_id, issue_identifier=entry.identifier,
-                        provider_id=entry.provider_id, session_id=entry.session_id)
-                    self._terminate(issue_id, cleanup=False, retry=True)
+        now = datetime.now(timezone.utc)
+        for issue_id, entry in list(self.running.items()):
+            if entry.stall_timeout_ms <= 0:
+                continue
+            anchor = entry.last_event_at or entry.started_at
+            if (now - anchor).total_seconds() * 1000 > entry.stall_timeout_ms:
+                log("stalled session; terminating and retrying",
+                    issue_id=issue_id, issue_identifier=entry.identifier,
+                    provider_id=entry.provider_id, session_id=entry.session_id)
+                self._terminate(issue_id, cleanup=False, retry=True)
 
         if not self.running:
             return

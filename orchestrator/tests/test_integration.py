@@ -164,6 +164,9 @@ class FakeRunner:
     provider_id = "fake"
 
     def __init__(self, hold: bool = False):
+        self.turn_timeout_ms = 5000
+        self.stall_timeout_ms = 0
+        self.max_budget_usd: float | None = None
         self.hold = hold
         self.release = asyncio.Event()
         # (issue_id, resume_sid, prompt)
@@ -182,10 +185,21 @@ class FakeRunner:
 
 
 class FixedRunnerSelector:
-    def __init__(self, runner):
+    def __init__(self, runner, provider_id="claude"):
         self.runner = runner
+        self.provider_id = provider_id
 
     def select(self, cfg, issue):
+        provider_cfg = (
+            cfg.codex() if self.provider_id == "codex" else cfg.claude()
+        )
+        self.runner.turn_timeout_ms = provider_cfg.turn_timeout_ms
+        self.runner.stall_timeout_ms = provider_cfg.stall_timeout_ms
+        self.runner.max_budget_usd = getattr(
+            provider_cfg,
+            "max_budget_usd",
+            None,
+        )
         return self.runner
 
 
@@ -216,7 +230,30 @@ Work {{{{ issue.identifier }}}}: {{{{ issue.title }}}}
 """
 
 
-def _build_harness(tmp_path, monkeypatch, workflow_tmpl=WORKFLOW_TMPL, runner=None):
+CODEX_WORKFLOW_TMPL = WORKFLOW_TMPL.replace(
+    """claude:
+  command: "unused-by-fake-runner"
+  max_turns: 1
+  turn_timeout_ms: 5000
+  read_timeout_ms: 3000
+  stall_timeout_ms: 0""",
+    """providers:
+  codex:
+    kind: codex-cli
+    command: "unused-by-fake-runner"
+    turn_timeout_ms: 7000
+    read_timeout_ms: 3000
+    stall_timeout_ms: 0""",
+)
+
+
+def _build_harness(
+    tmp_path,
+    monkeypatch,
+    workflow_tmpl=WORKFLOW_TMPL,
+    runner=None,
+    provider_id="claude",
+):
     monkeypatch.setattr(scheduler_mod, "CONTINUATION_DELAY_MS", 30)
     monkeypatch.setattr(scheduler_mod, "FAILURE_BASE_BACKOFF_MS", 30)
     ws_root = tmp_path / "ws"
@@ -224,7 +261,10 @@ def _build_harness(tmp_path, monkeypatch, workflow_tmpl=WORKFLOW_TMPL, runner=No
     wf.write_text(workflow_tmpl.format(ws_root=ws_root))
 
     runner = runner if runner is not None else FakeRunner()
-    orch = Orchestrator(wf, runner_selector=FixedRunnerSelector(runner))
+    orch = Orchestrator(
+        wf,
+        runner_selector=FixedRunnerSelector(runner, provider_id=provider_id),
+    )
     orch._load_workflow(initial=True)
     tracker = FakeTracker()
     real_components = orch._components
@@ -333,19 +373,18 @@ async def test_stall_detection_terminates_and_retries(harness, monkeypatch):
     orch, tracker, runner, _ = harness
     # keep the retry entry observable (capped at 500ms) once teardown lands
     monkeypatch.setattr(scheduler_mod, "FAILURE_BASE_BACKOFF_MS", 10000)
+    # Execution policy is pinned when the runner is selected for dispatch.
+    wf = orch.workflow_path
+    wf.write_text(wf.read_text().replace("stall_timeout_ms: 0",
+                                         "stall_timeout_ms: 1000"))
+    orch._workflow_mtime = None
+    orch._load_workflow(initial=False)
     runner.hold = True
     tracker.candidates = [make_issue(1)]
     tracker.states = {"node-1": make_issue(1)}
     await orch._tick()
     entry = orch.running["node-1"]
     entry.started_at = datetime.now(UTC) - timedelta(hours=1)  # simulate silence
-
-    # enable stall detection: rewrite the workflow file and force a reload
-    wf = orch.workflow_path
-    wf.write_text(wf.read_text().replace("stall_timeout_ms: 0",
-                                         "stall_timeout_ms: 1000"))
-    orch._workflow_mtime = None
-    orch._load_workflow(initial=False)
 
     await orch._reconcile_running()
     assert "node-1" not in orch.running
@@ -537,18 +576,17 @@ async def test_stall_terminate_with_wedged_after_run_does_not_block_tick(
     # max_retry_backoff_ms) instead of the harness's 30ms
     monkeypatch.setattr(scheduler_mod, "FAILURE_BASE_BACKOFF_MS", 10000)
     hook_started, hook_release = _wedged_after_run(monkeypatch)
+    wf = orch.workflow_path
+    wf.write_text(wf.read_text().replace("stall_timeout_ms: 0",
+                                         "stall_timeout_ms: 1000"))
+    orch._workflow_mtime = None
+    orch._load_workflow(initial=False)
     runner.hold = True
     tracker.candidates = [make_issue(1)]
     tracker.states = {"node-1": make_issue(1)}
     await orch._tick()
     await wait_for(lambda: runner.turns)    # worker genuinely inside run_turn
     orch.running["node-1"].started_at = datetime.now(UTC) - timedelta(hours=1)
-
-    wf = orch.workflow_path
-    wf.write_text(wf.read_text().replace("stall_timeout_ms: 0",
-                                         "stall_timeout_ms: 1000"))
-    orch._workflow_mtime = None
-    orch._load_workflow(initial=False)
 
     loop = asyncio.get_event_loop()
     t0 = loop.time()
@@ -853,6 +891,149 @@ async def test_agent_token_requests_ttl_covering_the_turn(harness):
 
     # WORKFLOW_TMPL sets claude.turn_timeout_ms: 5000
     assert creds.min_ttls == [5.0]
+
+
+# --- Stage 5A Codex-only process canary --------------------------------------
+
+async def test_codex_mode_dispatches_continues_and_uses_codex_policy(
+    tmp_path,
+    monkeypatch,
+    capfd,
+):
+    tmpl = CODEX_WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 2")
+    runner = FakeRunner()
+    runner.provider_id = "codex"
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=tmpl,
+        runner=runner,
+        provider_id="codex",
+    )
+    creds = FakeCredsProvider()
+    orch._creds = creds
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(
+        lambda: not orch.running
+        and not orch.retry_attempts
+        and issue.id not in orch.claimed
+    )
+
+    assert len(runner.turns) == 2
+    assert runner.turns[0][1] is None
+    assert runner.turns[1][1] == "sess-1"
+    assert runner.turns[1][2] == CONTINUATION_PROMPT
+    assert runner.tokens == ["ghs-mint-1", "ghs-mint-2"]
+    assert creds.min_ttls == [7.0, 7.0]
+    err = capfd.readouterr().err
+    assert "provider_id=codex" in err
+    assert "worker completed" in err
+
+
+async def test_codex_mode_failure_retries_and_releases_claim(
+    tmp_path,
+    monkeypatch,
+    capfd,
+):
+    runner = FakeRunner()
+    runner.provider_id = "codex"
+
+    async def failing_turn(
+        workspace,
+        prompt,
+        resume_session_id,
+        on_event,
+        issue_id,
+        agent_token=None,
+    ):
+        return TurnResult(status="failed", error="codex canary failure")
+
+    runner.run_turn = failing_turn
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=CODEX_WORKFLOW_TMPL,
+        runner=runner,
+        provider_id="codex",
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.retry_attempts)
+    tracker.candidates = []
+    await wait_for(
+        lambda: issue.id not in orch.retry_attempts and issue.id not in orch.claimed
+    )
+
+    err = capfd.readouterr().err
+    assert "provider_id=codex" in err
+    assert "worker failed" in err
+
+
+async def test_codex_mode_enforces_capacity_and_cancels_terminal_worker(
+    tmp_path,
+    monkeypatch,
+):
+    tmpl = CODEX_WORKFLOW_TMPL.replace(
+        "max_concurrent_agents: 2",
+        "max_concurrent_agents: 1",
+    )
+    runner = FakeRunner(hold=True)
+    runner.provider_id = "codex"
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=tmpl,
+        runner=runner,
+        provider_id="codex",
+    )
+    first = make_issue(1)
+    second = make_issue(2)
+    tracker.candidates = [first, second]
+    tracker.states = {first.id: first, second.id: second}
+
+    await orch._tick()
+    assert list(orch.running) == [first.id]
+    assert orch.running[first.id].provider_id == "codex"
+
+    tracker.candidates = []
+    tracker.states[first.id] = make_issue(1, "closed")
+    await orch._reconcile_running()
+    assert first.id not in orch.running
+    await wait_for(lambda: first.id not in orch.claimed)
+
+
+async def test_codex_mode_parks_after_session_cap(tmp_path, monkeypatch):
+    tmpl = CODEX_WORKFLOW_TMPL.replace(
+        "max_sessions_per_issue: 2",
+        "max_sessions_per_issue: 1",
+    )
+    runner = FakeRunner()
+    runner.provider_id = "codex"
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=tmpl,
+        runner=runner,
+        provider_id="codex",
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.parked)
+
+    assert "status:parked" in issue.labels
+    assert issue.id not in orch.running
+    assert issue.id not in orch.claimed
 
 
 # --- claim-visibility labels (issue #14 / AgDR-010) ---------------------------

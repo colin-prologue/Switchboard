@@ -27,6 +27,9 @@ async def assert_success_contract(
     """Exercise the scheduler-facing success contract shared by all adapters."""
     assert isinstance(runner.provider_id, str)
     assert runner.provider_id == expected_provider_id
+    assert isinstance(runner.turn_timeout_ms, int)
+    assert isinstance(runner.stall_timeout_ms, int)
+    assert runner.max_budget_usd is None or isinstance(runner.max_budget_usd, float)
     # Adapter-specific options belong in constructor config; the scheduler call
     # shape stays identical across providers.
     assert list(inspect.signature(runner.run_turn).parameters) == [

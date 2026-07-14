@@ -25,6 +25,7 @@ from .types import (
     DEFAULT_WORKSPACE_ROOT,
     AgentConfig,
     ClaudeConfig,
+    CodexConfig,
     HooksConfig,
     TrackerConfig,
     WorkflowDefinition,
@@ -490,6 +491,89 @@ class Config:
             )
         return provider_cfg
 
+    def codex(self) -> CodexConfig:
+        """Return the strict Codex CLI config for the opt-in canary mode.
+
+        Codex has no legacy top-level form. Stage 5 accepts exactly one
+        provider per process so a workflow cannot imply mixed routing before
+        the scheduler has a policy for it.
+        """
+        providers = self._config.get("providers")
+        if not isinstance(providers, dict) or "codex" not in providers:
+            raise WorkflowError(
+                "missing_provider_config",
+                "providers.codex is required for Codex canary mode",
+            )
+
+        unsupported = [provider_id for provider_id in providers if provider_id != "codex"]
+        if unsupported:
+            raise WorkflowError(
+                "unsupported_provider_id",
+                "Codex canary mode accepts only providers.codex; found: "
+                f"{', '.join(sorted(map(str, unsupported)))}",
+            )
+
+        legacy_blocks = [name for name in ("claude", "codex") if name in self._config]
+        if legacy_blocks:
+            raise WorkflowError(
+                "unsupported_provider_id",
+                "Codex canary mode does not accept legacy execution blocks: "
+                f"{', '.join(legacy_blocks)}",
+            )
+
+        raw = providers["codex"]
+        if not isinstance(raw, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"providers.codex must be a map, got {type(raw).__name__}",
+            )
+
+        allowed = {
+            "kind",
+            "command",
+            "turn_timeout_ms",
+            "read_timeout_ms",
+            "stall_timeout_ms",
+        }
+        unknown = [key for key in raw if key not in allowed]
+        if unknown:
+            raise WorkflowError(
+                "workflow_parse_error",
+                "providers.codex contains unknown fields: "
+                f"{', '.join(sorted(map(str, unknown)))}",
+            )
+        if raw.get("kind") != "codex-cli":
+            raise WorkflowError(
+                "unsupported_provider_kind",
+                "providers.codex.kind must be 'codex-cli', "
+                f"got {raw.get('kind')!r}",
+            )
+
+        defaults = CodexConfig()
+        command = raw.get("command", defaults.command)
+        if not isinstance(command, str):
+            raise WorkflowError(
+                "workflow_parse_error",
+                "providers.codex.command must be a string, "
+                f"got {type(command).__name__}",
+            )
+
+        def _timeout(key: str, default: int) -> int:
+            value = raw.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    f"providers.codex.{key} must be an integer, got {value!r}",
+                )
+            return value
+
+        return CodexConfig(
+            command=command,
+            turn_timeout_ms=_timeout("turn_timeout_ms", defaults.turn_timeout_ms),
+            read_timeout_ms=_timeout("read_timeout_ms", defaults.read_timeout_ms),
+            stall_timeout_ms=_timeout("stall_timeout_ms", defaults.stall_timeout_ms),
+        )
+
 
 # --- credential provider construction (issue #10: GitHub App identity) -------
 
@@ -560,7 +644,7 @@ def build_credentials(
 
 # --- dispatch preflight validation (core §6.3, adapted per SPEC.md §2) -------
 
-def validate_dispatch(cfg: Config) -> None:
+def validate_dispatch(cfg: Config, *, provider_id: str = "claude") -> None:
     """Raise WorkflowError if config is unfit for a new dispatch cycle."""
     tracker = cfg.tracker()
 
@@ -594,9 +678,20 @@ def validate_dispatch(cfg: Config) -> None:
             f"tracker.repo must be shaped like owner/name, got {tracker.repo!r}",
         )
 
-    claude_cfg = cfg.claude()
-    if not claude_cfg.command.strip():
-        raise WorkflowError("workflow_parse_error", "claude.command must be non-empty")
+    if provider_id == "claude":
+        provider_cfg = cfg.claude()
+    elif provider_id == "codex":
+        provider_cfg = cfg.codex()
+    else:
+        raise WorkflowError(
+            "unsupported_provider_id",
+            f"unsupported runtime provider id: {provider_id!r}",
+        )
+    if not provider_cfg.command.strip():
+        raise WorkflowError(
+            "workflow_parse_error",
+            f"{provider_id}.command must be non-empty",
+        )
 
     # Force typed-getter validation now so invalid agent/hook/workspace/polling
     # values fail startup (§6.3) instead of surfacing as per-tick errors forever.

@@ -12,6 +12,9 @@ class AgentRunner(Protocol):
     """One provider adapter capable of executing a logical agent turn."""
 
     provider_id: str
+    turn_timeout_ms: int
+    stall_timeout_ms: int
+    max_budget_usd: float | None
 
     async def run_turn(
         self,
