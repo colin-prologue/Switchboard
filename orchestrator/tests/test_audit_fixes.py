@@ -177,7 +177,7 @@ async def test_broken_reload_blocks_dispatch(tmp_path):
             pass
 
     real = orch._components
-    orch._components = lambda: (T(), real()[1], real()[2])
+    orch._components = lambda: (T(), real()[1])
 
     await orch._tick()
     assert calls["fetch"] == 1  # healthy: dispatch path reached the tracker
@@ -215,7 +215,7 @@ async def test_conflicting_provider_reload_keeps_last_good_and_blocks_dispatch(
             return []
 
     real = orch._components
-    orch._components = lambda: (T(), real()[1], real()[2])
+    orch._components = lambda: (T(), real()[1])
 
     await orch._tick()
     assert calls["fetch"] == 1

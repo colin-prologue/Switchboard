@@ -181,6 +181,14 @@ class FakeRunner:
                           num_turns=1)
 
 
+class FixedRunnerSelector:
+    def __init__(self, runner):
+        self.runner = runner
+
+    def select(self, cfg, issue):
+        return self.runner
+
+
 WORKFLOW_TMPL = """---
 tracker:
   kind: github
@@ -215,15 +223,15 @@ def _build_harness(tmp_path, monkeypatch, workflow_tmpl=WORKFLOW_TMPL, runner=No
     wf = tmp_path / "WORKFLOW.md"
     wf.write_text(workflow_tmpl.format(ws_root=ws_root))
 
-    orch = Orchestrator(wf)
+    runner = runner if runner is not None else FakeRunner()
+    orch = Orchestrator(wf, runner_selector=FixedRunnerSelector(runner))
     orch._load_workflow(initial=True)
     tracker = FakeTracker()
-    runner = runner if runner is not None else FakeRunner()
     real_components = orch._components
 
     def fake_components():
-        _, wsm, _ = real_components()
-        return tracker, wsm, runner
+        _, wsm = real_components()
+        return tracker, wsm
 
     orch._components = fake_components
     return orch, tracker, runner, ws_root
@@ -680,6 +688,7 @@ async def test_multi_turn_continuation_resumes_session(tmp_path, monkeypatch, ca
     err = capfd.readouterr().err
     assert "worker completed" in err
     assert "worker failed" not in err
+    assert "provider_id=fake" in err
 
 
 async def test_budget_ceiling_ends_session_normally(tmp_path, monkeypatch, capfd):
@@ -773,8 +782,8 @@ async def test_components_share_one_credential_provider(tmp_path, monkeypatch):
         orch._http = client
         orch._build_creds()
         assert orch._creds is not None
-        t1, _, _ = orch._components()
-        t2, _, _ = orch._components()
+        t1, _ = orch._components()
+        t2, _ = orch._components()
         assert t1._creds is orch._creds
         assert t2._creds is orch._creds
     orch._http = None
