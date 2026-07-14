@@ -61,6 +61,9 @@ class CodexRunner:
 
     def __init__(self, cfg: CodexConfig) -> None:
         self.cfg = cfg
+        self.turn_timeout_ms = cfg.turn_timeout_ms
+        self.stall_timeout_ms = cfg.stall_timeout_ms
+        self.max_budget_usd: float | None = None
 
     def _build_argv(self, resume_session_id: str | None) -> list[str]:
         argv = shlex.split(self.cfg.command)

@@ -8,8 +8,12 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.codex_runner import CodexRunner
 from orchestrator.runner import ClaudeRunner
-from orchestrator.runner_selector import ClaudeOnlyRunnerSelector
+from orchestrator.runner_selector import (
+    ClaudeOnlyRunnerSelector,
+    CodexOnlyRunnerSelector,
+)
 from orchestrator.scheduler import Orchestrator
 from orchestrator.types import Issue, WorkflowDefinition
 from orchestrator.workflow import Config
@@ -54,11 +58,38 @@ def test_default_selector_constructs_only_claude(
         tmp_path,
     )
 
-    runner = ClaudeOnlyRunnerSelector().select(cfg, _issue())
+    selector = ClaudeOnlyRunnerSelector()
+    runner = selector.select(cfg, _issue())
 
+    assert selector.provider_id == "claude"
     assert isinstance(runner, ClaudeRunner)
     assert runner.provider_id == "claude"
     assert runner.cfg == cfg.claude()
+
+
+def test_codex_only_selector_constructs_only_codex(tmp_path: Path) -> None:
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "providers": {
+                    "codex": {
+                        "kind": "codex-cli",
+                        "command": "codex --sandbox workspace-write",
+                    }
+                }
+            },
+            prompt_template="prompt",
+        ),
+        tmp_path,
+    )
+
+    selector = CodexOnlyRunnerSelector()
+    runner = selector.select(cfg, _issue())
+
+    assert selector.provider_id == "codex"
+    assert isinstance(runner, CodexRunner)
+    assert runner.provider_id == "codex"
+    assert runner.cfg == cfg.codex()
 
 
 class _FakeRunner:
@@ -66,6 +97,8 @@ class _FakeRunner:
 
 
 class _RecordingSelector:
+    provider_id = "claude"
+
     def __init__(self, runner: _FakeRunner) -> None:
         self.runner = runner
         self.calls: list[tuple[Config, Issue]] = []
@@ -76,6 +109,8 @@ class _RecordingSelector:
 
 
 class _FailingSelector:
+    provider_id = "claude"
+
     def select(self, cfg: Config, issue: Issue) -> _FakeRunner:
         raise RuntimeError("selector unavailable")
 

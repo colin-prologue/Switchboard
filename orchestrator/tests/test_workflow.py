@@ -12,7 +12,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from orchestrator.types import ClaudeConfig, WorkflowDefinition, WorkflowError
+from orchestrator.types import (
+    ClaudeConfig,
+    CodexConfig,
+    WorkflowDefinition,
+    WorkflowError,
+)
 from orchestrator.workflow import Config, load_workflow, validate_dispatch
 
 
@@ -386,6 +391,88 @@ def test_providers_claude_parses_to_existing_typed_config(tmp_path: Path):
     )
 
 
+def test_providers_codex_parses_to_typed_config(tmp_path: Path):
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "providers": {
+                    "codex": {
+                        "kind": "codex-cli",
+                        "command": "codex --sandbox workspace-write",
+                        "turn_timeout_ms": 1234,
+                        "read_timeout_ms": 2345,
+                        "stall_timeout_ms": 3456,
+                    }
+                }
+            },
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    assert cfg.codex() == CodexConfig(
+        command="codex --sandbox workspace-write",
+        turn_timeout_ms=1234,
+        read_timeout_ms=2345,
+        stall_timeout_ms=3456,
+    )
+
+
+def test_providers_codex_uses_safe_adapter_defaults(tmp_path: Path):
+    cfg = Config(
+        WorkflowDefinition(
+            config={"providers": {"codex": {"kind": "codex-cli"}}},
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    assert cfg.codex() == CodexConfig()
+
+
+@pytest.mark.parametrize(
+    ("config", "error_code"),
+    [
+        ({"codex": {"command": "codex"}}, "missing_provider_config"),
+        (
+            {
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                }
+            },
+            "unsupported_provider_id",
+        ),
+        (
+            {
+                "claude": {"command": "claude -p"},
+                "providers": {"codex": {"kind": "codex-cli"}},
+            },
+            "unsupported_provider_id",
+        ),
+        (
+            {"providers": {"codex": {"kind": "openai-api"}}},
+            "unsupported_provider_kind",
+        ),
+        (
+            {"providers": {"codex": {"kind": "codex-cli", "unknown": 1}}},
+            "workflow_parse_error",
+        ),
+    ],
+)
+def test_codex_config_rejects_legacy_mixed_or_malformed_forms(
+    tmp_path: Path,
+    config: dict,
+    error_code: str,
+) -> None:
+    cfg = Config(WorkflowDefinition(config=config, prompt_template=""), tmp_path)
+
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.codex()
+
+    assert exc_info.value.code == error_code
+
+
 def test_equivalent_legacy_and_provider_claude_blocks_are_accepted(tmp_path: Path):
     defn = WorkflowDefinition(
         config={
@@ -521,6 +608,30 @@ def test_validate_dispatch_accepts_new_provider_envelope(tmp_path: Path):
     )
 
     validate_dispatch(Config(defn, tmp_path))
+
+
+def test_validate_dispatch_accepts_codex_only_when_explicitly_selected(
+    tmp_path: Path,
+) -> None:
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "tracker": {
+                    "kind": "github",
+                    "repo": "acme/widgets",
+                    "api_key": "literal-token",
+                },
+                "providers": {"codex": {"kind": "codex-cli"}},
+            },
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    validate_dispatch(cfg, provider_id="codex")
+    with pytest.raises(WorkflowError) as exc_info:
+        validate_dispatch(cfg)
+    assert exc_info.value.code == "unsupported_provider_id"
 
 
 # --- validate_dispatch() -----------------------------------------------------------
