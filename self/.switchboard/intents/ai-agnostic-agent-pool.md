@@ -23,7 +23,7 @@
 - **Last verified source commit:** Stage 5A implementation commit `2408749`,
   based on merged Stage 4 `main` at `330d5c9`.
 - **Last passing command:** `orchestrator/.venv/bin/python -m pytest -q` from
-  `orchestrator/` - 312 passed in 10.02s on 2026-07-13. Focused workflow,
+  `orchestrator/` - 312 passed in 10.58s on 2026-07-13. Focused workflow,
   selector, contract, CLI, and integration tests: 119 passed in 3.61s.
 - **Last end-to-end evidence:** issue #71 -> PR #72 ->
   `status:human-review`; CI `test` passed. The selector dispatched
@@ -334,8 +334,11 @@ Claude-only command and workflow behavior.
   refresh/TTL, provider logs, failure retry/release, capacity, terminal
   cancellation, and session-cap parking. Existing Claude integration coverage
   remains green.
+- `spec/SPEC.md` and AgDR-020 bind the explicit one-provider process mode,
+  runner-owned policy, dispatch-pinned stall deadline, separate-repository live
+  gate, and non-portability of the local `.git` probe.
 - Focused workflow + selector + runner-contract + CLI + integration tests passed
-  (119 tests in 3.61s). Full `orchestrator/tests` passed (312 tests in 10.02s).
+  (119 tests in 3.61s). Full `orchestrator/tests` passed (312 tests in 10.58s).
 - No project binding, registration script, GitHub repository, App installation,
   or production process changed. Mixed routing remains Stage 6 work.
 

@@ -20,7 +20,7 @@ Generate the orchestrator (Phase 1) by pointing Claude Code at this file **and**
 
 ---
 
-## 1. Execution binding — coding agent → Claude
+## 1. Execution binding — coding agent → CLI providers
 
 The core's agent-runner contract is normative on **message ordering and logical
 fields** (session id, completion state, approval handling, token/usage telemetry),
@@ -60,11 +60,11 @@ fields and defaults. During the dual-read migration (AgDR-017), either form may
 be used. If both are present, they must resolve to equal typed `ClaudeConfig`
 values; otherwise startup/reload fails with `conflicting_provider_config`
 instead of choosing one silently. A provider envelope must contain the canonical
-`claude` id with `kind: claude-cli`. Until another adapter is implemented, other
+`claude` id with `kind: claude-cli`. In the default Claude process mode, other
 provider ids and kinds fail validation rather than being ignored. The shipped
 workflow template remains on the legacy form to continuously exercise backward
-compatibility. Stage 2 introduced no provider selection; the Claude-only Stage
-3 boundary is specified below.
+compatibility. Stage 2 introduced no provider selection; the Stage 3 selection
+boundary and Stage 5 Codex opt-in are specified below.
 Provider-enveloped Claude settings are strict: unknown fields, malformed field
 types, and boolean `max_budget_usd` values fail parsing instead of falling back
 to defaults. Legacy coercions remain unchanged for compatibility. The workflow
@@ -75,23 +75,39 @@ remain supported.
 
 At dispatch, the scheduler selects one `AgentRunner` through an injected
 `AgentRunnerSelector(Config, Issue)` boundary (AgDR-018). The production
-selector remains Claude-only and returns `ClaudeRunner(cfg.claude())` for both
-configuration forms. Selection happens before claim or tracker mutation, once
-per worker session; all continuation turns in that session use the same runner
-instance. The selected provider id is retained on the running entry and emitted
-in worker lifecycle logs. Unsupported provider ids remain startup/reload errors;
-this boundary does not enable Codex, pooling, fallback, or issue overrides.
+default remains `ClaudeOnlyRunnerSelector`, which returns
+`ClaudeRunner(cfg.claude())` for both Claude configuration forms. Selection
+happens before claim or tracker mutation, once per worker session; all
+continuation turns in that session use the same runner instance. The selected
+provider id is retained on the running entry and emitted in worker lifecycle
+logs. Unsupported provider ids remain startup/reload errors.
 
-Stage 4 adds a standalone `CodexRunner` over the documented non-interactive
+Stage 4 added a standalone `CodexRunner` over the documented non-interactive
 `codex exec --json` stream (AgDR-019). It captures `thread.started` identity,
 normalizes terminal `turn.completed` / `turn.failed` events, and resumes with
 `codex exec resume <SESSION_ID>`. The default uses saved ChatGPT authentication,
 approval policy `never`, and the `workspace-write` sandbox; inline API-key
-environment overrides are removed from the child. This adapter is directly
-testable but is not accepted by workflow parsing and is not registered with
-`ClaudeOnlyRunnerSelector`. Therefore no production dispatch can select Codex.
-The safe sandbox may protect `.git` as read-only, so Codex ticket-to-PR handoff
-remains a Stage 5 design gate rather than an implied Stage 4 capability.
+environment overrides are removed from the child.
+
+Stage 5A makes that adapter dispatchable only through an explicit process mode
+(AgDR-020). `--provider codex` installs `CodexOnlyRunnerSelector`; omitting the
+flag still installs `ClaudeOnlyRunnerSelector`. A Codex process requires a
+strict, single-entry `providers.codex` map with `kind: codex-cli` and optional
+`command`, `turn_timeout_ms`, `read_timeout_ms`, and `stall_timeout_ms` fields.
+It rejects legacy execution blocks, mixed provider maps, unsupported kinds,
+unknown fields, and empty commands. A Claude process continues to accept only
+the legacy or provider-enveloped Claude forms described above. One workflow is
+therefore valid for one process provider; no weighting, fallback, per-issue
+override, or mixed selection exists.
+
+The provider-neutral runner contract owns `turn_timeout_ms`,
+`stall_timeout_ms`, and optional `max_budget_usd`. Token mint TTL and cumulative
+session budget use the selected runner's policy. `RunningEntry` captures the
+stall timeout at dispatch, so workflow reload affects later sessions without
+silently changing an in-flight session's deadline. Codex reports no dollar
+budget in subscription mode. The safe sandbox may protect `.git` as read-only;
+a successful local git probe is host evidence only, and Stage 5B must verify
+ticket-to-PR handoff in a separate canary repository before mixed-pool work.
 
 **Win over the Codex path:** `--max-budget-usd` gives an always-on orchestrator a
 hard per-run cost stop the original lacks. Budget is enforced at two layers:
