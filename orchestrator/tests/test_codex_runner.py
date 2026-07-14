@@ -97,6 +97,48 @@ async def test_success_normalizes_codex_jsonl(workspace: Path, monkeypatch) -> N
     ]
 
 
+async def test_success_captures_raw_jsonl_in_git_excluded_workspace_dir(
+    workspace: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "success")
+    git_dir = workspace / ".git" / "info"
+    git_dir.mkdir(parents=True)
+    (git_dir / "exclude").write_text(".DS_Store\n")
+
+    token = "ghs-transcript-must-not-contain-this"
+    result = await CodexRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-73", agent_token=token
+    )
+
+    assert result.status == "succeeded"
+    transcripts = list((workspace / ".run" / "transcripts").glob("codex-*.jsonl"))
+    assert len(transcripts) == 1
+    lines = transcripts[0].read_text().splitlines()
+    assert json.loads(lines[0])["type"] == "thread.started"
+    assert json.loads(lines[-1])["type"] == "turn.completed"
+    assert token not in transcripts[0].read_text()
+    assert ".run/" in (git_dir / "exclude").read_text().splitlines()
+
+
+async def test_transcript_capture_failure_does_not_change_turn_outcome(
+    workspace: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "success")
+
+    def cannot_open(*_args, **_kwargs):
+        raise OSError("no transcript disk")
+
+    monkeypatch.setattr("orchestrator.codex_runner._open_transcript", cannot_open)
+
+    result = await CodexRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-73"
+    )
+
+    assert result.status == "succeeded"
+
+
 async def test_fresh_and_resume_argv_and_stdin(
     workspace: Path, monkeypatch, tmp_path: Path
 ) -> None:
