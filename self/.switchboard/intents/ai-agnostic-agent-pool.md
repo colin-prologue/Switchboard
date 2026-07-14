@@ -1,35 +1,37 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 3 implementation and Claude canary complete on issue
-  #69 / PR #70, awaiting human review.
+- **Status:** active; Stage 4 standalone Codex adapter complete on issue #73,
+  awaiting PR CI and human review.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 3 - injectable scheduler at the human-review gate on
-  issue #69 / PR #70.
+- **Current stage:** Stage 4 - standalone Codex adapter implemented on issue #73;
+  production dispatch remains Claude-only.
 - **Production mode:** Claude-only. No Codex runner is dispatchable.
-- **What is enabled:** dual-read Claude configuration plus an injected
-  dispatch-time `AgentRunnerSelector`. The production selector still always
-  returns `ClaudeRunner`; shipped workflows remain on legacy `claude:`.
+- **What is enabled:** dual-read Claude configuration, injected runner selection,
+  and a directly testable `CodexRunner` over `codex exec --json`. The production
+  selector still always returns `ClaudeRunner`; shipped workflows remain legacy.
 - **What remains deliberately disabled:** Codex provider configuration and
   execution, pool selection, provider fallback, and mixed dispatch.
-- **Last verified source commit:** Stage 3 implementation commit `dd5278d`, based
-  on merged Stage 2 `main` at `548fa4a`.
+- **Last verified source commit:** Stage 4 implementation commit `cda3cf9`, based
+  on merged Stage 3 `main` at `6d18b04`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 282 passed in 10.21s on 2026-07-13. Focused Stage 3
-  selector/scheduler tests: 55 passed in 3.64s.
+  orchestrator/tests -q` - 297 passed in 9.56s on 2026-07-13. Focused Stage 4
+  adapter/contract/selector/workflow tests: 85 passed in 1.27s.
 - **Last end-to-end evidence:** issue #71 -> PR #72 ->
   `status:human-review`; CI `test` passed. The selector dispatched
   `provider_id=claude`, session `0efa3a2c-db48-45d0-83d8-a4f7f1be77b8`
   committed `e6d7d98`, and no workspace repair was needed.
-- **Next single task:** review and merge Stage 3 PR #70. PR #72 is the separate
-  docs-only canary artifact awaiting its own human disposition.
-- **Do not advance until:** PR #70 is merged and its branch is deleted. Keep the
-  long-running orchestrator stopped; Stage 4 starts from fresh merged `main`.
+- **Next single task:** push `codex/stage4-standalone-codex-adapter`, open the
+  issue #73 PR, and wait for CI before moving it to human review. PR #72 remains
+  a separate docs-only Stage 3 canary artifact.
+- **Do not advance until:** the Stage 4 PR is green, human-approved, and merged.
+  Stage 5 also requires a separate canary repository and an explicit safe git
+  handoff design; do not register Codex merely because the adapter exists.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -233,8 +235,8 @@ full suite pass.
 - AgDR-018 records dispatch-time selection and its boundary. Codex config,
   registration, pooling, fallback, and sticky cross-retry assignment remain
   disabled. Direct `cfg.claude()` policy reads are explicitly deferred debt.
-- Draft [PR #70](https://github.com/colin-prologue/Switchboard/pull/70) passed CI
-  before the canary launch.
+- [PR #70](https://github.com/colin-prologue/Switchboard/pull/70) passed CI and
+  the human gate, then merged as Stage 3 base `6d18b04`.
 - Manual canary [issue #71](https://github.com/colin-prologue/Switchboard/issues/71)
   was the only issue carrying temporary `canary:stage3`; a one-worker workflow
   required that label. The Stage 3 process logged `provider_id=claude`, started
@@ -259,6 +261,35 @@ registering Codex for dispatch.
 missing binary, credential environment, and process-group cleanup; shared
 runner contract; disposable local-repository smoke test; full suite. Production
 registry still cannot select Codex.
+
+**Working evidence (2026-07-13, base `6d18b04`, issue #73):**
+
+- Installed `codex-cli 0.144.0-alpha.4` reports `Logged in using ChatGPT`.
+  The current official manual and local help agree on `exec --json`,
+  `thread.started`, `item.*`, terminal turn events, and `exec resume`.
+- New adapter tests first failed at collection because `orchestrator.codex_runner`
+  did not exist. `CodexRunner` now launches directly with cwd fixed to the
+  workspace, prompt on stdin, a process group, bounded startup/turn deadlines,
+  and JSONL normalization into the shared `AgentRunner` contract.
+- `CodexConfig` defaults to approval policy `never`, `workspace-write`, and
+  workspace-write network access. Runs ignore user config but inherit saved
+  `CODEX_HOME` auth; `CODEX_API_KEY` and `OPENAI_API_KEY` are removed while a
+  per-turn GitHub token overlays only `GITHUB_TOKEN` and `GH_TOKEN`.
+- Fake-process coverage includes fresh success, resume argv/stdin, failed/error
+  events, malformed and non-object JSON, missing session, protocol EOF, missing
+  binary, startup/turn timeout, cancellation/process-group cleanup, stderr, and
+  credential environment. Codex passes the reusable runner success contract.
+- Focused adapter + contract + selector + workflow suites passed (85 tests in
+  1.27s). Full `orchestrator/tests` passed (297 tests in 9.56s).
+- Real subscription smoke passed in disposable git repository
+  `/tmp/switchboard-stage4-codex-smoke.gvEuVw`: fresh and resumed turns both
+  succeeded under session `019f5e05-d112-72e3-96a1-cea187a3b7f7`, producing
+  exactly the two requested lines in one untracked file and no other changes.
+- AgDR-019 records the non-registration boundary. Current `workspace-write` may
+  protect `.git`, so Stage 5 must externalize git handoff or add an independent
+  isolation layer; unrestricted local execution is not an acceptable shortcut.
+- `providers.codex` remains rejected, `ClaudeOnlyRunnerSelector` remains the
+  only production selector, and no shipped workflow changed.
 
 ### Stage 5 - Codex canary project
 
