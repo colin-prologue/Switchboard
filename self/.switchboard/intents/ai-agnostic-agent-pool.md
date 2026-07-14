@@ -1,16 +1,16 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 3 implementation complete on issue #69, awaiting CI,
-  a disposable Claude canary, and human review.
+- **Status:** active; Stage 3 implementation and Claude canary complete on issue
+  #69 / PR #70, awaiting human review.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 3 - injectable scheduler on issue #69. Implementation
-  is committed locally; PR and manual canary evidence are still pending.
+- **Current stage:** Stage 3 - injectable scheduler at the human-review gate on
+  issue #69 / PR #70.
 - **Production mode:** Claude-only. No Codex runner is dispatchable.
 - **What is enabled:** dual-read Claude configuration plus an injected
   dispatch-time `AgentRunnerSelector`. The production selector still always
@@ -22,14 +22,14 @@
 - **Last passing command:** `uv run --project orchestrator python -m pytest
   orchestrator/tests -q` - 282 passed in 10.21s on 2026-07-13. Focused Stage 3
   selector/scheduler tests: 55 passed in 3.64s.
-- **Last end-to-end evidence:** issue #62 -> PR #63 ->
-  `status:human-review`; CI `test` passed. The worker used Claude session
-  `7c58c430-8e39-4684-93f6-1436cf65408e` and needed no workspace repair.
-- **Next single task:** push `codex/stage3-injectable-scheduler`, open the issue
-  #69 PR, and wait for CI before starting the disposable Claude canary.
-- **Do not advance until:** the Stage 3 PR is green, one real Claude ticket
-  reaches PR/human-review without workspace repair, and a human merges it. Keep
-  the long-running orchestrator stopped outside that deliberate canary.
+- **Last end-to-end evidence:** issue #71 -> PR #72 ->
+  `status:human-review`; CI `test` passed. The selector dispatched
+  `provider_id=claude`, session `0efa3a2c-db48-45d0-83d8-a4f7f1be77b8`
+  committed `e6d7d98`, and no workspace repair was needed.
+- **Next single task:** review and merge Stage 3 PR #70. PR #72 is the separate
+  docs-only canary artifact awaiting its own human disposition.
+- **Do not advance until:** PR #70 is merged and its branch is deleted. Keep the
+  long-running orchestrator stopped; Stage 4 starts from fresh merged `main`.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -58,8 +58,9 @@ selection.
   retries use the same provider. A mid-run failure never silently hands a
   partially modified workspace to another provider.
 - **No mutating shadow run.** Claude and Codex never work the same issue or
-  workspace concurrently. Canary work uses synthetic tickets or a separate
-  project binding.
+  workspace concurrently. Canary work uses synthetic tickets in a separate
+  repository. A separate binding or required label against the same repository
+  isolates dispatch but not repo-wide startup reconciliation.
 - **Provider-specific safety, neutral invariants.** Each adapter may implement
   its own sandbox and approval mechanisms, while the orchestrator always fixes
   cwd to the issue workspace, injects credentials only into the subprocess
@@ -232,8 +233,22 @@ full suite pass.
 - AgDR-018 records dispatch-time selection and its boundary. Codex config,
   registration, pooling, fallback, and sticky cross-retry assignment remain
   disabled. Direct `cfg.claude()` policy reads are explicitly deferred debt.
-- Manual evidence is still pending: push/open the Stage 3 PR, wait for CI, then
-  run one disposable real-Claude issue through the normal PR handoff.
+- Draft [PR #70](https://github.com/colin-prologue/Switchboard/pull/70) passed CI
+  before the canary launch.
+- Manual canary [issue #71](https://github.com/colin-prologue/Switchboard/issues/71)
+  was the only issue carrying temporary `canary:stage3`; a one-worker workflow
+  required that label. The Stage 3 process logged `provider_id=claude`, started
+  session `0efa3a2c-db48-45d0-83d8-a4f7f1be77b8`, created a clean workspace,
+  committed `e6d7d98`, pushed `switchboard/issue-71`, and opened
+  [PR #72](https://github.com/colin-prologue/Switchboard/pull/72). The issue
+  reached `status:human-review`, PR CI passed, and the transcript was captured
+  under the workspace's `.run/transcripts/` directory. No repair was needed.
+- The required label isolated worker dispatch but not the startup sweep: startup
+  reconciliation reverted issue #69 from `status:in-progress` to `status:todo`
+  before #71 dispatched. No unrelated worker launched, #69 was restored
+  immediately, and the temporary label was deleted after clean shutdown. Future
+  provider canaries must use a separate repository because startup reconciliation
+  is intentionally repo-wide under the one-process-per-repo invariant.
 
 ### Stage 4 - Standalone Codex adapter
 
