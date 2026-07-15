@@ -1,30 +1,35 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 5A opt-in Codex-only process mode is ready for human
-  review on issue #75 and PR #76; CI run 69 passed.
+- **Status:** active; Stage 5B readiness is implemented on issue #77. PR #78's
+  Codex-template CI repair is locally verified and awaits its replacement CI run
+  and human review before any live Codex ticket is dispatched.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 5A - opt-in Codex-only process mode implemented on
-  issue #75; live GitHub canary provisioning is the separate Stage 5B gate.
+- **Current stage:** Stage 5B readiness - the private canary repository and App
+  access exist; transcript capture and the inert Codex-only binding, including
+  template-aware compose-drift verification, are in review.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
   a strict, Codex-only `providers.codex` workflow. Startup, hot reload,
   timeout/stall/budget policy, credentials, continuation, retry, cancellation,
-  capacity, parking, and lifecycle logs all use the selected runner.
+  capacity, parking, lifecycle logs, and raw JSONL transcript capture all use
+  the selected runner.
 - **What remains deliberately disabled:** mixed provider maps, weighted or
   per-issue selection, fallback, registration-script support, and any Codex
   process against an existing production repository.
-- **Last verified source commit:** Stage 5A code/spec head `1747be5`, based on
-  merged Stage 4 `main` at `330d5c9`.
+- **Last verified source commit:** Stage 5B readiness code `afa6c97`, based on
+  merged Stage 5A `main` at `7926a14`; an unpushed PR #78 repair adds the
+  declared `codex-canary` workflow-template guard.
 - **Last passing command:** `orchestrator/.venv/bin/python -m pytest -q` from
-  `orchestrator/` - 312 passed in 10.58s on 2026-07-13. Focused workflow,
-  selector, contract, CLI, and integration tests: 119 passed in 3.61s.
+  `orchestrator/` - 317 passed in 10.73s on 2026-07-14. Focused canary binding
+  and verifier tests: 3 passed in 0.25s; `bash scripts/verify-setup.sh` reported
+  zero failures.
 - **Last end-to-end evidence:** issue #71 -> PR #72 ->
   `status:human-review`; CI `test` passed. The selector dispatched
   `provider_id=claude`, session `0efa3a2c-db48-45d0-83d8-a4f7f1be77b8`
@@ -34,13 +39,15 @@
   `/tmp/switchboard-stage5-git-probe.HtYewt` (commit `0385556`, session
   `019f5e0e-1c7c-7001-9ad8-ee21c0382c05`). This is host evidence, not a
   portability guarantee; `.git` may be protected in other environments.
-- **Next single task:** review and merge
-  [PR #76](https://github.com/colin-prologue/Switchboard/pull/76), then delete
-  `codex/stage5-codex-canary`.
-- **Do not advance until:** the Stage 5A PR is green, human-approved, and
-  merged. Stage 5B then requires explicit operator confirmation of the new
-  canary repository's owner/name, visibility, and GitHub App installation. Do
-  not create that repository or point Codex at an existing project beforehand.
+- **Live canary infrastructure:** user-created
+  `colin-prologue/switchboard-codex-canary` is private and empty on `main`.
+  The host's ChatGPT Codex login is healthy, `gh` was re-authenticated, and a
+  read-only mint verified `switchboard-agent[bot]` can access the repository.
+- **Next single task:** push the PR #78 template-verifier repair, wait for green
+  CI and human review, then merge before seeding the external canary fixture.
+- **Do not dispatch until:** this readiness PR is green, human-approved, and
+  merged. Then seed only synthetic fixture code in the separate repository and
+  launch one foreground Codex worker; never point it at Switchboard itself.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -342,6 +349,8 @@ Claude-only command and workflow behavior.
   (119 tests in 3.61s). Full `orchestrator/tests` passed (312 tests in 10.58s).
 - No project binding, registration script, GitHub repository, App installation,
   or production process changed. Mixed routing remains Stage 6 work.
+- [PR #76](https://github.com/colin-prologue/Switchboard/pull/76) passed CI and
+  human review, merged as `7926a14`, and its branch was deleted.
 
 **Return-session test gate:** run the focused 119-test command first to restore
 context around the changed boundaries, then the full suite. Confirm a normal
@@ -371,6 +380,35 @@ one synthetic issue through PR handoff, continuation, failure retry, parking,
 credential refresh, transcript capture, restart recovery, and git writes under
 the deployed sandbox. Several tickets must finish without manual repair before
 Stage 6 planning starts.
+
+**Readiness evidence (2026-07-13, base `7926a14`, issue #77):**
+
+- The user created the private, empty repository
+  `colin-prologue/switchboard-codex-canary` with default branch `main`, added it
+  to the existing `switchboard-agent` App installation, and repaired host `gh`
+  authentication. A read-only installation-token mint then fetched the repo
+  successfully; no token was printed or persisted.
+- `CodexRunner` now records its raw `codex exec --json` stdout in a timestamped
+  workspace `.run/transcripts/codex-*.jsonl` file and adds `.run/` to the
+  workspace-local Git exclude. Opening or writing the transcript is best-effort
+  and cannot change the worker result. Tests prove terminal JSONL capture,
+  exclusion, no injected token in the captured fixture stream, and storage
+  failure preservation of a successful turn.
+- `projects/codex-canary/` is a checked-in but inert one-worker binding with a
+  strict `providers.codex` envelope, normal workspace hooks, and a Codex-specific
+  prompt that preserves PR/human-review handoff without Claude allowlist or
+  budget language. It is not generated by `register-project.sh`; provider-aware
+  registration remains deferred work.
+- PR #78 CI correctly rejected the initial binding because its compose-drift
+  check assumed every project used `workflow/WORKFLOW.base.md`. The repair makes
+  `SB_WORKFLOW_TEMPLATE=codex-canary` explicit, adds the canonical
+  `workflow/WORKFLOW.codex-canary.md`, and makes `verify-setup.sh` select only
+  allowlisted templates (`base` by default or `codex-canary`), rejecting unknown
+  template names and byte-for-byte drift. `register-project.sh` now records the
+  explicit `base` default for future normal projects.
+- Focused binding/verifier tests passed (3 in 0.25s); the full suite passed
+  (317 in 10.73s) on 2026-07-14. The external canary repository has not been
+  seeded or dispatched yet.
 
 ### Stage 6 - Mixed pool
 

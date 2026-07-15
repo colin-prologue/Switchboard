@@ -14,6 +14,7 @@ import shlex
 import signal
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 
 from .types import AgentEvent, CodexConfig, EventCallback, TurnResult
 
@@ -52,6 +53,42 @@ def _notification(message: dict) -> dict:
             text = item.get("command") if isinstance(item.get("command"), str) else ""
         payload["text"] = text[:NOTIFICATION_TEXT_CHARS]
     return payload
+
+
+def _open_transcript(workspace: Path, pid: int) -> BinaryIO | None:
+    """Open a local raw-JSONL transcript without making it git-visible.
+
+    Codex emits the ground-truth stream on stdout, so capture it while parsing
+    rather than relying on a provider-specific on-disk session layout. This is
+    best effort: an unavailable transcript path must never change turn outcome.
+    """
+    exclude = workspace / ".git" / "info" / "exclude"
+    if exclude.parent.is_dir():
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        if ".run/" not in existing.splitlines():
+            with exclude.open("a", encoding="utf-8") as handle:
+                handle.write(".run/\n")
+
+    directory = workspace / ".run" / "transcripts"
+    directory.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return (directory / f"codex-{timestamp}-{pid}.jsonl").open("ab")
+
+
+def _write_transcript(transcript: BinaryIO | None, line: bytes) -> BinaryIO | None:
+    """Append one raw output line, disabling only capture if storage fails."""
+    if transcript is None:
+        return None
+    try:
+        transcript.write(line)
+        transcript.flush()
+        return transcript
+    except OSError:
+        try:
+            transcript.close()
+        except OSError:
+            pass
+        return None
 
 
 class CodexRunner:
@@ -151,6 +188,10 @@ class CodexRunner:
 
         pid = proc.pid
         stderr_chunks: list[bytes] = []
+        try:
+            transcript = _open_transcript(workspace, pid)
+        except OSError:
+            transcript = None
 
         async def drain_stderr() -> None:
             assert proc.stderr is not None
@@ -250,6 +291,7 @@ class CodexRunner:
 
                 if not line:
                     break
+                transcript = _write_transcript(transcript, line)
                 first_line = False
                 raw = line.decode("utf-8", errors="replace").strip()
                 if not raw:
@@ -327,6 +369,11 @@ class CodexRunner:
             raise
         finally:
             await reap()
+            if transcript is not None:
+                try:
+                    transcript.close()
+                except OSError:
+                    pass
 
         if result is not None:
             return result

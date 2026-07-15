@@ -20,7 +20,7 @@ echo
 echo "Kit files:"
 KIT_OK=1
 for f in spec/SPEC.md spec/SPEC.core.md spec/PROVENANCE.md \
-         workflow/WORKFLOW.base.md methodology/METHODOLOGY.md \
+         workflow/WORKFLOW.base.md workflow/WORKFLOW.codex-canary.md methodology/METHODOLOGY.md \
          hooks/after_create.sh hooks/before_run.sh hooks/after_run.sh \
          scripts/register-project.sh scripts/run-project.sh scripts/list-projects.sh \
          scripts/new-ticket.sh scripts/verify-setup.sh deploy/switchboard@.service; do
@@ -89,25 +89,35 @@ for env in projects/*/project.env; do
     continue
   fi
   ok "project '$slug' registered"
-  # Drift check: recompose from the current base with this project's binding
-  # values and diff. A stale composed file silently drops base features (the
-  # triage pipeline was lost exactly this way) — placeholder-grepping can't
-  # see it.
-  if [ -f "$wf" ] && [ -f workflow/WORKFLOW.base.md ]; then
+  # Drift check: recompose from the declared, checked-in template with this
+  # project's binding values and diff. A stale composed file silently drops
+  # workflow features (the triage pipeline was lost exactly this way) —
+  # placeholder-grepping cannot see it. Base is the compatibility default;
+  # custom templates must be explicitly allowlisted here.
+  if [ -f "$wf" ]; then
     p_repo="$(sed -n 's/^SB_GITHUB_REPO=//p' "$env" | head -1)"
     p_wsroot="$(sed -n 's/^SB_WORKSPACE_ROOT=//p' "$env" | head -1)"
     p_conv="$(sed -n 's/^SB_CONVENTION_ROOT=//p' "$env" | head -1)"
+    p_template="$(sed -n 's/^SB_WORKFLOW_TEMPLATE=//p' "$env" | head -1)"
+    p_template="${p_template:-base}"
+    case "$p_template" in
+      base) template="workflow/WORKFLOW.base.md";;
+      codex-canary) template="workflow/WORKFLOW.codex-canary.md";;
+      *) fail "$slug: unknown SB_WORKFLOW_TEMPLATE '$p_template'"; continue;;
+    esac
     p_agents="$(sed -n 's/^  max_concurrent_agents: \([0-9][0-9]*\)$/\1/p' "$wf" | head -1)"
-    if [ -n "$p_repo" ] && [ -n "$p_wsroot" ] && [ -n "$p_agents" ]; then
+    if [ -n "$p_repo" ] && [ -n "$p_wsroot" ] && [ -n "$p_agents" ] && [ -f "$template" ]; then
       if ! sed -e "s|{{REPO}}|$p_repo|g" \
                -e "s|{{WORKSPACE_ROOT}}|$p_wsroot|g" \
                -e "s|{{MAX_AGENTS}}|$p_agents|g" \
                -e "s|{{CONVENTION_ROOT}}|$p_conv|g" \
-               workflow/WORKFLOW.base.md | diff -q - "$wf" >/dev/null 2>&1; then
-        fail "$slug: WORKFLOW.md drifted from workflow/WORKFLOW.base.md — re-run register-project.sh"
+               "$template" | diff -q - "$wf" >/dev/null 2>&1; then
+        fail "$slug: WORKFLOW.md drifted from $template — recompose it from the declared template"
       else
-        ok "$slug: WORKFLOW.md matches current base"
+        ok "$slug: WORKFLOW.md matches $template"
       fi
+    else
+      fail "$slug: incomplete binding or missing workflow template '$p_template'"
     fi
   fi
 done
