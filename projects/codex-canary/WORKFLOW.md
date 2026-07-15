@@ -44,7 +44,7 @@ Read the issue carefully, implement only its acceptance criteria, and run the
 repository's stated checks before handoff. For the initial fixture, use:
 
 ```bash
-python -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -v
 ```
 
 When the criteria pass, commit the scoped change, push the current branch, open
