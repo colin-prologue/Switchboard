@@ -2,8 +2,8 @@
 
 - **Slug:** `ai-agnostic-agent-pool`
 - **Status:** active; the first Stage 5B live Codex canary completed its
-  issue-to-PR handoff, and the continuation path is proven but blocked at the
-  managed agent sandbox's `.git` write boundary.
+  issue-to-PR handoff, and the continuation path is proven. The managed desktop
+  child profile blocks `.git`, while the native-terminal capability probe passes.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
@@ -11,8 +11,8 @@
 ## Resume here
 
 - **Current stage:** Stage 5B live canary - the first handoff and real resume
-  both ran. Further dispatch is paused pending a safe, reproducible way for the
-  managed Codex worker profile to write its own workspace `.git` directory.
+  both ran. The next controlled run must launch from a native macOS terminal to
+  resume issue #3's preserved workspace and prove the full Git handoff there.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
@@ -52,6 +52,13 @@
   the sandbox. The foreground process was stopped and an operator moved the
   issue to non-dispatchable `status:blocked`; preserve this workspace and do not
   manually commit its retained diff.
+- **Native-terminal capability probe:** from the macOS Terminal app, the bundled
+  ChatGPT Codex CLI ran with subscription login, `--ask-for-approval never`,
+  `--ignore-user-config`, and `--sandbox workspace-write` in disposable
+  `/private/tmp/switchboard-codex-git-probe.jFrtlq`. It committed `PROBE.md` as
+  `9d3bdba` (`codex git probe`) with no bypass or push. The desktop-managed child
+  profile remains unsuitable because it explicitly mounts `.git` read-only;
+  AgDR-022 adopts native-terminal launch for the isolated canary.
 - **Local git capability evidence:** a disposable Codex run under the merged
   `workspace-write` profile created and committed `handoff.txt` successfully in
   `/tmp/switchboard-stage5-git-probe.HtYewt` (commit `0385556`, session
@@ -65,14 +72,14 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PR #2 are merged. Standard gate-state labels are installed.
-- **Next single task:** investigate why this managed Codex worker session cannot
-  create `.git/index.lock` when the first canary and host-local probe could.
-  Validate any proposed environment change with a disposable, separate git
-  workspace before unblocking issue #3; do not bypass the sandbox or manually
-  repair its working tree.
-- **Do not dispatch until:** a safe, documented `.git` write capability is
-  reproduced in the same managed agent profile. Keep the orchestrator disabled
-  between each isolated test.
+- **Next single task:** add an explicit recovery clause to issue #3, return it
+  from `status:blocked` to `status:todo`, then start exactly one foreground
+  `--provider codex` process from the native macOS Terminal. It must reuse the
+  preserved dirty workspace, commit/push/open a PR, and reach human review.
+- **Do not dispatch until:** the operator launches from a native terminal with
+  `/Applications/ChatGPT.app/Contents/Resources` on `PATH`. Do not bypass the
+  sandbox or manually repair issue #3's working tree; keep the orchestrator
+  disabled between isolated tests.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -434,8 +441,8 @@ Stage 6 planning starts.
 - Focused binding/verifier tests passed (3 in 0.72s); the full suite passed
   (317 in 10.60s) on 2026-07-15. The external repository is seeded; issue #1
   completed a real Codex handoff to merged PR #2. Issue #3 proves a real
-  continuation but is intentionally blocked on its managed `.git` permission
-  failure, with its working tree and transcripts preserved as evidence.
+  continuation and remains intentionally blocked pending its native-terminal
+  restart recovery, with its working tree and transcripts preserved as evidence.
 
 ### Stage 6 - Mixed pool
 
