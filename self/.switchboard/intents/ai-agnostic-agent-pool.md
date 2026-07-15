@@ -10,9 +10,9 @@
 
 ## Resume here
 
-- **Current stage:** Stage 5B readiness - the private canary repository and App
-  access exist; transcript capture and the inert Codex-only binding, including
-  template-aware compose-drift verification, are in review.
+- **Current stage:** Stage 5B live canary setup - readiness PR #78 has merged;
+  the private fixture and first issue exist, while a `python3` prompt correction
+  is awaiting its own review before dispatch.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
@@ -23,9 +23,9 @@
 - **What remains deliberately disabled:** mixed provider maps, weighted or
   per-issue selection, fallback, registration-script support, and any Codex
   process against an existing production repository.
-- **Last verified source commit:** Stage 5B readiness code `afa6c97`, based on
-  merged Stage 5A `main` at `7926a14`; an unpushed PR #78 repair adds the
-  declared `codex-canary` workflow-template guard.
+- **Last verified source commit:** Stage 5B readiness and its template guard
+  merged as `a3cd66d`; the current unpushed branch corrects the canary test
+  command from `python` to the host-provided `python3`.
 - **Last passing command:** `orchestrator/.venv/bin/python -m pytest -q` from
   `orchestrator/` - 317 passed in 10.73s on 2026-07-14. Focused canary binding
   and verifier tests: 3 passed in 0.25s; `bash scripts/verify-setup.sh` reported
@@ -43,11 +43,17 @@
   `colin-prologue/switchboard-codex-canary` is private and empty on `main`.
   The host's ChatGPT Codex login is healthy, `gh` was re-authenticated, and a
   read-only mint verified `switchboard-agent[bot]` can access the repository.
-- **Next single task:** push the PR #78 template-verifier repair, wait for green
-  CI and human review, then merge before seeding the external canary fixture.
-- **Do not dispatch until:** this readiness PR is green, human-approved, and
-  merged. Then seed only synthetic fixture code in the separate repository and
-  launch one foreground Codex worker; never point it at Switchboard itself.
+- **External canary fixture:** seeded on `main` at `8bb83ca` with a
+  standard-library `greeting.py`, one passing unittest, and no dependencies.
+  [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
+  is the first pre-triaged `status:todo` ticket; it adds only `farewell` and
+  focused tests. Standard gate-state labels are installed.
+- **Next single task:** merge the `python3` prompt-correction PR, then launch
+  exactly one foreground `--provider codex` worker against the canary and watch
+  issue #1 through PR handoff. Never point it at Switchboard itself.
+- **Do not dispatch until:** the prompt-correction PR is green, human-approved,
+  and merged. The issue may remain `status:todo` while the orchestrator stays
+  disabled.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -407,8 +413,8 @@ Stage 6 planning starts.
   template names and byte-for-byte drift. `register-project.sh` now records the
   explicit `base` default for future normal projects.
 - Focused binding/verifier tests passed (3 in 0.25s); the full suite passed
-  (317 in 10.73s) on 2026-07-14. The external canary repository has not been
-  seeded or dispatched yet.
+  (317 in 10.73s) on 2026-07-14. The external repository is now seeded and
+  issue #1 is ready, but no Codex worker has been dispatched.
 
 ### Stage 6 - Mixed pool
 

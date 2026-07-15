@@ -32,6 +32,7 @@ def test_codex_canary_binding_is_strict_and_dispatchable(monkeypatch) -> None:
     assert cfg.tracker().repo == "colin-prologue/switchboard-codex-canary"
     assert cfg.agent().max_concurrent_agents == 1
     assert cfg.codex().command.startswith("codex --ask-for-approval never")
+    assert "python3 -m unittest discover -s tests -v" in definition.prompt_template
 
 
 def test_codex_canary_workflow_matches_its_declared_template() -> None:
