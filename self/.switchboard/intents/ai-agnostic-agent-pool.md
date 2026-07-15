@@ -1,18 +1,20 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; the first Stage 5B live Codex canary completed its
-  issue-to-PR handoff, and the continuation path is proven. The managed desktop
-  child profile blocks `.git`, while the native-terminal capability probe passes.
+- **Status:** active; Stage 5B has completed a first handoff plus a
+  continuation-and-restart recovery handoff. Canary PR #4 awaits human review;
+  the remaining scenarios are deliberate failure/retry, parking, and credential
+  refresh tests.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 5B live canary - the first handoff and real resume
-  both ran. The next controlled run must launch from a native macOS terminal to
-  resume issue #3's preserved workspace and prove the full Git handoff there.
+- **Current stage:** Stage 5B live canary - native-terminal restart recovery
+  completed issue #3's full Git handoff. Merge canary PR #4, then design one
+  bounded failure/retry-and-parking ticket; all future live workers still launch
+  from a native macOS terminal.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
@@ -23,8 +25,8 @@
 - **What remains deliberately disabled:** mixed provider maps, weighted or
   per-issue selection, fallback, registration-script support, and any Codex
   process against an existing production repository.
-- **Last verified source commit:** canary readiness, template guard, and the
-  explicit `python3` command merged as `7a97904`.
+- **Last verified source commit:** canary readiness, template guard, native
+  terminal launch boundary, and `python3` command merged as `8586624`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
   orchestrator/tests -q` - 317 passed in 10.60s on 2026-07-15. Focused canary
   binding/verifier tests passed (3 in 0.72s); `bash scripts/verify-setup.sh`
@@ -52,6 +54,21 @@
   the sandbox. The foreground process was stopped and an operator moved the
   issue to non-dispatchable `status:blocked`; preserve this workspace and do not
   manually commit its retained diff.
+- **Native restart recovery:** native-terminal launcher reused issue #3's
+  preserved dirty workspace without resetting it. The first native worker
+  session (`019f634c-2056-7fe0-bd88-0d1833ee7447`) exhausted its turn loop
+  while the issue remained active; a second session
+  (`019f634e-db6d-75e3-af6c-80a092809a4b`) committed `47bf7f4`, pushed
+  `switchboard/issue-3`, opened clean
+  [canary PR #4](https://github.com/colin-prologue/switchboard-codex-canary/pull/4),
+  and moved the issue to `status:human-review`. The final workspace is clean,
+  the continuation marker is absent, and its PR branch passes the five-test
+  standard-library suite. The launcher stopped the foreground process at handoff.
+  Twenty-one retained JSONL transcripts (247 records) preserve both the failed
+  desktop attempt and native recovery. Some native turns posted duplicate
+  blocker comments before the later successful handoff; treat that as an
+  operational observation to bound in the failure/parking scenario, not as a
+  reason to weaken the sandbox.
 - **Native-terminal capability probe:** from the macOS Terminal app, the bundled
   ChatGPT Codex CLI ran with subscription login, `--ask-for-approval never`,
   `--ignore-user-config`, and `--sandbox workspace-write` in disposable
@@ -72,14 +89,13 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PR #2 are merged. Standard gate-state labels are installed.
-- **Next single task:** add an explicit recovery clause to issue #3, return it
-  from `status:blocked` to `status:todo`, then start exactly one foreground
-  `--provider codex` process from the native macOS Terminal. It must reuse the
-  preserved dirty workspace, commit/push/open a PR, and reach human review.
-- **Do not dispatch until:** the operator launches from a native terminal with
-  `/Applications/ChatGPT.app/Contents/Resources` on `PATH`. Do not bypass the
-  sandbox or manually repair issue #3's working tree; keep the orchestrator
-  disabled between isolated tests.
+- **Next single task:** review and merge canary PR #4. Then create a synthetic,
+  pre-triaged ticket that deliberately produces a bounded failure and proves
+  retry/backoff plus session-cap parking without comment spam. Launch it only
+  from the native terminal and stop after its stated terminal evidence.
+- **Do not dispatch until:** canary PR #4 is human-approved and merged. Export
+  `/Applications/ChatGPT.app/Contents/Resources` onto `PATH`, do not bypass the
+  sandbox, and keep the orchestrator disabled between isolated tests.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -441,8 +457,8 @@ Stage 6 planning starts.
 - Focused binding/verifier tests passed (3 in 0.72s); the full suite passed
   (317 in 10.60s) on 2026-07-15. The external repository is seeded; issue #1
   completed a real Codex handoff to merged PR #2. Issue #3 proves a real
-  continuation and remains intentionally blocked pending its native-terminal
-  restart recovery, with its working tree and transcripts preserved as evidence.
+  continuation and native-terminal restart recovery, handing off to PR #4 with
+  its workspace clean and transcripts preserved as evidence.
 
 ### Stage 6 - Mixed pool
 
