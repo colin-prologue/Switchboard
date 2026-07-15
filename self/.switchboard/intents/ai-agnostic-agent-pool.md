@@ -2,16 +2,17 @@
 
 - **Slug:** `ai-agnostic-agent-pool`
 - **Status:** active; the first Stage 5B live Codex canary completed its
-  issue-to-PR handoff. Canary PR #2 now awaits human review and merge.
+  issue-to-PR handoff, and the continuation path is proven but blocked at the
+  managed agent sandbox's `.git` write boundary.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 5B live canary - the first foreground Codex worker
-  completed one scoped ticket and stopped at human review; do not dispatch the
-  next test until canary PR #2 has been reviewed and merged.
+- **Current stage:** Stage 5B live canary - the first handoff and real resume
+  both ran. Further dispatch is paused pending a safe, reproducible way for the
+  managed Codex worker profile to write its own workspace `.git` directory.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
@@ -37,6 +38,20 @@
   -s tests -v` (3 tests). A 23-line raw JSONL transcript exists under the
   workspace-local, git-excluded `.run/transcripts/`; the foreground process was
   then stopped, with no further work dispatched.
+- **Continuation evidence and blocker:** canary PR #2 merged as `c726fd0`.
+  [Canary issue #3](https://github.com/colin-prologue/switchboard-codex-canary/issues/3)
+  dispatched session `019f632c-9737-7e72-9e34-5e2e755b8524`. Its first turn
+  created only the git-excluded `.run/continuation-ready` marker and stopped;
+  the scheduler resumed it in a second Codex invocation (three raw transcripts,
+  36 JSONL lines total, including a final safe retry after the issue stayed
+  active). The resumed turn removed the marker, changed only `greeting.py` and
+  `tests/test_greeting.py`, and passed `python3 -m unittest discover -s tests
+  -v` (5 tests). It could not run `git add` because the managed workspace
+  profile rejected `.git/index.lock` with `Operation not permitted`; the bot
+  posted the blocker without committing, pushing, opening a PR, or weakening
+  the sandbox. The foreground process was stopped and an operator moved the
+  issue to non-dispatchable `status:blocked`; preserve this workspace and do not
+  manually commit its retained diff.
 - **Local git capability evidence:** a disposable Codex run under the merged
   `workspace-write` profile created and committed `handoff.txt` successfully in
   `/tmp/switchboard-stage5-git-probe.HtYewt` (commit `0385556`, session
@@ -49,14 +64,15 @@
 - **External canary fixture:** seeded on `main` at `8bb83ca` with a
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
-  is the first pre-triaged `status:todo` ticket; it adds only `farewell` and
-  focused tests. Standard gate-state labels are installed.
-- **Next single task:** review and merge canary PR #2. Then create a second
-  synthetic, pre-triaged ticket that deliberately requires a continuation; run
-  one foreground Codex worker and stop it at human review. Never point it at
-  Switchboard itself.
-- **Do not dispatch until:** canary PR #2 is human-approved and merged. Keep
-  the orchestrator disabled between each isolated test.
+  and PR #2 are merged. Standard gate-state labels are installed.
+- **Next single task:** investigate why this managed Codex worker session cannot
+  create `.git/index.lock` when the first canary and host-local probe could.
+  Validate any proposed environment change with a disposable, separate git
+  workspace before unblocking issue #3; do not bypass the sandbox or manually
+  repair its working tree.
+- **Do not dispatch until:** a safe, documented `.git` write capability is
+  reproduced in the same managed agent profile. Keep the orchestrator disabled
+  between each isolated test.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -417,7 +433,9 @@ Stage 6 planning starts.
   explicit `base` default for future normal projects.
 - Focused binding/verifier tests passed (3 in 0.72s); the full suite passed
   (317 in 10.60s) on 2026-07-15. The external repository is seeded; issue #1
-  completed a real Codex handoff to PR #2, which remains awaiting human review.
+  completed a real Codex handoff to merged PR #2. Issue #3 proves a real
+  continuation but is intentionally blocked on its managed `.git` permission
+  failure, with its working tree and transcripts preserved as evidence.
 
 ### Stage 6 - Mixed pool
 
