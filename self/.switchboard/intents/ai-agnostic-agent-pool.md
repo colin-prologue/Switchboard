@@ -1,18 +1,17 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 5B readiness is implemented on issue #77. PR #78's
-  Codex-template CI repair is locally verified and awaits its replacement CI run
-  and human review before any live Codex ticket is dispatched.
+- **Status:** active; the first Stage 5B live Codex canary completed its
+  issue-to-PR handoff. Canary PR #2 now awaits human review and merge.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 5B live canary setup - readiness PR #78 has merged;
-  the private fixture and first issue exist, while a `python3` prompt correction
-  is awaiting its own review before dispatch.
+- **Current stage:** Stage 5B live canary - the first foreground Codex worker
+  completed one scoped ticket and stopped at human review; do not dispatch the
+  next test until canary PR #2 has been reviewed and merged.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
@@ -23,37 +22,41 @@
 - **What remains deliberately disabled:** mixed provider maps, weighted or
   per-issue selection, fallback, registration-script support, and any Codex
   process against an existing production repository.
-- **Last verified source commit:** Stage 5B readiness and its template guard
-  merged as `a3cd66d`; the current unpushed branch corrects the canary test
-  command from `python` to the host-provided `python3`.
-- **Last passing command:** `orchestrator/.venv/bin/python -m pytest -q` from
-  `orchestrator/` - 317 passed in 10.73s on 2026-07-14. Focused canary binding
-  and verifier tests: 3 passed in 0.25s; `bash scripts/verify-setup.sh` reported
-  zero failures.
-- **Last end-to-end evidence:** issue #71 -> PR #72 ->
-  `status:human-review`; CI `test` passed. The selector dispatched
-  `provider_id=claude`, session `0efa3a2c-db48-45d0-83d8-a4f7f1be77b8`
-  committed `e6d7d98`, and no workspace repair was needed.
+- **Last verified source commit:** canary readiness, template guard, and the
+  explicit `python3` command merged as `7a97904`.
+- **Last passing command:** `uv run --project orchestrator python -m pytest
+  orchestrator/tests -q` - 317 passed in 10.60s on 2026-07-15. Focused canary
+  binding/verifier tests passed (3 in 0.72s); `bash scripts/verify-setup.sh`
+  reported zero failures.
+- **Last end-to-end evidence:** [canary issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
+  dispatched as `provider_id=codex`, session `019f6325-7419-75e0-b33d-13dbba7407c0`,
+  reached `status:human-review`, and opened clean
+  [canary PR #2](https://github.com/colin-prologue/switchboard-codex-canary/pull/2).
+  The App bot committed `a6130c5`; its branch changes only `greeting.py` and
+  `tests/test_greeting.py`. The PR branch passes `python3 -m unittest discover
+  -s tests -v` (3 tests). A 23-line raw JSONL transcript exists under the
+  workspace-local, git-excluded `.run/transcripts/`; the foreground process was
+  then stopped, with no further work dispatched.
 - **Local git capability evidence:** a disposable Codex run under the merged
   `workspace-write` profile created and committed `handoff.txt` successfully in
   `/tmp/switchboard-stage5-git-probe.HtYewt` (commit `0385556`, session
   `019f5e0e-1c7c-7001-9ad8-ee21c0382c05`). This is host evidence, not a
   portability guarantee; `.git` may be protected in other environments.
 - **Live canary infrastructure:** user-created
-  `colin-prologue/switchboard-codex-canary` is private and empty on `main`.
-  The host's ChatGPT Codex login is healthy, `gh` was re-authenticated, and a
-  read-only mint verified `switchboard-agent[bot]` can access the repository.
+  `colin-prologue/switchboard-codex-canary` is private. The host's ChatGPT
+  Codex login is healthy, `gh` was re-authenticated, and a read-only mint
+  verified `switchboard-agent[bot]` can access the repository.
 - **External canary fixture:** seeded on `main` at `8bb83ca` with a
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   is the first pre-triaged `status:todo` ticket; it adds only `farewell` and
   focused tests. Standard gate-state labels are installed.
-- **Next single task:** merge the `python3` prompt-correction PR, then launch
-  exactly one foreground `--provider codex` worker against the canary and watch
-  issue #1 through PR handoff. Never point it at Switchboard itself.
-- **Do not dispatch until:** the prompt-correction PR is green, human-approved,
-  and merged. The issue may remain `status:todo` while the orchestrator stays
-  disabled.
+- **Next single task:** review and merge canary PR #2. Then create a second
+  synthetic, pre-triaged ticket that deliberately requires a continuation; run
+  one foreground Codex worker and stop it at human review. Never point it at
+  Switchboard itself.
+- **Do not dispatch until:** canary PR #2 is human-approved and merged. Keep
+  the orchestrator disabled between each isolated test.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -412,9 +415,9 @@ Stage 6 planning starts.
   allowlisted templates (`base` by default or `codex-canary`), rejecting unknown
   template names and byte-for-byte drift. `register-project.sh` now records the
   explicit `base` default for future normal projects.
-- Focused binding/verifier tests passed (3 in 0.25s); the full suite passed
-  (317 in 10.73s) on 2026-07-14. The external repository is now seeded and
-  issue #1 is ready, but no Codex worker has been dispatched.
+- Focused binding/verifier tests passed (3 in 0.72s); the full suite passed
+  (317 in 10.60s) on 2026-07-15. The external repository is seeded; issue #1
+  completed a real Codex handoff to PR #2, which remains awaiting human review.
 
 ### Stage 6 - Mixed pool
 
