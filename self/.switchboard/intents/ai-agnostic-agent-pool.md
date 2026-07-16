@@ -1,20 +1,18 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 5B has completed a first handoff plus a
-  continuation-and-restart recovery handoff. Canary PR #4 awaits human review;
-  the remaining scenarios are deliberate failure/retry, parking, and credential
-  refresh tests.
+- **Status:** active; Stage 5B has completed a first handoff,
+  continuation-and-restart recovery, and deterministic startup-failure
+  retry/parking evidence. The remaining live scenario is credential refresh.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 5B live canary - native-terminal restart recovery
-  completed issue #3's full Git handoff. Merge canary PR #4, then design one
-  bounded failure/retry-and-parking ticket; all future live workers still launch
-  from a native macOS terminal.
+- **Current stage:** Stage 5B live canary - all worker lifecycle and bounded
+  failure/parking scenarios have passed. Design one isolated credential-refresh
+  test next; all future live workers still launch from a native macOS terminal.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
@@ -25,10 +23,9 @@
 - **What remains deliberately disabled:** mixed provider maps, weighted or
   per-issue selection, fallback, registration-script support, and any Codex
   process against an existing production repository.
-- **Last verified source commit:** canary readiness, template guard, native
-  terminal launch boundary, and `python3` command merged as `8586624`.
+- **Last verified source commit:** native recovery evidence merged as `8d7a2b0`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 317 passed in 10.60s on 2026-07-15. Focused canary
+  orchestrator/tests -q` - 317 passed in 12.24s on 2026-07-16. Focused canary
   binding/verifier tests passed (3 in 0.72s); `bash scripts/verify-setup.sh`
   reported zero failures.
 - **Last end-to-end evidence:** [canary issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
@@ -61,7 +58,8 @@
   (`019f634e-db6d-75e3-af6c-80a092809a4b`) committed `47bf7f4`, pushed
   `switchboard/issue-3`, opened clean
   [canary PR #4](https://github.com/colin-prologue/switchboard-codex-canary/pull/4),
-  and moved the issue to `status:human-review`. The final workspace is clean,
+  and moved the issue to `status:human-review`. PR #4 was subsequently merged
+  as `c30ff5e`. The final workspace is clean,
   the continuation marker is absent, and its PR branch passes the five-test
   standard-library suite. The launcher stopped the foreground process at handoff.
   Twenty-one retained JSONL transcripts (247 records) preserve both the failed
@@ -69,6 +67,23 @@
   blocker comments before the later successful handoff; treat that as an
   operational observation to bound in the failure/parking scenario, not as a
   reason to weaken the sandbox.
+- **Failure/retry/parking evidence:** [canary issue #7](https://github.com/colin-prologue/switchboard-codex-canary/issues/7)
+  started from an absent workspace using a temporary native-terminal workflow
+  whose `providers.codex.command` named an intentionally nonexistent executable.
+  `after_create` cloned the fixture and `before_run` prepared the issue branch;
+  all three sessions then failed as `codex_not_found` at 16:34:01, 16:34:13,
+  and 16:34:35 UTC on 2026-07-16. The scheduler retried after 10 seconds and
+  20 seconds, then parked the fourth dispatch decision after the 40-second cap
+  retry. The issue has durable `status:parked`, no `status:in-progress`, and
+  one bot parking comment; its preserved workspace is clean and no pull request
+  exists. The launcher stopped the foreground process after validation.
+- **Rejected launcher attempts:** issues #5 and #6 are intentionally preserved
+  at `status:parked` but are not runner-level evidence. #5 omitted exported
+  `SB_HOME`, so the hook path resolved to `/hooks/before_run.sh`; #6 created
+  `.run` before launch, making the workspace look pre-existing and skipping
+  `after_create`. Both still demonstrated bounded retries and parking without
+  source changes, and led to the #7 launcher guard that refuses a pre-existing
+  workspace.
 - **Native-terminal capability probe:** from the macOS Terminal app, the bundled
   ChatGPT Codex CLI ran with subscription login, `--ask-for-approval never`,
   `--ignore-user-config`, and `--sandbox workspace-write` in disposable
@@ -88,12 +103,14 @@
 - **External canary fixture:** seeded on `main` at `8bb83ca` with a
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
-  and PR #2 are merged. Standard gate-state labels are installed.
-- **Next single task:** review and merge canary PR #4. Then create a synthetic,
-  pre-triaged ticket that deliberately produces a bounded failure and proves
-  retry/backoff plus session-cap parking without comment spam. Launch it only
-  from the native terminal and stop after its stated terminal evidence.
-- **Do not dispatch until:** canary PR #4 is human-approved and merged. Export
+  and PRs #2 and #4 are merged. Standard gate-state labels are installed.
+- **Next single task:** define a bounded credential-refresh canary that proves
+  the GitHub App token mint/cache boundary is safe during a native Codex worker
+  session or an equivalent deterministic worker path. It must keep subscription
+  authentication separate, use a synthetic ticket, leave #7 parked, and stop
+  at named evidence without dispatching real project work.
+- **Do not dispatch until:** the credential-refresh acceptance criteria and
+  operator stop condition are written. Export
   `/Applications/ChatGPT.app/Contents/Resources` onto `PATH`, do not bypass the
   sandbox, and keep the orchestrator disabled between isolated tests.
 
