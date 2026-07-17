@@ -35,8 +35,8 @@
 - **Last verified source commit:** Stage 6 Slice 1 merged as `ab7386e`; Slice 2
   is review-ready on `codex/stage6-durable-assignment`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 334 passed in 10.53s on 2026-07-17. Focused
-  workflow/CLI/selector tests passed (96 in 0.54s).
+  orchestrator/tests -q` - 335 passed in 11.02s on 2026-07-17. Focused
+  workflow/CLI/selector tests passed (97 in 0.57s).
 - **Stage 6 Slice 2 verification:** label precedence, SHA-256 bucketing,
   conflict refusal, pre-claim assignment-write ordering, failed-write refusal,
   and reuse of a persisted assignment all have focused tests. The full suite
@@ -545,10 +545,12 @@ canary rollout.
   claim. A newly selected assignment is written before `status:in-progress`;
   a failed assignment write leaves the issue unclaimed and has no workspace or
   worker side effect.
+- The scheduler reserves an issue in memory while awaiting a new assignment
+  write, preventing a concurrent poll or retry from starting duplicate work.
 - A fresh selector instance reuses an existing durable assignment even if the
   current default weights favor the other provider. Per-provider capacity and
   full retry/reload stickiness are intentionally Slice 3 work.
-- Focused tests passed (96) and the full suite passed (334). Slice 3 starts
+- Focused tests passed (97) and the full suite passed (335). Slice 3 starts
   only after this review branch merges.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,

@@ -449,7 +449,18 @@ class Orchestrator:
         provider_id = runner.provider_id
         if self._runner_selector.provider_id == "mixed" \
                 and f"provider:{provider_id}" not in issue.labels:
-            if not await self._persist_provider_assignment(issue, provider_id):
+            # The durable tracker assignment must precede the visible status
+            # claim, but its write awaits I/O. Reserve the issue locally across
+            # that await so a poll tick or retry timer cannot start a second
+            # worker for the same workspace meanwhile.
+            self.claimed.add(issue.id)
+            try:
+                assigned = await self._persist_provider_assignment(issue, provider_id)
+            except BaseException:
+                self.claimed.discard(issue.id)
+                raise
+            if not assigned:
+                self.claimed.discard(issue.id)
                 return
 
         # Claim before any await so a concurrent tick/retry timer cannot

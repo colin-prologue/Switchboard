@@ -251,6 +251,19 @@ class _LabelTracker:
         self.operations.append(("remove", tuple(labels)))
 
 
+class _BlockingAssignmentTracker(_LabelTracker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.assignment_started = asyncio.Event()
+        self.release_assignment = asyncio.Event()
+
+    async def add_labels(self, issue_id: str, labels: list[str]) -> None:
+        await super().add_labels(issue_id, labels)
+        if labels[0].startswith("provider:"):
+            self.assignment_started.set()
+            await self.release_assignment.wait()
+
+
 async def test_mixed_dispatch_persists_assignment_before_status_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -309,6 +322,39 @@ async def test_mixed_assignment_write_failure_leaves_issue_unclaimed(
     assert issue.id not in orchestrator.running
     assert "provider:claude" not in issue.labels
     assert "provider:codex" not in issue.labels
+
+
+async def test_mixed_assignment_write_reserves_issue_before_awaiting_tracker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("prompt")
+    orchestrator = Orchestrator(
+        workflow_path,
+        runner_selector=MixedRunnerSelector(),
+    )
+    orchestrator._cfg = _mixed_config(tmp_path)
+    issue = _issue()
+    tracker = _BlockingAssignmentTracker()
+    blocker = asyncio.Event()
+
+    async def _hold_worker(*args, **kwargs) -> None:
+        await blocker.wait()
+
+    monkeypatch.setattr(orchestrator, "_components", lambda: (tracker, None))
+    monkeypatch.setattr(orchestrator, "_worker", _hold_worker)
+    dispatch = asyncio.create_task(orchestrator._dispatch(issue, attempt=1))
+
+    await tracker.assignment_started.wait()
+
+    assert issue.id in orchestrator.claimed
+    assert not orchestrator._should_dispatch(issue)
+
+    tracker.release_assignment.set()
+    await dispatch
+    orchestrator.running[issue.id].task.cancel()
+    await asyncio.gather(orchestrator.running[issue.id].task, return_exceptions=True)
 
 
 async def test_mixed_dispatch_reuses_existing_assignment_without_a_second_write(
