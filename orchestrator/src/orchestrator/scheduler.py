@@ -29,7 +29,11 @@ import httpx
 from .agent_runner import AgentRunner
 from .log import log
 from .prompt import render_prompt
-from .runner_selector import AgentRunnerSelector, ClaudeOnlyRunnerSelector
+from .runner_selector import (
+    AgentRunnerSelector,
+    ClaudeOnlyRunnerSelector,
+    MixedDispatchUnavailable,
+)
 from .tracker import GitHubTracker
 from .transitions import load_requires_marker
 from .types import (
@@ -239,6 +243,14 @@ class Orchestrator:
         log("orchestrator starting", workflow=str(self.workflow_path),
             repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()))
 
+        # Stage 6 Slice 1 accepts mixed configuration before its routing policy
+        # exists. Exit immediately after startup validation: reconciliation can
+        # write tracker state or remove workspaces, and a validation-only mode
+        # must not observe or mutate a real board.
+        if self._runner_selector.provider_id == "mixed":
+            log("mixed configuration validated; exiting without reconciliation or dispatch")
+            return
+
         self._http = httpx.AsyncClient(timeout=30.0)  # core §11.2 network timeout
         self._build_creds()  # WorkflowError (bad key file) aborts startup (§6.3)
         try:
@@ -415,6 +427,17 @@ class Orchestrator:
     async def _dispatch(self, issue: Issue, attempt: int | None) -> None:
         cfg = self._cfg
         assert cfg is not None
+        # Slice 1 mixed mode is validation-only. Its selector must run before
+        # every guard below because some guards can post a diagnostic or park
+        # an issue. Until Slice 2 owns durable assignment, mixed mode leaves
+        # every issue completely untouched.
+        try:
+            runner = self._select_runner(issue)
+        except MixedDispatchUnavailable as exc:
+            log("mixed dispatch disabled; leaving issue untouched",
+                issue_id=issue.id, issue_identifier=issue.identifier, error=str(exc))
+            return
+
         # Config-driven dispatch guard (issue #29 / AgDR-011): refuse to claim an
         # issue whose current state requires a provenance marker it lacks (e.g. a
         # `status:todo` that never passed triage, so it carries no triage marker).
@@ -435,9 +458,6 @@ class Orchestrator:
             await self._park(issue, f"session cap reached ({spent}/{cap})")
             return
 
-        # Select before claiming or writing tracker state. A selector failure
-        # must leave the issue untouched so a later tick can retry safely.
-        runner = self._select_runner(issue)
         provider_id = runner.provider_id
 
         # Claim before any await so a concurrent tick/retry timer cannot

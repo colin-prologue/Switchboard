@@ -15,6 +15,7 @@ import pytest
 from orchestrator.types import (
     ClaudeConfig,
     CodexConfig,
+    MixedExecutionConfig,
     WorkflowDefinition,
     WorkflowError,
 )
@@ -632,6 +633,137 @@ def test_validate_dispatch_accepts_codex_only_when_explicitly_selected(
     with pytest.raises(WorkflowError) as exc_info:
         validate_dispatch(cfg)
     assert exc_info.value.code == "unsupported_provider_id"
+
+
+def test_mixed_mode_parses_complete_envelope_and_validates_dispatch(
+    tmp_path: Path,
+) -> None:
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "tracker": {
+                    "kind": "github",
+                    "repo": "acme/widgets",
+                    "api_key": "literal-token",
+                },
+                "agent": {
+                    "max_concurrent_agents": 4,
+                    "max_concurrent_agents_by_provider": {
+                        "claude": 4,
+                        "codex": 1,
+                    },
+                },
+                "providers": {
+                    "claude": {"kind": "claude-cli", "command": "claude -p"},
+                    "codex": {"kind": "codex-cli", "command": "codex"},
+                },
+                "routing": {"weights": {"claude": 100, "codex": 0}},
+            },
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    mixed = cfg.mixed()
+
+    assert mixed == MixedExecutionConfig(
+        claude=ClaudeConfig(command="claude -p", max_turns=20, max_budget_usd=None,
+                            turn_timeout_ms=3600000, read_timeout_ms=5000,
+                            stall_timeout_ms=300000),
+        codex=CodexConfig(command="codex"),
+        weights={"claude": 100, "codex": 0},
+        max_concurrent_agents_by_provider={"claude": 4, "codex": 1},
+    )
+    validate_dispatch(cfg, provider_id="mixed")
+
+
+def test_mixed_mode_uses_global_cap_when_provider_caps_are_omitted(
+    tmp_path: Path,
+) -> None:
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                },
+                "routing": {"weights": {"claude": 1, "codex": 1}},
+            },
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    assert cfg.mixed().max_concurrent_agents_by_provider == {}
+
+
+@pytest.mark.parametrize(
+    ("config", "error_code"),
+    [
+        (
+            {
+                "providers": {"claude": {"kind": "claude-cli"}},
+                "routing": {"weights": {"claude": 1, "codex": 1}},
+            },
+            "missing_provider_config",
+        ),
+        (
+            {
+                "claude": {"command": "claude -p"},
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                },
+                "routing": {"weights": {"claude": 1, "codex": 1}},
+            },
+            "unsupported_provider_id",
+        ),
+        (
+            {
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                },
+            },
+            "missing_routing_config",
+        ),
+        (
+            {
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                },
+                "routing": {"weights": {"claude": 0, "codex": 0}},
+            },
+            "workflow_parse_error",
+        ),
+        (
+            {
+                "agent": {
+                    "max_concurrent_agents": 2,
+                    "max_concurrent_agents_by_provider": {"codex": 3},
+                },
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                },
+                "routing": {"weights": {"claude": 1, "codex": 1}},
+            },
+            "workflow_parse_error",
+        ),
+    ],
+)
+def test_mixed_mode_rejects_incomplete_or_unsafe_config(
+    tmp_path: Path,
+    config: dict,
+    error_code: str,
+) -> None:
+    cfg = Config(WorkflowDefinition(config=config, prompt_template=""), tmp_path)
+
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.mixed()
+
+    assert exc_info.value.code == error_code
 
 
 # --- validate_dispatch() -----------------------------------------------------------
