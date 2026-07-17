@@ -11,9 +11,10 @@
 
 ## Resume here
 
-- **Current stage:** Stage 6 planning - define an explicit, deterministic
-  routing policy and test matrix before enabling any mixed-provider process.
-  Stage 5B live workers launched only from a native macOS terminal.
+- **Current stage:** Stage 6 planning - proposed routing policy is
+  [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md). Obtain
+  human approval before implementing its schema/CLI boundary; Stage 5B live
+  workers launched only from a native macOS terminal.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
@@ -24,10 +25,10 @@
 - **What remains deliberately disabled:** mixed provider maps, weighted or
   per-issue selection, fallback, registration-script support, and any Codex
   process against an existing production repository.
-- **Last verified source commit:** Stage 5B failure/parking evidence merged as
-  `7f2edfc`.
+- **Last verified source commit:** Stage 5B completion evidence merged as
+  `d51dca8`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 317 passed in 12.01s on 2026-07-16. Focused canary
+  orchestrator/tests -q` - 317 passed in 12.91s on 2026-07-17. Focused canary
   binding/verifier tests passed (3 in 0.72s); `bash scripts/verify-setup.sh`
   reported zero failures.
 - **Last end-to-end evidence:** [canary issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
@@ -124,14 +125,10 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** write the Stage 6 routing-policy decision and test plan:
-  one explicit provider assignment per issue, provider-specific concurrency
-  limits, sticky retry/continuation assignment, an unavailable-provider path,
-  and a rollback that restores the existing Claude-only launch. Do not add mixed
-  dispatch until that plan has human approval.
-- **Do not dispatch until:** the Stage 6 policy, acceptance tests, and operator
-  rollback/stop condition are written. Keep the orchestrator disabled between
-  isolated tests; do not bypass the sandbox.
+- **Next single task:** review and approve AgDR-023. Then implement only its
+  first slice: mixed-mode schema/CLI validation with no dispatch-policy change.
+- **Do not dispatch until:** AgDR-023 has human approval. Keep the orchestrator
+  disabled between isolated tests; do not bypass the sandbox.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -491,7 +488,7 @@ Stage 6 planning starts.
   template names and byte-for-byte drift. `register-project.sh` now records the
   explicit `base` default for future normal projects.
 - Focused binding/verifier tests passed (3 in 0.72s); the full suite passed
-  (317 in 12.01s) on 2026-07-16. The external repository is seeded; issue #1
+  (317 in 12.91s) on 2026-07-17. The external repository is seeded; issue #1
   completed a real Codex handoff to merged PR #2. Issue #3 proves a real
   continuation and native-terminal restart recovery, handing off to merged PR
   #4 with its workspace clean and transcripts preserved as evidence. Issue #7
@@ -509,6 +506,11 @@ and explicit issue overrides after both adapters are independently trusted.
 **Status:** planning only. Keep the current Claude-only launch path as the
 default until the routing policy, acceptance tests, and rollback gate are
 approved.
+
+**Proposed policy:** [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
+defines durable `provider:*` assignments, `agent:*` overrides, deterministic
+weights, provider caps, no cross-provider fallback, and an isolated mixed
+canary rollout. Review that decision before any Stage 6 implementation ticket.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,
 sticky retries, reload, unavailable-provider handling, and immediate rollback to
