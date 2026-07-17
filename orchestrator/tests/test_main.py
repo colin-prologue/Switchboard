@@ -8,7 +8,7 @@ import orchestrator.main as main_mod
 from orchestrator.runner_selector import (
     ClaudeOnlyRunnerSelector,
     CodexOnlyRunnerSelector,
-    MixedValidationRunnerSelector,
+    MixedRunnerSelector,
 )
 
 
@@ -56,4 +56,4 @@ def test_cli_codex_mode_is_explicitly_opt_in(tmp_path: Path, monkeypatch) -> Non
 def test_cli_mixed_mode_is_explicitly_opt_in(tmp_path: Path, monkeypatch) -> None:
     orchestrator = _run_main(tmp_path, monkeypatch, "--provider", "mixed")
 
-    assert isinstance(orchestrator.runner_selector, MixedValidationRunnerSelector)
+    assert isinstance(orchestrator.runner_selector, MixedRunnerSelector)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,10 +15,11 @@ from orchestrator.runner import ClaudeRunner
 from orchestrator.runner_selector import (
     ClaudeOnlyRunnerSelector,
     CodexOnlyRunnerSelector,
-    MixedValidationRunnerSelector,
+    MixedAssignmentRefused,
+    MixedRunnerSelector,
 )
 from orchestrator.scheduler import Orchestrator
-from orchestrator.types import Issue, WorkflowDefinition
+from orchestrator.types import Issue, TrackerError, WorkflowDefinition
 from orchestrator.workflow import Config
 
 
@@ -166,17 +169,8 @@ async def test_selector_failure_does_not_claim_or_relabel_issue(tmp_path: Path) 
     assert issue.state == "todo"
 
 
-async def test_mixed_validation_selector_leaves_issue_untouched(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    workflow_path = tmp_path / "WORKFLOW.md"
-    workflow_path.write_text("prompt")
-    orchestrator = Orchestrator(
-        workflow_path,
-        runner_selector=MixedValidationRunnerSelector(),
-    )
-    orchestrator._cfg = Config(
+def _mixed_config(tmp_path: Path, *, weights: dict[str, int] | None = None) -> Config:
+    return Config(
         WorkflowDefinition(
             config={
                 "agent": {"max_sessions_per_issue": 3},
@@ -184,68 +178,171 @@ async def test_mixed_validation_selector_leaves_issue_untouched(
                     "claude": {"kind": "claude-cli", "command": "claude -p"},
                     "codex": {"kind": "codex-cli", "command": "codex"},
                 },
-                "routing": {"weights": {"claude": 100, "codex": 0}},
+                "routing": {"weights": weights or {"claude": 1, "codex": 1}},
             },
             prompt_template="prompt",
         ),
         tmp_path,
     )
+
+
+def test_mixed_selector_prefers_durable_assignment_over_operator_label(
+    tmp_path: Path,
+) -> None:
     issue = _issue()
-    issue.labels = ["status:todo"]
-    orchestrator.sessions_per_issue[issue.id] = 3
+    issue.labels.extend(["provider:codex", "agent:claude"])
 
-    async def _unexpected_tracker_write(*args, **kwargs) -> None:
-        pytest.fail("mixed validation mode must not reach a tracker-mutating guard")
+    first = MixedRunnerSelector().select(_mixed_config(tmp_path), issue)
+    second = MixedRunnerSelector().select(_mixed_config(tmp_path), issue)
 
-    monkeypatch.setattr(orchestrator, "_refuse_missing_marker", _unexpected_tracker_write)
-    monkeypatch.setattr(orchestrator, "_park", _unexpected_tracker_write)
-
-    await orchestrator._dispatch(issue, attempt=None)
-
-    assert issue.id not in orchestrator.claimed
-    assert issue.id not in orchestrator.running
-    assert issue.labels == ["status:todo"]
-    assert issue.state == "todo"
+    assert isinstance(first, CodexRunner)
+    assert first.provider_id == "codex"
+    assert second.provider_id == "codex"
 
 
-async def test_mixed_validation_run_exits_before_startup_mutations(
+def test_mixed_selector_uses_stable_sha256_weight_bucket(tmp_path: Path) -> None:
+    issue = _issue()
+    weights = {"claude": 3, "codex": 2}
+    expected_bucket = int.from_bytes(
+        hashlib.sha256(issue.id.encode("utf-8")).digest(), "big"
+    ) % sum(weights.values())
+    expected_provider = "claude" if expected_bucket < weights["claude"] else "codex"
+
+    first = MixedRunnerSelector().select(_mixed_config(tmp_path, weights=weights), issue)
+    second = MixedRunnerSelector().select(_mixed_config(tmp_path, weights=weights), issue)
+
+    assert first.provider_id == expected_provider
+    assert second.provider_id == expected_provider
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        ["provider:claude", "provider:codex"],
+        ["agent:claude", "agent:codex"],
+        ["provider:unsupported"],
+        ["agent:unsupported"],
+    ],
+)
+def test_mixed_selector_refuses_conflicting_or_unknown_labels(
+    tmp_path: Path,
+    labels: list[str],
+) -> None:
+    issue = _issue()
+    issue.labels.extend(labels)
+
+    with pytest.raises(MixedAssignmentRefused):
+        MixedRunnerSelector().select(_mixed_config(tmp_path), issue)
+
+
+class _LabelTracker:
+    def __init__(self, add_error: TrackerError | None = None) -> None:
+        self.add_error = add_error
+        self.operations: list[tuple[str, tuple[str, ...]]] = []
+
+    async def add_labels(self, issue_id: str, labels: list[str]) -> None:
+        del issue_id
+        if self.add_error is not None:
+            raise self.add_error
+        self.operations.append(("add", tuple(labels)))
+
+    async def remove_labels(self, issue_id: str, labels: list[str]) -> None:
+        del issue_id
+        self.operations.append(("remove", tuple(labels)))
+
+
+async def test_mixed_dispatch_persists_assignment_before_status_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
-    workflow_path.write_text(
-        "---\n"
-        "tracker:\n"
-        "  kind: github\n"
-        "  repo: acme/widgets\n"
-        "  api_key: literal-token\n"
-        "providers:\n"
-        "  claude:\n"
-        "    kind: claude-cli\n"
-        "  codex:\n"
-        "    kind: codex-cli\n"
-        "routing:\n"
-        "  weights:\n"
-        "    claude: 100\n"
-        "    codex: 0\n"
-        "---\n"
-        "prompt\n"
-    )
+    workflow_path.write_text("prompt")
     orchestrator = Orchestrator(
         workflow_path,
-        runner_selector=MixedValidationRunnerSelector(),
+        runner_selector=MixedRunnerSelector(),
     )
+    orchestrator._cfg = _mixed_config(tmp_path, weights={"claude": 100, "codex": 0})
+    issue = _issue()
+    issue.labels.append("agent:codex")
+    tracker = _LabelTracker()
+    blocker = asyncio.Event()
 
-    async def _unexpected_work(*args, **kwargs) -> None:
-        pytest.fail("mixed validation mode must not reconcile or poll")
+    async def _hold_worker(*args, **kwargs) -> None:
+        await blocker.wait()
 
-    monkeypatch.setattr(orchestrator, "_startup_terminal_cleanup", _unexpected_work)
-    monkeypatch.setattr(orchestrator, "_startup_in_progress_sweep", _unexpected_work)
-    monkeypatch.setattr(orchestrator, "_tick", _unexpected_work)
+    monkeypatch.setattr(orchestrator, "_components", lambda: (tracker, None))
+    monkeypatch.setattr(orchestrator, "_worker", _hold_worker)
 
-    await orchestrator.run()
+    await orchestrator._dispatch(issue, attempt=None)
 
-    assert orchestrator._http is None
+    assert tracker.operations == [
+        ("add", ("provider:codex",)),
+        ("add", ("status:in-progress",)),
+        ("remove", ("status:todo",)),
+    ]
+    assert orchestrator.running[issue.id].provider_id == "codex"
+    assert "provider:codex" in issue.labels
+
+    orchestrator.running[issue.id].task.cancel()
+    await asyncio.gather(orchestrator.running[issue.id].task, return_exceptions=True)
+
+
+async def test_mixed_assignment_write_failure_leaves_issue_unclaimed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("prompt")
+    orchestrator = Orchestrator(
+        workflow_path,
+        runner_selector=MixedRunnerSelector(),
+    )
+    orchestrator._cfg = _mixed_config(tmp_path)
+    issue = _issue()
+    tracker = _LabelTracker(TrackerError("github_api_status", "write failed"))
+    monkeypatch.setattr(orchestrator, "_components", lambda: (tracker, None))
+
+    await orchestrator._dispatch(issue, attempt=None)
+
+    assert tracker.operations == []
+    assert issue.id not in orchestrator.claimed
+    assert issue.id not in orchestrator.running
+    assert "provider:claude" not in issue.labels
+    assert "provider:codex" not in issue.labels
+
+
+async def test_mixed_dispatch_reuses_existing_assignment_without_a_second_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("prompt")
+    orchestrator = Orchestrator(
+        workflow_path,
+        runner_selector=MixedRunnerSelector(),
+    )
+    orchestrator._cfg = _mixed_config(tmp_path, weights={"claude": 100, "codex": 0})
+    issue = _issue()
+    issue.labels.append("provider:codex")
+    tracker = _LabelTracker()
+    blocker = asyncio.Event()
+
+    async def _hold_worker(*args, **kwargs) -> None:
+        await blocker.wait()
+
+    monkeypatch.setattr(orchestrator, "_components", lambda: (tracker, None))
+    monkeypatch.setattr(orchestrator, "_worker", _hold_worker)
+
+    await orchestrator._dispatch(issue, attempt=None)
+
+    assert tracker.operations == [
+        ("add", ("status:in-progress",)),
+        ("remove", ("status:todo",)),
+    ]
+    assert orchestrator.running[issue.id].provider_id == "codex"
+
+    orchestrator.running[issue.id].task.cancel()
+    await asyncio.gather(orchestrator.running[issue.id].task, return_exceptions=True)
 
 
 def test_selection_after_reload_uses_current_config(tmp_path: Path) -> None:
