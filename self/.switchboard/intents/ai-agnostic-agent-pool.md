@@ -15,9 +15,9 @@
 - **Current stage:** Stage 6 Slice 1 is ready for review on
   `codex/stage6-schema-cli`. [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
   was human-approved and merged. `--provider mixed` now validates a complete
-  dual-provider envelope but intentionally stops before every tracker-mutating
-  dispatch guard, workspace action, or worker launch. Stage 5B live workers
-  launched only from a native macOS terminal.
+  dual-provider envelope and exits before creating a tracker client,
+  reconciling, polling, workspace action, or worker launch. Stage 5B live
+  workers launched only from a native macOS terminal.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
@@ -36,7 +36,7 @@
   binding/verifier tests passed (3 in 0.72s); `bash scripts/verify-setup.sh`
   reported zero failures.
 - **Stage 6 Slice 1 verification:** focused workflow/CLI/selector tests passed
-  (88 in 0.52s) and the full `orchestrator/tests` suite passed (326 in 10.87s)
+  (89 in 0.56s) and the full `orchestrator/tests` suite passed (327 in 11.25s)
   on 2026-07-17. The mixed selector test proves it returns before both the
   missing-marker diagnostic and session-cap parking guards, so validation mode
   cannot write to the tracker.
@@ -530,10 +530,10 @@ canary rollout.
 - Mixed startup validates exactly `providers.claude`, `providers.codex`,
   `routing.weights`, and optional provider caps that cannot exceed the global
   cap. Invalid or incomplete envelopes fail before polling.
-- The Slice 1 selector always returns before marker diagnostics, parking,
-  claims, label writes, workspace creation, or a worker process. It performs
-  no routing and has no fallback behavior.
-- Focused tests passed (88) and the full suite passed (326). Slice 2 starts
+- Mixed mode exits after validation, before startup reconciliation, polling,
+  marker diagnostics, parking, claims, label writes, workspace creation, or a
+  worker process. It performs no routing and has no fallback behavior.
+- Focused tests passed (89) and the full suite passed (327). Slice 2 starts
   only after this review branch merges.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,

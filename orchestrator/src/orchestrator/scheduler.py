@@ -243,6 +243,14 @@ class Orchestrator:
         log("orchestrator starting", workflow=str(self.workflow_path),
             repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()))
 
+        # Stage 6 Slice 1 accepts mixed configuration before its routing policy
+        # exists. Exit immediately after startup validation: reconciliation can
+        # write tracker state or remove workspaces, and a validation-only mode
+        # must not observe or mutate a real board.
+        if self._runner_selector.provider_id == "mixed":
+            log("mixed configuration validated; exiting without reconciliation or dispatch")
+            return
+
         self._http = httpx.AsyncClient(timeout=30.0)  # core §11.2 network timeout
         self._build_creds()  # WorkflowError (bad key file) aborts startup (§6.3)
         try:

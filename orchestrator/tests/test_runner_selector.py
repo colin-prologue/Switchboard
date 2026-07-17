@@ -208,6 +208,46 @@ async def test_mixed_validation_selector_leaves_issue_untouched(
     assert issue.state == "todo"
 
 
+async def test_mixed_validation_run_exits_before_startup_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        "  api_key: literal-token\n"
+        "providers:\n"
+        "  claude:\n"
+        "    kind: claude-cli\n"
+        "  codex:\n"
+        "    kind: codex-cli\n"
+        "routing:\n"
+        "  weights:\n"
+        "    claude: 100\n"
+        "    codex: 0\n"
+        "---\n"
+        "prompt\n"
+    )
+    orchestrator = Orchestrator(
+        workflow_path,
+        runner_selector=MixedValidationRunnerSelector(),
+    )
+
+    async def _unexpected_work(*args, **kwargs) -> None:
+        pytest.fail("mixed validation mode must not reconcile or poll")
+
+    monkeypatch.setattr(orchestrator, "_startup_terminal_cleanup", _unexpected_work)
+    monkeypatch.setattr(orchestrator, "_startup_in_progress_sweep", _unexpected_work)
+    monkeypatch.setattr(orchestrator, "_tick", _unexpected_work)
+
+    await orchestrator.run()
+
+    assert orchestrator._http is None
+
+
 def test_selection_after_reload_uses_current_config(tmp_path: Path) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
     workflow_path.write_text(
