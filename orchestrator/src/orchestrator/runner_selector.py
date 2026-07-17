@@ -19,6 +19,10 @@ class AgentRunnerSelector(Protocol):
     def select(self, cfg: Config, issue: Issue) -> AgentRunner: ...
 
 
+class MixedDispatchUnavailable(Exception):
+    """Raised by the Slice 1 selector before any issue claim or worker launch."""
+
+
 class ClaudeOnlyRunnerSelector:
     """Stage 3 production selector: every issue still runs with Claude."""
 
@@ -37,3 +41,15 @@ class CodexOnlyRunnerSelector:
     def select(self, cfg: Config, issue: Issue) -> AgentRunner:
         del issue
         return CodexRunner(cfg.codex())
+
+
+class MixedValidationRunnerSelector:
+    """Validate a mixed envelope without dispatch until Slice 2 selection lands."""
+
+    provider_id = "mixed"
+
+    def select(self, cfg: Config, issue: Issue) -> AgentRunner:
+        del cfg, issue
+        raise MixedDispatchUnavailable(
+            "mixed dispatch is disabled until Stage 6 deterministic selection"
+        )

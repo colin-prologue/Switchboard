@@ -113,6 +113,16 @@ class CodexConfig:
     stall_timeout_ms: int = 300000
 
 
+@dataclass
+class MixedExecutionConfig:
+    """Validated Stage 6 mixed-mode envelope; selection is a later slice."""
+
+    claude: ClaudeConfig
+    codex: CodexConfig
+    weights: dict[str, int]
+    max_concurrent_agents_by_provider: dict[str, int]
+
+
 DEFAULT_WORKSPACE_ROOT = str(Path(tempfile.gettempdir()) / "symphony_workspaces")
 
 

@@ -13,6 +13,7 @@ from orchestrator.runner import ClaudeRunner
 from orchestrator.runner_selector import (
     ClaudeOnlyRunnerSelector,
     CodexOnlyRunnerSelector,
+    MixedValidationRunnerSelector,
 )
 from orchestrator.scheduler import Orchestrator
 from orchestrator.types import Issue, WorkflowDefinition
@@ -162,6 +163,48 @@ async def test_selector_failure_does_not_claim_or_relabel_issue(tmp_path: Path) 
     assert issue.id not in orchestrator.claimed
     assert issue.id not in orchestrator.running
     assert issue.labels == ["status:todo", "gate:triage-passed"]
+    assert issue.state == "todo"
+
+
+async def test_mixed_validation_selector_leaves_issue_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("prompt")
+    orchestrator = Orchestrator(
+        workflow_path,
+        runner_selector=MixedValidationRunnerSelector(),
+    )
+    orchestrator._cfg = Config(
+        WorkflowDefinition(
+            config={
+                "agent": {"max_sessions_per_issue": 3},
+                "providers": {
+                    "claude": {"kind": "claude-cli", "command": "claude -p"},
+                    "codex": {"kind": "codex-cli", "command": "codex"},
+                },
+                "routing": {"weights": {"claude": 100, "codex": 0}},
+            },
+            prompt_template="prompt",
+        ),
+        tmp_path,
+    )
+    issue = _issue()
+    issue.labels = ["status:todo"]
+    orchestrator.sessions_per_issue[issue.id] = 3
+
+    async def _unexpected_tracker_write(*args, **kwargs) -> None:
+        pytest.fail("mixed validation mode must not reach a tracker-mutating guard")
+
+    monkeypatch.setattr(orchestrator, "_refuse_missing_marker", _unexpected_tracker_write)
+    monkeypatch.setattr(orchestrator, "_park", _unexpected_tracker_write)
+
+    await orchestrator._dispatch(issue, attempt=None)
+
+    assert issue.id not in orchestrator.claimed
+    assert issue.id not in orchestrator.running
+    assert issue.labels == ["status:todo"]
     assert issue.state == "todo"
 
 

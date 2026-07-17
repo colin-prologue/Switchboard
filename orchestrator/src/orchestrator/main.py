@@ -14,7 +14,11 @@ import sys
 from pathlib import Path
 
 from .log import log
-from .runner_selector import ClaudeOnlyRunnerSelector, CodexOnlyRunnerSelector
+from .runner_selector import (
+    ClaudeOnlyRunnerSelector,
+    CodexOnlyRunnerSelector,
+    MixedValidationRunnerSelector,
+)
 from .scheduler import Orchestrator
 
 
@@ -28,9 +32,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="path to the composed WORKFLOW.md")
     parser.add_argument(
         "--provider",
-        choices=("claude", "codex"),
+        choices=("claude", "codex", "mixed"),
         default="claude",
-        help="execution provider for this process (default: claude)",
+        help="execution provider (default: claude; mixed validates only in Stage 6 Slice 1)",
     )
     args = parser.parse_args(argv)
 
@@ -40,11 +44,12 @@ def main(argv: list[str] | None = None) -> int:
         log("startup failed", error=f"workflow file not found: {workflow_path}")
         return 2
 
-    selector = (
-        CodexOnlyRunnerSelector()
-        if args.provider == "codex"
-        else ClaudeOnlyRunnerSelector()
-    )
+    if args.provider == "codex":
+        selector = CodexOnlyRunnerSelector()
+    elif args.provider == "mixed":
+        selector = MixedValidationRunnerSelector()
+    else:
+        selector = ClaudeOnlyRunnerSelector()
     orch = Orchestrator(workflow_path, runner_selector=selector)
 
     async def _run() -> int:
