@@ -1,18 +1,19 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 5B has completed a first handoff,
-  continuation-and-restart recovery, and deterministic startup-failure
-  retry/parking evidence. The remaining live scenario is credential refresh.
+- **Status:** active; Stage 5B isolated live canary is complete: handoff,
+  continuation/restart recovery, deterministic failure/parking, and GitHub App
+  credential-refresh behavior all have named evidence. Stage 6 mixed-pool
+  planning may begin; Claude-only production remains unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 5B live canary - all worker lifecycle and bounded
-  failure/parking scenarios have passed. Design one isolated credential-refresh
-  test next; all future live workers still launch from a native macOS terminal.
+- **Current stage:** Stage 6 planning - define an explicit, deterministic
+  routing policy and test matrix before enabling any mixed-provider process.
+  Stage 5B live workers launched only from a native macOS terminal.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
@@ -23,9 +24,10 @@
 - **What remains deliberately disabled:** mixed provider maps, weighted or
   per-issue selection, fallback, registration-script support, and any Codex
   process against an existing production repository.
-- **Last verified source commit:** native recovery evidence merged as `8d7a2b0`.
+- **Last verified source commit:** Stage 5B failure/parking evidence merged as
+  `7f2edfc`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 317 passed in 12.24s on 2026-07-16. Focused canary
+  orchestrator/tests -q` - 317 passed in 12.01s on 2026-07-16. Focused canary
   binding/verifier tests passed (3 in 0.72s); `bash scripts/verify-setup.sh`
   reported zero failures.
 - **Last end-to-end evidence:** [canary issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
@@ -84,6 +86,24 @@
   `after_create`. Both still demonstrated bounded retries and parking without
   source changes, and led to the #7 launcher guard that refuses a pre-existing
   workspace.
+- **Credential-refresh evidence:** [canary issue #9](https://github.com/colin-prologue/switchboard-codex-canary/issues/9)
+  completed two raw native Codex `exec`/`resume` transcripts in one session
+  (`019f6be3-c96a-78f0-a7f1-206b832a159e`). Each turn used the injected GitHub
+  App installation token to read the installed repository and recorded only
+  `colin-prologue/switchboard-codex-canary` in git-excluded
+  `.run/credential-refresh-turn-{1,2}`. The ready marker was removed, the
+  fixture workspace remained clean, no PR exists, and the App bot posted one
+  completion comment before moving the issue to `status:human-review`. The
+  native launcher then stopped the foreground process. This combines with the
+  automated forced-401 and turn-length-TTL tests to cover both deterministic
+  re-mint logic and live installation-token use without exposing a token.
+- **Rejected credential probe:** issue #8 remains `status:blocked`. It used
+  `gh api user`, which returned HTTP 403 because that authenticated-user endpoint
+  does not accept the App installation token; the token itself could still read
+  and comment on the installed canary repository. The launcher timed out because
+  it waited only for `status:human-review` while the agent safely retained the
+  active issue after the expected blocker. Treat this as a launcher stop-condition
+  lesson, not a credential refresh failure.
 - **Native-terminal capability probe:** from the macOS Terminal app, the bundled
   ChatGPT Codex CLI ran with subscription login, `--ask-for-approval never`,
   `--ignore-user-config`, and `--sandbox workspace-write` in disposable
@@ -104,15 +124,14 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** define a bounded credential-refresh canary that proves
-  the GitHub App token mint/cache boundary is safe during a native Codex worker
-  session or an equivalent deterministic worker path. It must keep subscription
-  authentication separate, use a synthetic ticket, leave #7 parked, and stop
-  at named evidence without dispatching real project work.
-- **Do not dispatch until:** the credential-refresh acceptance criteria and
-  operator stop condition are written. Export
-  `/Applications/ChatGPT.app/Contents/Resources` onto `PATH`, do not bypass the
-  sandbox, and keep the orchestrator disabled between isolated tests.
+- **Next single task:** write the Stage 6 routing-policy decision and test plan:
+  one explicit provider assignment per issue, provider-specific concurrency
+  limits, sticky retry/continuation assignment, an unavailable-provider path,
+  and a rollback that restores the existing Claude-only launch. Do not add mixed
+  dispatch until that plan has human approval.
+- **Do not dispatch until:** the Stage 6 policy, acceptance tests, and operator
+  rollback/stop condition are written. Keep the orchestrator disabled between
+  isolated tests; do not bypass the sandbox.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -472,15 +491,24 @@ Stage 6 planning starts.
   template names and byte-for-byte drift. `register-project.sh` now records the
   explicit `base` default for future normal projects.
 - Focused binding/verifier tests passed (3 in 0.72s); the full suite passed
-  (317 in 10.60s) on 2026-07-15. The external repository is seeded; issue #1
+  (317 in 12.01s) on 2026-07-16. The external repository is seeded; issue #1
   completed a real Codex handoff to merged PR #2. Issue #3 proves a real
-  continuation and native-terminal restart recovery, handing off to PR #4 with
-  its workspace clean and transcripts preserved as evidence.
+  continuation and native-terminal restart recovery, handing off to merged PR
+  #4 with its workspace clean and transcripts preserved as evidence. Issue #7
+  proves three `codex_not_found` failures, exponential retry, and durable
+  session-cap parking with one comment and no PR. Issue #9 proves two native
+  Codex continuation turns can use the real App installation token to access
+  the installed repository; its workspace is clean, no PR exists, and it ends
+  in `status:human-review`. Stage 5B is complete.
 
 ### Stage 6 - Mixed pool
 
 **Purpose:** add deterministic weighted selection, provider concurrency limits,
 and explicit issue overrides after both adapters are independently trusted.
+
+**Status:** planning only. Keep the current Claude-only launch path as the
+default until the routing policy, acceptance tests, and rollback gate are
+approved.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,
 sticky retries, reload, unavailable-provider handling, and immediate rollback to
