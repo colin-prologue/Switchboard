@@ -17,7 +17,7 @@ from .log import log
 from .runner_selector import (
     ClaudeOnlyRunnerSelector,
     CodexOnlyRunnerSelector,
-    MixedValidationRunnerSelector,
+    MixedRunnerSelector,
 )
 from .scheduler import Orchestrator
 
@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         "--provider",
         choices=("claude", "codex", "mixed"),
         default="claude",
-        help="execution provider (default: claude; mixed validates only in Stage 6 Slice 1)",
+        help="execution provider (default: claude; mixed uses durable routing labels)",
     )
     args = parser.parse_args(argv)
 
@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.provider == "codex":
         selector = CodexOnlyRunnerSelector()
     elif args.provider == "mixed":
-        selector = MixedValidationRunnerSelector()
+        selector = MixedRunnerSelector()
     else:
         selector = ClaudeOnlyRunnerSelector()
     orch = Orchestrator(workflow_path, runner_selector=selector)

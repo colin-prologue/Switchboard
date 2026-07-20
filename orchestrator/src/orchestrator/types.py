@@ -115,7 +115,7 @@ class CodexConfig:
 
 @dataclass
 class MixedExecutionConfig:
-    """Validated Stage 6 mixed-mode envelope; selection is a later slice."""
+    """Validated Stage 6 mixed-mode envelope for provider selection."""
 
     claude: ClaudeConfig
     codex: CodexConfig

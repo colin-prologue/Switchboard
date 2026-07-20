@@ -1,6 +1,6 @@
 # AgDR-023: Stage 6 mixed-provider routing policy
 
-**Status:** proposed (2026-07-17)
+**Status:** accepted (2026-07-17)
 **Surfaces:** mixed-process CLI mode, workflow schema, selector, scheduler,
 provider labels, capacity accounting, and Stage 6 canary
 

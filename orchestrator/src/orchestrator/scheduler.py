@@ -32,7 +32,7 @@ from .prompt import render_prompt
 from .runner_selector import (
     AgentRunnerSelector,
     ClaudeOnlyRunnerSelector,
-    MixedDispatchUnavailable,
+    MixedAssignmentRefused,
 )
 from .tracker import GitHubTracker
 from .transitions import load_requires_marker
@@ -243,14 +243,6 @@ class Orchestrator:
         log("orchestrator starting", workflow=str(self.workflow_path),
             repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()))
 
-        # Stage 6 Slice 1 accepts mixed configuration before its routing policy
-        # exists. Exit immediately after startup validation: reconciliation can
-        # write tracker state or remove workspaces, and a validation-only mode
-        # must not observe or mutate a real board.
-        if self._runner_selector.provider_id == "mixed":
-            log("mixed configuration validated; exiting without reconciliation or dispatch")
-            return
-
         self._http = httpx.AsyncClient(timeout=30.0)  # core §11.2 network timeout
         self._build_creds()  # WorkflowError (bad key file) aborts startup (§6.3)
         try:
@@ -427,14 +419,10 @@ class Orchestrator:
     async def _dispatch(self, issue: Issue, attempt: int | None) -> None:
         cfg = self._cfg
         assert cfg is not None
-        # Slice 1 mixed mode is validation-only. Its selector must run before
-        # every guard below because some guards can post a diagnostic or park
-        # an issue. Until Slice 2 owns durable assignment, mixed mode leaves
-        # every issue completely untouched.
         try:
             runner = self._select_runner(issue)
-        except MixedDispatchUnavailable as exc:
-            log("mixed dispatch disabled; leaving issue untouched",
+        except MixedAssignmentRefused as exc:
+            log("mixed assignment refused; leaving issue untouched",
                 issue_id=issue.id, issue_identifier=issue.identifier, error=str(exc))
             return
 
@@ -459,6 +447,21 @@ class Orchestrator:
             return
 
         provider_id = runner.provider_id
+        if self._runner_selector.provider_id == "mixed" \
+                and f"provider:{provider_id}" not in issue.labels:
+            # The durable tracker assignment must precede the visible status
+            # claim, but its write awaits I/O. Reserve the issue locally across
+            # that await so a poll tick or retry timer cannot start a second
+            # worker for the same workspace meanwhile.
+            self.claimed.add(issue.id)
+            try:
+                assigned = await self._persist_provider_assignment(issue, provider_id)
+            except BaseException:
+                self.claimed.discard(issue.id)
+                raise
+            if not assigned:
+                self.claimed.discard(issue.id)
+                return
 
         # Claim before any await so a concurrent tick/retry timer cannot
         # double-dispatch while the label write below is in flight.
@@ -487,6 +490,22 @@ class Orchestrator:
             session_number=spent + 1)
         task.add_done_callback(
             lambda t, iid=issue.id: self._on_worker_done(iid, t))
+
+    async def _persist_provider_assignment(self, issue: Issue, provider_id: str) -> bool:
+        """Write a new mixed-provider assignment before claiming the issue."""
+        label = f"provider:{provider_id}"
+        tracker, _ = self._components()
+        try:
+            await tracker.add_labels(issue.id, [label])
+        except TrackerError as exc:
+            log("mixed provider assignment write failed; leaving issue unclaimed",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                provider_id=provider_id, error=str(exc))
+            return False
+        issue.labels.append(label)
+        log("mixed provider assignment persisted", issue_id=issue.id,
+            issue_identifier=issue.identifier, provider_id=provider_id)
+        return True
 
     async def _worker(
         self,

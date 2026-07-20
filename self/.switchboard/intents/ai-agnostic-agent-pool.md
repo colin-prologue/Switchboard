@@ -3,43 +3,44 @@
 - **Slug:** `ai-agnostic-agent-pool`
 - **Status:** active; Stage 5B isolated live canary is complete: handoff,
   continuation/restart recovery, deterministic failure/parking, and GitHub App
-  credential-refresh behavior all have named evidence. Stage 6 Slice 1
-  (schema and CLI boundary) is ready for review; Claude-only production remains
-  unchanged.
+  credential-refresh behavior all have named evidence. Stage 6 Slice 2
+  (durable provider assignment) is ready for review; Claude-only production
+  remains unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 6 Slice 1 is ready for review on
-  `codex/stage6-schema-cli`. [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
-  was human-approved and merged. `--provider mixed` now validates a complete
-  dual-provider envelope and exits before creating a tracker client,
-  reconciling, polling, workspace action, or worker launch. Stage 5B live
-  workers launched only from a native macOS terminal.
+- **Current stage:** Stage 6 Slice 2 is ready for review on
+  `codex/stage6-durable-assignment`. [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
+  is accepted. `--provider mixed` deterministically selects a provider, writes
+  a durable `provider:*` label before the normal status claim, and refuses
+  ambiguous labels or a failed assignment write without starting work. Stage 5B
+  live workers launched only from a native macOS terminal.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
-  and project bindings do not pass `--provider codex` and remain unchanged.
+  and project bindings do not pass `--provider codex` or `--provider mixed`
+  and remain unchanged.
 - **What is enabled:** a process may explicitly select `--provider codex` with
   a strict, Codex-only `providers.codex` workflow. Startup, hot reload,
   timeout/stall/budget policy, credentials, continuation, retry, cancellation,
   capacity, parking, lifecycle logs, and raw JSONL transcript capture all use
-  the selected runner.
-- **What remains deliberately disabled:** mixed provider selection, durable
-  `provider:*` assignment writes, weighted routing, per-provider capacity
-  enforcement, fallback, registration-script support, and any Codex process
-  against an existing production repository.
-- **Last verified source commit:** Stage 5B completion evidence merged as
-  `d51dca8`.
+  the selected runner. An explicit mixed process now supports durable-label,
+  operator-label, and SHA-256 weighted selection, writing a new assignment
+  before `status:in-progress`.
+- **What remains deliberately disabled:** per-provider capacity enforcement,
+  retry/stall/reload stickiness evidence, fallback, registration-script
+  support, any mixed-process launch against an existing production repository,
+  and the isolated mixed canary.
+- **Last verified source commit:** Stage 6 Slice 1 merged as `ab7386e`; Slice 2
+  is review-ready on `codex/stage6-durable-assignment`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 317 passed in 12.91s on 2026-07-17. Focused canary
-  binding/verifier tests passed (3 in 0.72s); `bash scripts/verify-setup.sh`
-  reported zero failures.
-- **Stage 6 Slice 1 verification:** focused workflow/CLI/selector tests passed
-  (89 in 0.56s) and the full `orchestrator/tests` suite passed (327 in 11.25s)
-  on 2026-07-17. The mixed selector test proves it returns before both the
-  missing-marker diagnostic and session-cap parking guards, so validation mode
-  cannot write to the tracker.
+  orchestrator/tests -q` - 335 passed in 11.02s on 2026-07-17. Focused
+  workflow/CLI/selector tests passed (97 in 0.57s).
+- **Stage 6 Slice 2 verification:** label precedence, SHA-256 bucketing,
+  conflict refusal, pre-claim assignment-write ordering, failed-write refusal,
+  and reuse of a persisted assignment all have focused tests. The full suite
+  confirms the legacy Claude-only and Codex-only paths remain unchanged.
 - **Last end-to-end evidence:** [canary issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   dispatched as `provider_id=codex`, session `019f6325-7419-75e0-b33d-13dbba7407c0`,
   reached `status:human-review`, and opened clean
@@ -134,12 +135,12 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review and merge Stage 6 Slice 1. Then implement only
-  Slice 2: deterministic assignment precedence and durable `provider:*` label
-  writes before claim. Keep all capacity and retry-stickiness work for Slice 3.
-- **Do not dispatch until:** the isolated mixed canary is introduced in Slice 4.
-  Keep the orchestrator disabled between isolated tests; do not bypass the
-  sandbox.
+- **Next single task:** review and merge Stage 6 Slice 2. Then implement only
+  Slice 3: per-provider capacity and retry/stall/reload stickiness. Keep the
+  isolated mixed canary for Slice 4.
+- **Do not dispatch:** a mixed process against any existing project. Slice 4 is
+  the first permitted mixed launch and must use a separate synthetic canary;
+  do not bypass the sandbox.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -514,26 +515,42 @@ Stage 6 planning starts.
 **Purpose:** add deterministic weighted selection, provider concurrency limits,
 and explicit issue overrides after both adapters are independently trusted.
 
-**Status:** Slice 1 is ready for review. Keep the current Claude-only launch
-path as the default until the remaining routing, acceptance tests, and rollback
-gate are approved.
+**Status:** Slice 2 is ready for review. Keep the current Claude-only launch
+path as the default until capacity, stickiness, canary evidence, and the
+rollback gate are complete.
 
-**Proposed policy:** [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
+**Accepted policy:** [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
 defines durable `provider:*` assignments, `agent:*` overrides, deterministic
 weights, provider caps, no cross-provider fallback, and an isolated mixed
 canary rollout.
 
-**Slice 1 evidence (2026-07-17, review branch `codex/stage6-schema-cli`):**
+**Slice 1 evidence (2026-07-17, merged as [PR #87](https://github.com/colin-prologue/Switchboard/pull/87)):**
 
 - The CLI accepts an explicit `--provider mixed`; the omitted flag remains
   Claude-only and `--provider codex` remains the Codex-only canary mode.
 - Mixed startup validates exactly `providers.claude`, `providers.codex`,
   `routing.weights`, and optional provider caps that cannot exceed the global
   cap. Invalid or incomplete envelopes fail before polling.
-- Mixed mode exits after validation, before startup reconciliation, polling,
-  marker diagnostics, parking, claims, label writes, workspace creation, or a
-  worker process. It performs no routing and has no fallback behavior.
-- Focused tests passed (89) and the full suite passed (327). Slice 2 starts
+- Mixed mode was validation-only while the routing contract was absent. Its
+  P1 review fix proved startup reconciliation could not mutate a board in that
+  interim mode.
+- Focused tests passed (89) and the full suite passed (327).
+
+**Slice 2 evidence (2026-07-17, review branch `codex/stage6-durable-assignment`):**
+
+- A single durable `provider:claude` or `provider:codex` label wins over any
+  later `agent:*` label. An unassigned issue uses one `agent:*` label, then a
+  stable SHA-256 bucket of its immutable node ID and `routing.weights`.
+- Conflicting or unsupported `provider:*`/`agent:*` labels refuse before a
+  claim. A newly selected assignment is written before `status:in-progress`;
+  a failed assignment write leaves the issue unclaimed and has no workspace or
+  worker side effect.
+- The scheduler reserves an issue in memory while awaiting a new assignment
+  write, preventing a concurrent poll or retry from starting duplicate work.
+- A fresh selector instance reuses an existing durable assignment even if the
+  current default weights favor the other provider. Per-provider capacity and
+  full retry/reload stickiness are intentionally Slice 3 work.
+- Focused tests passed (97) and the full suite passed (335). Slice 3 starts
   only after this review branch merges.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,
