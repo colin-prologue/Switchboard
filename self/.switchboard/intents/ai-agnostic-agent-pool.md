@@ -37,9 +37,9 @@
 - **Last verified source commit:** Stage 6 Slice 4 binding merged as `45b849a`;
   procedure work is on `codex/stage6-mixed-canary-procedure`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 352 passed in 13.97s on 2026-07-20 on the Slice 4
+  orchestrator/tests -q` - 352 passed in 13.03s on 2026-07-20 on the Slice 4
   procedure branch. Its focused checkpoint/binding/CLI suite passed (15 in
-  0.85s). Slice 3 focused workflow/CLI/selector tests passed (102 in 0.59s).
+  1.01s). Slice 3 focused workflow/CLI/selector tests passed (102 in 0.59s).
 - **Stage 6 Slice 3 verification:** explicit provider caps block only that
   provider, preserve a new durable assignment while capacity is full, and do
   not launch a worker or fall back. A durable assignment selects the same
@@ -605,9 +605,9 @@ canary rollout.
   stops the process at named outcomes, and preserves logs/workspaces for review.
 - This procedure does not raise the Codex routing weight. A nonzero weight is a
   later reviewed rollout only after the checkpoint evidence passes.
-- The focused checkpoint/binding/CLI suite passed (15 in 0.85s), the setup
+- The focused checkpoint/binding/CLI suite passed (15 in 1.01s), the setup
   verifier reported no failures, and the full orchestrator suite passed (352 in
-  13.97s). No live checkpoint was launched during procedure verification.
+  13.03s). No live checkpoint was launched during procedure verification.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,
 sticky retries, reload, unavailable-provider handling, and immediate rollback to

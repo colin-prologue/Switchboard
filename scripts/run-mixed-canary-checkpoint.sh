@@ -149,8 +149,9 @@ done
 
 PROVISIONED_LABELS="$(gh_clean label list --repo "$REPO" --limit 100 \
   --json name --jq '.[].name')"
-for label in status:todo status:in-progress status:human-review status:parked \
-             status:blocked gate:triage-passed agent:claude agent:codex \
+for label in status:drafting status:todo status:in-progress status:plan-review \
+             status:human-review status:parked status:blocked \
+             gate:triage-passed agent:claude agent:codex \
              provider:claude provider:codex; do
   printf '%s\n' "$PROVISIONED_LABELS" | grep -qxF "$label" \
     || fail "required label is not provisioned: $label"

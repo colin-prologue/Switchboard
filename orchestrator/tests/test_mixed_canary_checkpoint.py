@@ -97,8 +97,10 @@ def test_checkpoint_script_is_executable_and_pins_named_stop_conditions() -> Non
     assert 'OPEN_PRS="$(gh_clean pr list' in source
     assert "trap cleanup EXIT" in source
     assert "SECONDS + 1800" in source
+    preflight_labels = source.split("for label in ", 1)[1].split("; do", 1)[0]
     for status in ("human-review", "parked", "blocked", "drafting", "plan-review"):
         assert f"status:{status}" in source
+        assert f"status:{status}" in preflight_labels
 
 
 def test_rollback_workflow_is_strict_claude_only(monkeypatch) -> None:
