@@ -229,7 +229,9 @@ Without `--provider codex`, startup still validates and selects Claude. Codex
 mode rejects legacy execution blocks and mixed `providers` maps. Use it only
 against a separate canary repository. The checked-in mixed-canary binding starts
 at `claude: 100, codex: 0`; do not launch it until the isolated mixed-canary
-rollout has been reviewed and its operator evidence procedure is in place.
+rollout has been reviewed and its operator evidence procedure is in place. Its
+[preflight](projects/mixed-canary/README.md) provisions the required durable
+provider labels before any issue can be claimed.
 
 ---
 

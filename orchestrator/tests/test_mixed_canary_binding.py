@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 from orchestrator.workflow import Config, load_workflow, validate_dispatch
@@ -9,6 +11,22 @@ from orchestrator.workflow import Config, load_workflow, validate_dispatch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / "projects" / "mixed-canary" / "WORKFLOW.md"
+PROVISION_LABELS = REPO_ROOT / "scripts" / "provision-mixed-canary-labels.sh"
+REQUIRED_LABELS = {
+    "status:drafting",
+    "status:triage",
+    "status:todo",
+    "status:in-progress",
+    "status:plan-review",
+    "status:human-review",
+    "status:blocked",
+    "status:parked",
+    "gate:triage-passed",
+    "agent:claude",
+    "agent:codex",
+    "provider:claude",
+    "provider:codex",
+}
 
 
 def _parse_env(path: Path) -> dict[str, str]:
@@ -63,3 +81,66 @@ def test_mixed_canary_workflow_matches_its_declared_template() -> None:
     )
 
     assert expected == composed
+
+
+def test_mixed_canary_label_provisioning_dry_run_is_complete_and_offline(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "gh-was-called"
+    fake_gh = tmp_path / "gh"
+    fake_gh.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n', encoding="utf-8")
+    fake_gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+
+    result = subprocess.run(
+        ["bash", str(PROVISION_LABELS), "--dry-run"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists(), "dry-run invoked gh"
+    assert result.stdout.splitlines()[0] == (
+        "repo: colin-prologue/switchboard-mixed-canary"
+    )
+    assert {
+        line.removeprefix("label ")
+        for line in result.stdout.splitlines()[1:]
+    } == REQUIRED_LABELS
+
+
+def test_mixed_canary_label_provisioning_uses_force_for_every_label(
+    tmp_path: Path,
+) -> None:
+    arg_log = tmp_path / "gh-args"
+    fake_gh = tmp_path / "gh"
+    fake_gh.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_ARG_LOG"\n',
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    env = {
+        **os.environ,
+        "GH_ARG_LOG": str(arg_log),
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+    }
+
+    result = subprocess.run(
+        ["bash", str(PROVISION_LABELS), "--repo", "acme/mixed-canary"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = arg_log.read_text(encoding="utf-8").splitlines()
+    assert len(calls) == len(REQUIRED_LABELS)
+    for label in REQUIRED_LABELS:
+        call = next(line for line in calls if line.startswith(f"label create {label} "))
+        assert "--repo acme/mixed-canary" in call
+        assert call.endswith("--force")

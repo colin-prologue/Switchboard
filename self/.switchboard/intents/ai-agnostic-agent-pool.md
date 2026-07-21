@@ -36,8 +36,8 @@
 - **Last verified source commit:** Stage 6 Slice 3 merged as `03a214e`; Slice 4
   binding work is on `codex/stage6-mixed-canary-binding`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 342 passed in 11.57s on 2026-07-20 on the Slice 4
-  binding branch. Its focused binding/setup suite passed (5 in 0.66s). Slice 3
+  orchestrator/tests -q` - 344 passed in 11.34s on 2026-07-20 on the Slice 4
+  binding branch. Its focused binding/setup suite passed (7 in 1.12s). Slice 3
   focused workflow/CLI/selector tests passed (102 in 0.59s).
 - **Stage 6 Slice 3 verification:** explicit provider caps block only that
   provider, preserve a new durable assignment while capacity is full, and do
@@ -582,11 +582,14 @@ canary rollout.
 - Its initial weights are exactly `claude: 100, codex: 0`. Regression coverage
   validates that policy, both provider envelopes, the durable-label prompt
   guard, and template composition; setup verification allowlists the template.
+- A mixed-canary-only provisioning command idempotently creates all gate-state,
+  operator `agent:*`, and durable `provider:*` labels. Its tested dry-run is
+  offline, and the preflight makes label provisioning mandatory before launch.
 - This PR does not create the external repository, grant App access, start a
   process, create an issue, or dispatch a worker. Those are the next reviewed
   operational slice after this binding merges.
-- The binding/setup suite passed (5 in 0.66s) and the full orchestrator suite
-  passed (342 in 11.57s) on 2026-07-20.
+- The binding/setup suite passed (7 in 1.12s) and the full orchestrator suite
+  passed (344 in 11.34s) on 2026-07-20.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,
 sticky retries, reload, unavailable-provider handling, and immediate rollback to
