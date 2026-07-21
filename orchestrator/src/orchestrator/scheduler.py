@@ -374,6 +374,23 @@ class Orchestrator:
                     if e.issue.state.lower() == state.lower())
         return count < limit
 
+    def _provider_slots_available(self, provider_id: str) -> bool:
+        """Whether a mixed-provider worker can start without exceeding its cap."""
+        if self._runner_selector.provider_id != "mixed":
+            return True
+        cfg = self._cfg
+        assert cfg is not None
+        mixed = cfg.mixed()
+        limit = mixed.max_concurrent_agents_by_provider.get(
+            provider_id,
+            cfg.agent().max_concurrent_agents,
+        )
+        count = sum(
+            1 for entry in self.running.values()
+            if entry.provider_id == provider_id
+        )
+        return count < limit
+
     def _should_dispatch(self, issue: Issue) -> bool:
         """core §8.2 candidate selection + owned parking gate."""
         cfg = self._cfg
@@ -447,6 +464,7 @@ class Orchestrator:
             return
 
         provider_id = runner.provider_id
+        reserved_for_assignment = False
         if self._runner_selector.provider_id == "mixed" \
                 and f"provider:{provider_id}" not in issue.labels:
             # The durable tracker assignment must precede the visible status
@@ -454,6 +472,7 @@ class Orchestrator:
             # that await so a poll tick or retry timer cannot start a second
             # worker for the same workspace meanwhile.
             self.claimed.add(issue.id)
+            reserved_for_assignment = True
             try:
                 assigned = await self._persist_provider_assignment(issue, provider_id)
             except BaseException:
@@ -462,6 +481,14 @@ class Orchestrator:
             if not assigned:
                 self.claimed.discard(issue.id)
                 return
+
+        if not self._provider_slots_available(provider_id):
+            if reserved_for_assignment:
+                self.claimed.discard(issue.id)
+            log("mixed provider capacity reached; leaving issue unclaimed",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                provider_id=provider_id)
+            return
 
         # Claim before any await so a concurrent tick/retry timer cannot
         # double-dispatch while the label write below is in flight.

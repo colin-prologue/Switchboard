@@ -7,6 +7,7 @@ import hashlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,7 +20,7 @@ from orchestrator.runner_selector import (
     MixedRunnerSelector,
 )
 from orchestrator.scheduler import Orchestrator
-from orchestrator.types import Issue, TrackerError, WorkflowDefinition
+from orchestrator.types import Issue, RetryEntry, TrackerError, WorkflowDefinition
 from orchestrator.workflow import Config
 
 
@@ -169,11 +170,25 @@ async def test_selector_failure_does_not_claim_or_relabel_issue(tmp_path: Path) 
     assert issue.state == "todo"
 
 
-def _mixed_config(tmp_path: Path, *, weights: dict[str, int] | None = None) -> Config:
+def _mixed_config(
+    tmp_path: Path,
+    *,
+    weights: dict[str, int] | None = None,
+    global_cap: int = 10,
+    provider_caps: dict[str, int] | None = None,
+) -> Config:
     return Config(
         WorkflowDefinition(
             config={
-                "agent": {"max_sessions_per_issue": 3},
+                "agent": {
+                    "max_concurrent_agents": global_cap,
+                    "max_sessions_per_issue": 3,
+                    **(
+                        {"max_concurrent_agents_by_provider": provider_caps}
+                        if provider_caps is not None
+                        else {}
+                    ),
+                },
                 "providers": {
                     "claude": {"kind": "claude-cli", "command": "claude -p"},
                     "codex": {"kind": "codex-cli", "command": "codex"},
@@ -183,6 +198,27 @@ def _mixed_config(tmp_path: Path, *, weights: dict[str, int] | None = None) -> C
             prompt_template="prompt",
         ),
         tmp_path,
+    )
+
+
+def _write_mixed_workflow(path: Path, *, claude_weight: int, codex_weight: int) -> None:
+    path.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        "  api_key: literal-token\n"
+        "providers:\n"
+        "  claude:\n"
+        "    kind: claude-cli\n"
+        "  codex:\n"
+        "    kind: codex-cli\n"
+        "routing:\n"
+        "  weights:\n"
+        f"    claude: {claude_weight}\n"
+        f"    codex: {codex_weight}\n"
+        "---\n"
+        "prompt\n"
     )
 
 
@@ -239,6 +275,10 @@ class _LabelTracker:
     def __init__(self, add_error: TrackerError | None = None) -> None:
         self.add_error = add_error
         self.operations: list[tuple[str, tuple[str, ...]]] = []
+        self.candidates: list[Issue] = []
+
+    async def fetch_candidate_issues(self) -> list[Issue]:
+        return list(self.candidates)
 
     async def add_labels(self, issue_id: str, labels: list[str]) -> None:
         del issue_id
@@ -262,6 +302,21 @@ class _BlockingAssignmentTracker(_LabelTracker):
         if labels[0].startswith("provider:"):
             self.assignment_started.set()
             await self.release_assignment.wait()
+
+
+class _MixedRecordingSelector(MixedRunnerSelector):
+    def __init__(self) -> None:
+        self.selected_providers: list[str] = []
+
+    def select(self, cfg: Config, issue: Issue) -> _FakeRunner:
+        provider_id = self.select_provider(cfg.mixed().weights, issue)
+        self.selected_providers.append(provider_id)
+        runner = _FakeRunner()
+        runner.provider_id = provider_id
+        runner.turn_timeout_ms = 1000
+        runner.stall_timeout_ms = 0
+        runner.max_budget_usd = None
+        return runner
 
 
 async def test_mixed_dispatch_persists_assignment_before_status_claim(
@@ -389,6 +444,128 @@ async def test_mixed_dispatch_reuses_existing_assignment_without_a_second_write(
 
     orchestrator.running[issue.id].task.cancel()
     await asyncio.gather(orchestrator.running[issue.id].task, return_exceptions=True)
+
+
+async def test_mixed_dispatch_persists_full_provider_assignment_without_launching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("prompt")
+    orchestrator = Orchestrator(
+        workflow_path,
+        runner_selector=MixedRunnerSelector(),
+    )
+    orchestrator._cfg = _mixed_config(
+        tmp_path,
+        global_cap=2,
+        provider_caps={"codex": 1},
+    )
+    orchestrator.running["already-codex"] = SimpleNamespace(provider_id="codex")
+    issue = _issue()
+    issue.labels.append("agent:codex")
+    tracker = _LabelTracker()
+
+    async def _unexpected_worker(*args, **kwargs) -> None:
+        pytest.fail("a full provider must not launch a worker")
+
+    monkeypatch.setattr(orchestrator, "_components", lambda: (tracker, None))
+    monkeypatch.setattr(orchestrator, "_worker", _unexpected_worker)
+
+    await orchestrator._dispatch(issue, attempt=None)
+
+    assert tracker.operations == [("add", ("provider:codex",))]
+    assert issue.id not in orchestrator.claimed
+    assert issue.id not in orchestrator.running
+    assert "provider:codex" in issue.labels
+    assert orchestrator._provider_slots_available("claude")
+
+
+def test_mixed_provider_capacity_defaults_to_global_cap(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("prompt")
+    orchestrator = Orchestrator(
+        workflow_path,
+        runner_selector=MixedRunnerSelector(),
+    )
+    orchestrator._cfg = _mixed_config(tmp_path, global_cap=1)
+    orchestrator.running["already-codex"] = SimpleNamespace(provider_id="codex")
+
+    assert not orchestrator._provider_slots_available("codex")
+    assert orchestrator._provider_slots_available("claude")
+
+
+async def test_mixed_retry_uses_durable_assignment_after_weights_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("prompt")
+    selector = _MixedRecordingSelector()
+    orchestrator = Orchestrator(workflow_path, runner_selector=selector)
+    orchestrator._cfg = _mixed_config(tmp_path, weights={"claude": 100, "codex": 0})
+    issue = _issue()
+    issue.state = "in progress"
+    issue.labels = ["status:in-progress", "provider:codex"]
+    tracker = _LabelTracker()
+    tracker.candidates = [issue]
+    blocker = asyncio.Event()
+
+    async def _hold_worker(*args, **kwargs) -> None:
+        await blocker.wait()
+
+    monkeypatch.setattr(orchestrator, "_components", lambda: (tracker, None))
+    monkeypatch.setattr(orchestrator, "_worker", _hold_worker)
+    orchestrator.retry_attempts[issue.id] = RetryEntry(
+        issue_id=issue.id,
+        identifier=issue.identifier,
+        attempt=1,
+        timer_handle=SimpleNamespace(cancel=lambda: None),
+    )
+
+    await orchestrator._on_retry_timer(issue.id)
+
+    assert selector.selected_providers == ["codex"]
+    assert orchestrator.running[issue.id].provider_id == "codex"
+    assert tracker.operations == []
+
+    orchestrator.running[issue.id].task.cancel()
+    await asyncio.gather(orchestrator.running[issue.id].task, return_exceptions=True)
+
+
+def test_mixed_hot_reload_keeps_durable_provider_assignment(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    _write_mixed_workflow(workflow_path, claude_weight=0, codex_weight=100)
+    orchestrator = Orchestrator(workflow_path, runner_selector=MixedRunnerSelector())
+    orchestrator._load_workflow(initial=True)
+    issue = _issue()
+    issue.labels.append("provider:codex")
+
+    _write_mixed_workflow(workflow_path, claude_weight=100, codex_weight=0)
+    stat = workflow_path.stat()
+    os.utime(workflow_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    orchestrator._load_workflow(initial=False)
+
+    runner = orchestrator._select_runner(issue)
+
+    assert isinstance(runner, CodexRunner)
+
+
+def test_mixed_restart_uses_durable_provider_assignment(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    _write_mixed_workflow(workflow_path, claude_weight=0, codex_weight=100)
+    first = Orchestrator(workflow_path, runner_selector=MixedRunnerSelector())
+    first._load_workflow(initial=True)
+    issue = _issue()
+    issue.labels.append("provider:codex")
+
+    _write_mixed_workflow(workflow_path, claude_weight=100, codex_weight=0)
+    restarted = Orchestrator(workflow_path, runner_selector=MixedRunnerSelector())
+    restarted._load_workflow(initial=True)
+
+    runner = restarted._select_runner(issue)
+
+    assert isinstance(runner, CodexRunner)
 
 
 def test_selection_after_reload_uses_current_config(tmp_path: Path) -> None:
