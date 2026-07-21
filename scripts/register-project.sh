@@ -59,6 +59,7 @@ cat > "$PROJ_DIR/project.env" <<EOF
 # Switchboard project binding for '$SLUG'. Sourced and exported by run-project.sh
 # so the workspace hooks can see it. Secrets stay in the environment, not here.
 SB_PROJECT_SLUG=$SLUG
+SB_WORKFLOW_TEMPLATE=base
 SB_GITHUB_REPO=$REPO
 SB_BASE_BRANCH=$BASE
 SB_WORKSPACE_ROOT=$WORKSPACE_ROOT

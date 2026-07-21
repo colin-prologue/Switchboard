@@ -186,12 +186,61 @@ Structural proposals (merge/split/resequence) pass a skeptic refute sub-check
 
 ---
 
+## Verify the orchestrator
+
+After installing (or before touching orchestrator code), run the full test
+suite from the repository root:
+
+```bash
+uv run --project orchestrator python -m pytest orchestrator/tests -q
+```
+
+Pass the explicit `orchestrator/tests` path rather than a bare `pytest`. The
+path makes pytest discover `orchestrator/pyproject.toml` — including its
+`asyncio_mode = "auto"` configuration — instead of the repository root, where
+the async tests would fail to collect. This is the same command `SETUP.md` uses
+to verify a fresh install.
+
+---
+
+## Experimental Codex-only canary
+
+The normal process remains Claude-only. Stage 5 adds an explicit Codex canary
+mode for isolated test projects. Mixed routing is separately opt-in and remains
+limited to the Stage 6 synthetic canary; it does not change the normal process.
+The Codex canary workflow must use only the strict provider envelope:
+
+```yaml
+providers:
+  codex:
+    kind: codex-cli
+    # command and timeout fields are optional; safe subscription defaults apply.
+```
+
+Confirm the host has a persisted ChatGPT login, then opt in at process start:
+
+```bash
+codex login status
+uv run --project orchestrator python -m orchestrator \
+  --workflow projects/<isolated-canary>/WORKFLOW.md --provider codex
+```
+
+Without `--provider codex`, startup still validates and selects Claude. Codex
+mode rejects legacy execution blocks and mixed `providers` maps. Use it only
+against a separate canary repository. The checked-in mixed-canary binding starts
+at `claude: 100, codex: 0`; do not launch it until the isolated mixed-canary
+rollout has been reviewed and its operator evidence procedure is in place. Its
+[preflight](projects/mixed-canary/README.md) provisions the required durable
+provider labels before any issue can be claimed.
+
+---
+
 ## Layout
 
 ```
 switchboard/
   spec/            # SPEC.md (owned bindings) + SPEC.core.md (vendored) + PROVENANCE.md
-  orchestrator/    # Python/asyncio implementation: scheduler, Claude runner,
+  orchestrator/    # Python/asyncio implementation: scheduler, CLI runners,
                    #   GitHub tracker, workspace mgr; pytest suite in tests/
   workflow/        # WORKFLOW.base.md — shared methodology base (defaults + prompt)
   methodology/     # METHODOLOGY.md — the IDSD workflow agents follow

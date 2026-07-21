@@ -25,12 +25,78 @@ from .types import (
     DEFAULT_WORKSPACE_ROOT,
     AgentConfig,
     ClaudeConfig,
+    CodexConfig,
     HooksConfig,
+    MixedExecutionConfig,
     TrackerConfig,
     WorkflowDefinition,
     WorkflowError,
     resolve_env_indirection,
 )
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """SafeLoader variant that rejects silent last-key-wins mappings."""
+
+    def _check_mapping_keys(self, node, *, deep=False, checked=None):
+        if not isinstance(node, yaml.nodes.MappingNode):
+            raise yaml.constructor.ConstructorError(
+                None,
+                None,
+                f"expected a mapping node, got {node.id}",
+                node.start_mark,
+            )
+        if checked is None:
+            checked = set()
+        node_id = id(node)
+        if node_id in checked:
+            return
+        checked.add(node_id)
+
+        # Inspect the textual mapping before SafeLoader flattens `<<` merges.
+        # After flattening, an explicit override correctly appears twice and is
+        # indistinguishable from a literal duplicate key.
+        seen = set()
+        for key_node, value_node in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                key = key_node.value
+            else:
+                key = self.construct_object(key_node, deep=deep)
+            identity = (key_node.tag, key)
+            try:
+                duplicate = identity in seen
+            except TypeError as exc:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "found an unhashable key",
+                    key_node.start_mark,
+                ) from exc
+            if duplicate:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            seen.add(identity)
+
+            if key_node.tag != "tag:yaml.org,2002:merge":
+                continue
+            if isinstance(value_node, yaml.nodes.MappingNode):
+                self._check_mapping_keys(
+                    value_node, deep=deep, checked=checked
+                )
+            elif isinstance(value_node, yaml.nodes.SequenceNode):
+                for merge_source in value_node.value:
+                    if isinstance(merge_source, yaml.nodes.MappingNode):
+                        self._check_mapping_keys(
+                            merge_source, deep=deep, checked=checked
+                        )
+
+    def construct_mapping(self, node, deep=False):
+        self._check_mapping_keys(node, deep=deep)
+        return super().construct_mapping(node, deep=deep)
 
 
 # --- loading (core §5.1/5.2) --------------------------------------------------
@@ -67,7 +133,7 @@ def load_workflow(path: Path) -> WorkflowDefinition:
             body = "".join(lines[end_idx + 1:])
 
         try:
-            raw = yaml.safe_load(front_matter_text)
+            raw = yaml.load(front_matter_text, Loader=_UniqueKeySafeLoader)
         except yaml.YAMLError as e:
             raise WorkflowError("workflow_parse_error", str(e)) from e
 
@@ -277,11 +343,46 @@ class Config:
             max_sessions_per_issue=max_sessions_per_issue,
         )
 
-    # -- claude (SPEC.md §1: pass-through execution block) ----------------------
+    # -- execution providers (SPEC.md §1; AgDR-017 dual-read migration) ---------
 
-    def claude(self) -> ClaudeConfig:
-        raw = self._config.get("claude")
-        raw = raw if isinstance(raw, dict) else {}
+    @staticmethod
+    def _parse_claude(
+        raw: dict[str, Any],
+        path: str,
+        *,
+        strict: bool = False,
+    ) -> ClaudeConfig:
+        """Parse one legacy or provider-enveloped Claude settings block."""
+
+        if strict:
+            allowed = {
+                "kind",
+                "command",
+                "max_turns",
+                "max_budget_usd",
+                "turn_timeout_ms",
+                "read_timeout_ms",
+                "stall_timeout_ms",
+            }
+            unknown = [key for key in raw if key not in allowed]
+            if unknown:
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    f"{path} contains unknown fields: "
+                    f"{', '.join(sorted(map(str, unknown)))}",
+                )
+            if "command" in raw and not isinstance(raw["command"], str):
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    f"{path}.command must be a string, got "
+                    f"{type(raw['command']).__name__}",
+                )
+            budget = raw.get("max_budget_usd")
+            if isinstance(budget, bool):
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    f"{path}.max_budget_usd must be numeric or null, got {budget!r}",
+                )
 
         command = raw.get("command")
         command = command if isinstance(command, str) else "claude -p --verbose --output-format stream-json"
@@ -290,7 +391,7 @@ class Config:
         if isinstance(max_turns, bool) or not isinstance(max_turns, int) or max_turns <= 0:
             raise WorkflowError(
                 "workflow_parse_error",
-                f"claude.max_turns must be a positive integer, got {max_turns!r}",
+                f"{path}.max_turns must be a positive integer, got {max_turns!r}",
             )
 
         max_budget_usd_raw = raw.get("max_budget_usd")
@@ -304,7 +405,7 @@ class Config:
         else:
             raise WorkflowError(
                 "workflow_parse_error",
-                f"claude.max_budget_usd must be numeric, got {max_budget_usd_raw!r}",
+                f"{path}.max_budget_usd must be numeric, got {max_budget_usd_raw!r}",
             )
 
         def _timeout(key: str, default: int) -> int:
@@ -312,7 +413,7 @@ class Config:
             if isinstance(v, bool) or not isinstance(v, int):
                 raise WorkflowError(
                     "workflow_parse_error",
-                    f"claude.{key} must be an integer, got {v!r}",
+                    f"{path}.{key} must be an integer, got {v!r}",
                 )
             return v
 
@@ -323,6 +424,292 @@ class Config:
             turn_timeout_ms=_timeout("turn_timeout_ms", 3600000),
             read_timeout_ms=_timeout("read_timeout_ms", 5000),
             stall_timeout_ms=_timeout("stall_timeout_ms", 300000),
+        )
+
+    def claude(self) -> ClaudeConfig:
+        """Return canonical Claude config from the legacy or provider envelope.
+
+        Stage 2 deliberately supports only the canonical provider id `claude`
+        and kind `claude-cli`. Runtime selection remains Claude-only; accepting
+        another provider here before its adapter exists would make a workflow
+        look deployable while silently ignoring that provider.
+        """
+        legacy_present = "claude" in self._config
+        legacy_raw = self._config.get("claude")
+        # Preserve the legacy getter's established coercion: a non-map block is
+        # treated as an empty block and receives defaults.
+        legacy_map = legacy_raw if isinstance(legacy_raw, dict) else {}
+        legacy_cfg = self._parse_claude(legacy_map, "claude")
+
+        if "providers" not in self._config:
+            return legacy_cfg
+
+        providers = self._config["providers"]
+        if not isinstance(providers, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"providers must be a map, got {type(providers).__name__}",
+            )
+
+        unsupported = [provider_id for provider_id in providers if provider_id != "claude"]
+        if unsupported:
+            raise WorkflowError(
+                "unsupported_provider_id",
+                f"providers contains unsupported provider ids: "
+                f"{', '.join(sorted(map(str, unsupported)))}; Stage 2 supports only 'claude'",
+            )
+
+        if "claude" not in providers:
+            raise WorkflowError(
+                "missing_provider_config",
+                "providers.claude is required while Claude is the only runtime provider",
+            )
+
+        provider_raw = providers["claude"]
+        if not isinstance(provider_raw, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"providers.claude must be a map, got {type(provider_raw).__name__}",
+            )
+
+        kind = provider_raw.get("kind")
+        if kind != "claude-cli":
+            raise WorkflowError(
+                "unsupported_provider_kind",
+                f"providers.claude.kind must be 'claude-cli', got {kind!r}",
+            )
+
+        provider_cfg = self._parse_claude(
+            provider_raw,
+            "providers.claude",
+            strict=True,
+        )
+        if legacy_present and legacy_cfg != provider_cfg:
+            raise WorkflowError(
+                "conflicting_provider_config",
+                "claude and providers.claude resolve to different settings; "
+                "make them equivalent or configure only one form",
+            )
+        return provider_cfg
+
+    def codex(self) -> CodexConfig:
+        """Return the strict Codex CLI config for the opt-in canary mode.
+
+        Codex has no legacy top-level form. Stage 5 accepts exactly one
+        provider per process so a workflow cannot imply mixed routing before
+        the scheduler has a policy for it.
+        """
+        providers = self._config.get("providers")
+        if not isinstance(providers, dict) or "codex" not in providers:
+            raise WorkflowError(
+                "missing_provider_config",
+                "providers.codex is required for Codex canary mode",
+            )
+
+        unsupported = [provider_id for provider_id in providers if provider_id != "codex"]
+        if unsupported:
+            raise WorkflowError(
+                "unsupported_provider_id",
+                "Codex canary mode accepts only providers.codex; found: "
+                f"{', '.join(sorted(map(str, unsupported)))}",
+            )
+
+        legacy_blocks = [name for name in ("claude", "codex") if name in self._config]
+        if legacy_blocks:
+            raise WorkflowError(
+                "unsupported_provider_id",
+                "Codex canary mode does not accept legacy execution blocks: "
+                f"{', '.join(legacy_blocks)}",
+            )
+
+        raw = providers["codex"]
+        return self._parse_codex(raw, "providers.codex")
+
+    @staticmethod
+    def _parse_codex(raw: Any, path: str) -> CodexConfig:
+        if not isinstance(raw, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"{path} must be a map, got {type(raw).__name__}",
+            )
+
+        allowed = {
+            "kind",
+            "command",
+            "turn_timeout_ms",
+            "read_timeout_ms",
+            "stall_timeout_ms",
+        }
+        unknown = [key for key in raw if key not in allowed]
+        if unknown:
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"{path} contains unknown fields: "
+                f"{', '.join(sorted(map(str, unknown)))}",
+            )
+        if raw.get("kind") != "codex-cli":
+            raise WorkflowError(
+                "unsupported_provider_kind",
+                f"{path}.kind must be 'codex-cli', "
+                f"got {raw.get('kind')!r}",
+            )
+
+        defaults = CodexConfig()
+        command = raw.get("command", defaults.command)
+        if not isinstance(command, str):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"{path}.command must be a string, "
+                f"got {type(command).__name__}",
+            )
+
+        def _timeout(key: str, default: int) -> int:
+            value = raw.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise WorkflowError(
+                "workflow_parse_error",
+                f"{path}.{key} must be an integer, got {value!r}",
+            )
+            return value
+
+        return CodexConfig(
+            command=command,
+            turn_timeout_ms=_timeout("turn_timeout_ms", defaults.turn_timeout_ms),
+            read_timeout_ms=_timeout("read_timeout_ms", defaults.read_timeout_ms),
+            stall_timeout_ms=_timeout("stall_timeout_ms", defaults.stall_timeout_ms),
+        )
+
+    def mixed(self) -> MixedExecutionConfig:
+        """Return the strict, validation-only Stage 6 mixed-mode envelope."""
+        legacy_blocks = [name for name in ("claude", "codex") if name in self._config]
+        if legacy_blocks:
+            raise WorkflowError(
+                "unsupported_provider_id",
+                "mixed mode does not accept legacy execution blocks: "
+                f"{', '.join(legacy_blocks)}",
+            )
+
+        providers = self._config.get("providers")
+        if not isinstance(providers, dict):
+            raise WorkflowError(
+                "missing_provider_config",
+                "mixed mode requires providers.claude and providers.codex",
+            )
+        expected = {"claude", "codex"}
+        actual = set(providers)
+        missing = expected - actual
+        unknown = actual - expected
+        if missing:
+            raise WorkflowError(
+                "missing_provider_config",
+                "mixed mode is missing providers: " + ", ".join(sorted(missing)),
+            )
+        if unknown:
+            raise WorkflowError(
+                "unsupported_provider_id",
+                "mixed mode contains unsupported providers: "
+                + ", ".join(sorted(map(str, unknown))),
+            )
+
+        claude_raw = providers["claude"]
+        if not isinstance(claude_raw, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"providers.claude must be a map, got {type(claude_raw).__name__}",
+            )
+        if claude_raw.get("kind") != "claude-cli":
+            raise WorkflowError(
+                "unsupported_provider_kind",
+                "providers.claude.kind must be 'claude-cli', "
+                f"got {claude_raw.get('kind')!r}",
+            )
+        claude = self._parse_claude(claude_raw, "providers.claude", strict=True)
+        codex = self._parse_codex(providers["codex"], "providers.codex")
+
+        routing = self._config.get("routing")
+        if not isinstance(routing, dict):
+            raise WorkflowError(
+                "missing_routing_config",
+                "mixed mode requires a routing.weights map",
+            )
+        routing_unknown = set(routing) - {"weights"}
+        if routing_unknown:
+            raise WorkflowError(
+                "workflow_parse_error",
+                "routing contains unknown fields: "
+                + ", ".join(sorted(map(str, routing_unknown))),
+            )
+        weights_raw = routing.get("weights")
+        if not isinstance(weights_raw, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                "routing.weights must be a map",
+            )
+        weight_names = set(weights_raw)
+        if weight_names != expected:
+            raise WorkflowError(
+                "workflow_parse_error",
+                "routing.weights must name exactly claude and codex",
+            )
+        weights: dict[str, int] = {}
+        for provider_id, weight in weights_raw.items():
+            if isinstance(weight, bool) or not isinstance(weight, int) or weight < 0:
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    f"routing.weights.{provider_id} must be a non-negative integer, "
+                    f"got {weight!r}",
+                )
+            weights[provider_id] = weight
+        if sum(weights.values()) <= 0:
+            raise WorkflowError(
+                "workflow_parse_error",
+                "routing.weights must contain at least one positive value",
+            )
+
+        agent_raw = self._config.get("agent", {})
+        if not isinstance(agent_raw, dict):
+            raise WorkflowError("workflow_parse_error", "agent must be a map in mixed mode")
+        caps_raw = agent_raw.get("max_concurrent_agents_by_provider", {})
+        if not isinstance(caps_raw, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                "agent.max_concurrent_agents_by_provider must be a map",
+            )
+        global_cap = self.agent().max_concurrent_agents
+        caps: dict[str, int] = {}
+        for provider_id, cap in caps_raw.items():
+            if provider_id not in expected:
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    "agent.max_concurrent_agents_by_provider names an unknown "
+                    f"provider: {provider_id!r}",
+                )
+            if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    "agent.max_concurrent_agents_by_provider."
+                    f"{provider_id} must be a positive integer, got {cap!r}",
+                )
+            if cap > global_cap:
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    "agent.max_concurrent_agents_by_provider."
+                    f"{provider_id} ({cap}) exceeds global max_concurrent_agents "
+                    f"({global_cap})",
+                )
+            caps[provider_id] = cap
+
+        for provider_id, provider_cfg in (("claude", claude), ("codex", codex)):
+            if not provider_cfg.command.strip():
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    f"{provider_id}.command must be non-empty",
+                )
+        return MixedExecutionConfig(
+            claude=claude,
+            codex=codex,
+            weights=weights,
+            max_concurrent_agents_by_provider=caps,
         )
 
 
@@ -395,7 +782,7 @@ def build_credentials(
 
 # --- dispatch preflight validation (core §6.3, adapted per SPEC.md §2) -------
 
-def validate_dispatch(cfg: Config) -> None:
+def validate_dispatch(cfg: Config, *, provider_id: str = "claude") -> None:
     """Raise WorkflowError if config is unfit for a new dispatch cycle."""
     tracker = cfg.tracker()
 
@@ -429,9 +816,23 @@ def validate_dispatch(cfg: Config) -> None:
             f"tracker.repo must be shaped like owner/name, got {tracker.repo!r}",
         )
 
-    claude_cfg = cfg.claude()
-    if not claude_cfg.command.strip():
-        raise WorkflowError("workflow_parse_error", "claude.command must be non-empty")
+    if provider_id == "claude":
+        provider_cfg = cfg.claude()
+    elif provider_id == "codex":
+        provider_cfg = cfg.codex()
+    elif provider_id == "mixed":
+        cfg.mixed()
+        provider_cfg = None
+    else:
+        raise WorkflowError(
+            "unsupported_provider_id",
+            f"unsupported runtime provider id: {provider_id!r}",
+        )
+    if provider_cfg is not None and not provider_cfg.command.strip():
+        raise WorkflowError(
+            "workflow_parse_error",
+            f"{provider_id}.command must be non-empty",
+        )
 
     # Force typed-getter validation now so invalid agent/hook/workspace/polling
     # values fail startup (§6.3) instead of surfacing as per-tick errors forever.

@@ -12,7 +12,13 @@ from pathlib import Path
 import httpx
 import pytest
 
-from orchestrator.types import WorkflowDefinition, WorkflowError
+from orchestrator.types import (
+    ClaudeConfig,
+    CodexConfig,
+    MixedExecutionConfig,
+    WorkflowDefinition,
+    WorkflowError,
+)
 from orchestrator.workflow import Config, load_workflow, validate_dispatch
 
 
@@ -75,6 +81,65 @@ def test_non_map_front_matter_raises_typed_error(tmp_path: Path):
     with pytest.raises(WorkflowError) as exc_info:
         load_workflow(p)
     assert exc_info.value.code == "workflow_front_matter_not_a_map"
+
+
+def test_duplicate_yaml_mapping_key_raises_parse_error(tmp_path: Path):
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "claude:\n"
+        "  command: first\n"
+        "claude:\n"
+        "  command: second\n"
+        "---\n"
+        "body\n"
+    )
+
+    with pytest.raises(WorkflowError) as exc_info:
+        load_workflow(p)
+
+    assert exc_info.value.code == "workflow_parse_error"
+    assert "duplicate key" in str(exc_info.value)
+    assert "claude" in str(exc_info.value)
+
+
+def test_yaml_merge_override_remains_valid_for_legacy_workflow(tmp_path: Path):
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "claude_defaults: &claude_defaults\n"
+        "  command: inherited\n"
+        "  max_turns: 20\n"
+        "claude:\n"
+        "  <<: *claude_defaults\n"
+        "  command: overridden\n"
+        "---\n"
+        "body\n"
+    )
+
+    cfg = Config(load_workflow(p), tmp_path)
+
+    assert cfg.claude().command == "overridden"
+    assert cfg.claude().max_turns == 20
+
+
+def test_duplicate_key_inside_inline_merge_source_raises(tmp_path: Path):
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "providers:\n"
+        "  claude:\n"
+        "    <<: {kind: claude-cli, command: first, command: second}\n"
+        "---\n"
+        "body\n"
+    )
+
+    with pytest.raises(WorkflowError) as exc_info:
+        load_workflow(p)
+
+    assert exc_info.value.code == "workflow_parse_error"
+    assert "duplicate key" in str(exc_info.value)
+    assert "command" in str(exc_info.value)
 
 
 def test_empty_front_matter_yields_empty_config(tmp_path: Path):
@@ -296,6 +361,409 @@ def test_claude_max_budget_usd_float(tmp_path: Path):
     cfg = Config(defn, tmp_path)
     assert cfg.claude().max_budget_usd == 5.0
     assert isinstance(cfg.claude().max_budget_usd, float)
+
+
+def test_providers_claude_parses_to_existing_typed_config(tmp_path: Path):
+    defn = WorkflowDefinition(
+        config={
+            "providers": {
+                "claude": {
+                    "kind": "claude-cli",
+                    "command": "claude -p --output-format stream-json",
+                    "max_turns": 40,
+                    "max_budget_usd": 7,
+                    "turn_timeout_ms": 1234,
+                    "read_timeout_ms": 2345,
+                    "stall_timeout_ms": 3456,
+                }
+            }
+        },
+        prompt_template="",
+    )
+
+    cfg = Config(defn, tmp_path)
+    assert cfg.claude() == ClaudeConfig(
+        command="claude -p --output-format stream-json",
+        max_turns=40,
+        max_budget_usd=7.0,
+        turn_timeout_ms=1234,
+        read_timeout_ms=2345,
+        stall_timeout_ms=3456,
+    )
+
+
+def test_providers_codex_parses_to_typed_config(tmp_path: Path):
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "providers": {
+                    "codex": {
+                        "kind": "codex-cli",
+                        "command": "codex --sandbox workspace-write",
+                        "turn_timeout_ms": 1234,
+                        "read_timeout_ms": 2345,
+                        "stall_timeout_ms": 3456,
+                    }
+                }
+            },
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    assert cfg.codex() == CodexConfig(
+        command="codex --sandbox workspace-write",
+        turn_timeout_ms=1234,
+        read_timeout_ms=2345,
+        stall_timeout_ms=3456,
+    )
+
+
+def test_providers_codex_uses_safe_adapter_defaults(tmp_path: Path):
+    cfg = Config(
+        WorkflowDefinition(
+            config={"providers": {"codex": {"kind": "codex-cli"}}},
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    assert cfg.codex() == CodexConfig()
+
+
+@pytest.mark.parametrize(
+    ("config", "error_code"),
+    [
+        ({"codex": {"command": "codex"}}, "missing_provider_config"),
+        (
+            {
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                }
+            },
+            "unsupported_provider_id",
+        ),
+        (
+            {
+                "claude": {"command": "claude -p"},
+                "providers": {"codex": {"kind": "codex-cli"}},
+            },
+            "unsupported_provider_id",
+        ),
+        (
+            {"providers": {"codex": {"kind": "openai-api"}}},
+            "unsupported_provider_kind",
+        ),
+        (
+            {"providers": {"codex": {"kind": "codex-cli", "unknown": 1}}},
+            "workflow_parse_error",
+        ),
+    ],
+)
+def test_codex_config_rejects_legacy_mixed_or_malformed_forms(
+    tmp_path: Path,
+    config: dict,
+    error_code: str,
+) -> None:
+    cfg = Config(WorkflowDefinition(config=config, prompt_template=""), tmp_path)
+
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.codex()
+
+    assert exc_info.value.code == error_code
+
+
+def test_equivalent_legacy_and_provider_claude_blocks_are_accepted(tmp_path: Path):
+    defn = WorkflowDefinition(
+        config={
+            "claude": {"command": "claude -p"},
+            "providers": {
+                "claude": {
+                    "kind": "claude-cli",
+                    "command": "claude -p",
+                    "max_turns": 20,
+                }
+            },
+        },
+        prompt_template="",
+    )
+
+    assert Config(defn, tmp_path).claude().max_turns == 20
+
+
+def test_legacy_claude_coercions_remain_unchanged(tmp_path: Path):
+    cfg = Config(
+        WorkflowDefinition(
+            config={"claude": {"command": 42, "max_budget_usd": True}},
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    assert cfg.claude().command == "claude -p --verbose --output-format stream-json"
+    assert cfg.claude().max_budget_usd is None
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"command": 42},
+        {"max_budget_usd": True},
+        {"max_budget_usd": "five"},
+        {"max_buget_usd": 5},
+    ],
+)
+def test_provider_claude_rejects_malformed_or_unknown_fields(
+    tmp_path: Path,
+    override: dict,
+):
+    provider = {"kind": "claude-cli", **override}
+    cfg = Config(
+        WorkflowDefinition(
+            config={"providers": {"claude": provider}},
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.claude()
+
+    assert exc_info.value.code == "workflow_parse_error"
+    assert "providers.claude" in str(exc_info.value)
+
+
+def test_conflicting_legacy_and_provider_claude_blocks_fail(tmp_path: Path):
+    defn = WorkflowDefinition(
+        config={
+            "claude": {"command": "claude -p", "max_turns": 20},
+            "providers": {
+                "claude": {
+                    "kind": "claude-cli",
+                    "command": "claude -p",
+                    "max_turns": 30,
+                }
+            },
+        },
+        prompt_template="",
+    )
+
+    with pytest.raises(WorkflowError) as exc_info:
+        Config(defn, tmp_path).claude()
+
+    assert exc_info.value.code == "conflicting_provider_config"
+    assert "claude" in str(exc_info.value)
+    assert "providers.claude" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("providers", "error_code"),
+    [
+        ([], "workflow_parse_error"),
+        ({}, "missing_provider_config"),
+        ({"claude": []}, "workflow_parse_error"),
+        ({"claude": {}}, "unsupported_provider_kind"),
+        (
+            {
+                "claude": {"kind": "claude-cli"},
+                "codex": {"kind": "codex-cli"},
+            },
+            "unsupported_provider_id",
+        ),
+        (
+            {"claude": {"kind": "not-claude-cli"}},
+            "unsupported_provider_kind",
+        ),
+    ],
+)
+def test_invalid_provider_envelopes_fail(
+    tmp_path: Path,
+    providers,
+    error_code: str,
+):
+    cfg = Config(
+        WorkflowDefinition(config={"providers": providers}, prompt_template=""),
+        tmp_path,
+    )
+
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.claude()
+
+    assert exc_info.value.code == error_code
+
+
+def test_validate_dispatch_accepts_new_provider_envelope(tmp_path: Path):
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "api_key": "literal-token",
+            },
+            "providers": {
+                "claude": {"kind": "claude-cli", "command": "claude -p"}
+            },
+        },
+        prompt_template="",
+    )
+
+    validate_dispatch(Config(defn, tmp_path))
+
+
+def test_validate_dispatch_accepts_codex_only_when_explicitly_selected(
+    tmp_path: Path,
+) -> None:
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "tracker": {
+                    "kind": "github",
+                    "repo": "acme/widgets",
+                    "api_key": "literal-token",
+                },
+                "providers": {"codex": {"kind": "codex-cli"}},
+            },
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    validate_dispatch(cfg, provider_id="codex")
+    with pytest.raises(WorkflowError) as exc_info:
+        validate_dispatch(cfg)
+    assert exc_info.value.code == "unsupported_provider_id"
+
+
+def test_mixed_mode_parses_complete_envelope_and_validates_dispatch(
+    tmp_path: Path,
+) -> None:
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "tracker": {
+                    "kind": "github",
+                    "repo": "acme/widgets",
+                    "api_key": "literal-token",
+                },
+                "agent": {
+                    "max_concurrent_agents": 4,
+                    "max_concurrent_agents_by_provider": {
+                        "claude": 4,
+                        "codex": 1,
+                    },
+                },
+                "providers": {
+                    "claude": {"kind": "claude-cli", "command": "claude -p"},
+                    "codex": {"kind": "codex-cli", "command": "codex"},
+                },
+                "routing": {"weights": {"claude": 100, "codex": 0}},
+            },
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    mixed = cfg.mixed()
+
+    assert mixed == MixedExecutionConfig(
+        claude=ClaudeConfig(command="claude -p", max_turns=20, max_budget_usd=None,
+                            turn_timeout_ms=3600000, read_timeout_ms=5000,
+                            stall_timeout_ms=300000),
+        codex=CodexConfig(command="codex"),
+        weights={"claude": 100, "codex": 0},
+        max_concurrent_agents_by_provider={"claude": 4, "codex": 1},
+    )
+    validate_dispatch(cfg, provider_id="mixed")
+
+
+def test_mixed_mode_uses_global_cap_when_provider_caps_are_omitted(
+    tmp_path: Path,
+) -> None:
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                },
+                "routing": {"weights": {"claude": 1, "codex": 1}},
+            },
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    assert cfg.mixed().max_concurrent_agents_by_provider == {}
+
+
+@pytest.mark.parametrize(
+    ("config", "error_code"),
+    [
+        (
+            {
+                "providers": {"claude": {"kind": "claude-cli"}},
+                "routing": {"weights": {"claude": 1, "codex": 1}},
+            },
+            "missing_provider_config",
+        ),
+        (
+            {
+                "claude": {"command": "claude -p"},
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                },
+                "routing": {"weights": {"claude": 1, "codex": 1}},
+            },
+            "unsupported_provider_id",
+        ),
+        (
+            {
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                },
+            },
+            "missing_routing_config",
+        ),
+        (
+            {
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                },
+                "routing": {"weights": {"claude": 0, "codex": 0}},
+            },
+            "workflow_parse_error",
+        ),
+        (
+            {
+                "agent": {
+                    "max_concurrent_agents": 2,
+                    "max_concurrent_agents_by_provider": {"codex": 3},
+                },
+                "providers": {
+                    "claude": {"kind": "claude-cli"},
+                    "codex": {"kind": "codex-cli"},
+                },
+                "routing": {"weights": {"claude": 1, "codex": 1}},
+            },
+            "workflow_parse_error",
+        ),
+    ],
+)
+def test_mixed_mode_rejects_incomplete_or_unsafe_config(
+    tmp_path: Path,
+    config: dict,
+    error_code: str,
+) -> None:
+    cfg = Config(WorkflowDefinition(config=config, prompt_template=""), tmp_path)
+
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.mixed()
+
+    assert exc_info.value.code == error_code
 
 
 # --- validate_dispatch() -----------------------------------------------------------

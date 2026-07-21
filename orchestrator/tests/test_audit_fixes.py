@@ -132,6 +132,25 @@ claude:
 Body {{{{ issue.identifier }}}}
 """
 
+WORKFLOW_PROVIDER_CONFLICT = """---
+tracker:
+  kind: github
+  repo: "acme/api"
+  api_key: "tok"
+polling:
+  interval_ms: 100
+workspace:
+  root: "{root}"
+claude:
+  command: "unused"
+providers:
+  claude:
+    kind: claude-cli
+    command: "different"
+---
+Body {{{{ issue.identifier }}}}
+"""
+
 
 async def test_broken_reload_blocks_dispatch(tmp_path):
     from orchestrator.scheduler import Orchestrator
@@ -158,7 +177,7 @@ async def test_broken_reload_blocks_dispatch(tmp_path):
             pass
 
     real = orch._components
-    orch._components = lambda: (T(), real()[1], real()[2])
+    orch._components = lambda: (T(), real()[1])
 
     await orch._tick()
     assert calls["fetch"] == 1  # healthy: dispatch path reached the tracker
@@ -172,3 +191,39 @@ async def test_broken_reload_blocks_dispatch(tmp_path):
     orch._workflow_mtime = None
     await orch._tick()
     assert calls["fetch"] == 2  # dispatch resumes
+
+
+async def test_conflicting_provider_reload_keeps_last_good_and_blocks_dispatch(
+    tmp_path,
+):
+    from orchestrator.scheduler import Orchestrator
+
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text(WORKFLOW.format(root=tmp_path / "ws"))
+    orch = Orchestrator(wf)
+    orch._load_workflow(initial=True)
+    last_good = orch._cfg.claude()
+
+    calls = {"fetch": 0}
+
+    class T:
+        async def fetch_candidate_issues(self):
+            calls["fetch"] += 1
+            return []
+
+        async def fetch_issue_states_by_ids(self, ids):
+            return []
+
+    real = orch._components
+    orch._components = lambda: (T(), real()[1])
+
+    await orch._tick()
+    assert calls["fetch"] == 1
+
+    wf.write_text(WORKFLOW_PROVIDER_CONFLICT.format(root=tmp_path / "ws"))
+    orch._workflow_mtime = None
+    await orch._tick()
+
+    assert calls["fetch"] == 1
+    assert orch._cfg.claude() == last_good
+    assert "providers.claude" in orch._workflow_broken

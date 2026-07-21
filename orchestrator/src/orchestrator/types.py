@@ -100,6 +100,29 @@ class ClaudeConfig:
     stall_timeout_ms: int        # default 300000; <= 0 disables stall detection
 
 
+@dataclass
+class CodexConfig:
+    """Standalone Codex CLI adapter settings; not workflow-selectable yet."""
+
+    command: str = (
+        "codex --ask-for-approval never --sandbox workspace-write "
+        "--config sandbox_workspace_write.network_access=true"
+    )
+    turn_timeout_ms: int = 3600000
+    read_timeout_ms: int = 30000
+    stall_timeout_ms: int = 300000
+
+
+@dataclass
+class MixedExecutionConfig:
+    """Validated Stage 6 mixed-mode envelope for provider selection."""
+
+    claude: ClaudeConfig
+    codex: CodexConfig
+    weights: dict[str, int]
+    max_concurrent_agents_by_provider: dict[str, int]
+
+
 DEFAULT_WORKSPACE_ROOT = str(Path(tempfile.gettempdir()) / "symphony_workspaces")
 
 

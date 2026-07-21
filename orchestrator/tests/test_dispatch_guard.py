@@ -93,7 +93,12 @@ class FakeTracker:
 
 
 class FakeRunner:
+    provider_id = "fake"
+
     def __init__(self, hold: bool = False):
+        self.turn_timeout_ms = 5000
+        self.stall_timeout_ms = 0
+        self.max_budget_usd: float | None = None
         self.hold = hold
         self.release = asyncio.Event()
         self.turns: list[tuple[str, str | None, str]] = []
@@ -106,6 +111,19 @@ class FakeRunner:
         return TurnResult(status="succeeded", session_id=f"sess-{len(self.turns)}",
                           cost_usd=0.01, usage={"input_tokens": 1, "output_tokens": 1},
                           num_turns=1)
+
+
+class FixedRunnerSelector:
+    def __init__(self, runner):
+        self.runner = runner
+        self.provider_id = "claude"
+
+    def select(self, cfg, issue):
+        provider_cfg = cfg.claude()
+        self.runner.turn_timeout_ms = provider_cfg.turn_timeout_ms
+        self.runner.stall_timeout_ms = provider_cfg.stall_timeout_ms
+        self.runner.max_budget_usd = provider_cfg.max_budget_usd
+        return self.runner
 
 
 WORKFLOW_TMPL = """---
@@ -141,15 +159,15 @@ def _build_harness(tmp_path, monkeypatch):
     ws_root = tmp_path / "ws"
     wf = tmp_path / "WORKFLOW.md"
     wf.write_text(WORKFLOW_TMPL.format(ws_root=ws_root))
-    orch = Orchestrator(wf)
+    runner = FakeRunner()
+    orch = Orchestrator(wf, runner_selector=FixedRunnerSelector(runner))
     orch._load_workflow(initial=True)
     tracker = FakeTracker()
-    runner = FakeRunner()
     real_components = orch._components
 
     def fake_components():
-        _, wsm, _ = real_components()
-        return tracker, wsm, runner
+        _, wsm = real_components()
+        return tracker, wsm
 
     orch._components = fake_components
     return orch, tracker, runner, ws_root

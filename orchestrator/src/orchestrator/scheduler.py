@@ -26,9 +26,14 @@ from pathlib import Path
 
 import httpx
 
+from .agent_runner import AgentRunner
 from .log import log
 from .prompt import render_prompt
-from .runner import ClaudeRunner
+from .runner_selector import (
+    AgentRunnerSelector,
+    ClaudeOnlyRunnerSelector,
+    MixedAssignmentRefused,
+)
 from .tracker import GitHubTracker
 from .transitions import load_requires_marker
 from .types import (
@@ -89,6 +94,8 @@ class RunningEntry:
     task: asyncio.Task
     identifier: str
     issue: Issue
+    provider_id: str
+    stall_timeout_ms: int
     session_id: str | None = None
     last_event_at: datetime | None = None  # stall-detection anchor (§8.5)
     retry_attempt: int | None = None
@@ -103,8 +110,18 @@ class WorkerFailure(Exception):
 
 
 class Orchestrator:
-    def __init__(self, workflow_path: Path):
+    def __init__(
+        self,
+        workflow_path: Path,
+        *,
+        runner_selector: AgentRunnerSelector | None = None,
+    ):
         self.workflow_path = workflow_path.resolve()
+        self._runner_selector = (
+            runner_selector
+            if runner_selector is not None
+            else ClaudeOnlyRunnerSelector()
+        )
         self._defn = None
         self._cfg: Config | None = None
         self._workflow_mtime: float | None = None
@@ -152,7 +169,7 @@ class Orchestrator:
         assert cfg is not None
         self._creds = build_credentials(cfg.tracker(), os.environ, self._http)
 
-    async def _agent_token(self) -> str | None:
+    async def _agent_token(self, turn_timeout_ms: int) -> str | None:
         """The bot token to inject into an agent turn (cached mint, issue #10).
         None when no provider is wired (test harnesses) — the agent then
         inherits the orchestrator env unchanged. A mint failure becomes a
@@ -165,22 +182,24 @@ class Orchestrator:
             # demand one that outlives the turn bound — a cached token with
             # only the tracker's 300s skew left would expire before a long
             # turn's final push (Codex PR #42 P1).
-            cfg = self._cfg
-            assert cfg is not None
-            min_ttl = cfg.claude().turn_timeout_ms / 1000
+            min_ttl = turn_timeout_ms / 1000
             return await self._creds.token(min_ttl=min_ttl)
         except Exception as exc:
             raise WorkerFailure(f"token mint failed: {exc.__class__.__name__}") from exc
 
     # -- component wiring (config-derived views over shared resources) ----------
 
-    def _components(self) -> tuple[GitHubTracker, WorkspaceManager, ClaudeRunner]:
+    def _components(self) -> tuple[GitHubTracker, WorkspaceManager]:
         cfg = self._cfg
         assert cfg is not None
         tracker = GitHubTracker(cfg.tracker(), client=self._http, creds=self._creds)
         wsm = WorkspaceManager(cfg.workspace_root(), cfg.hooks())
-        runner = ClaudeRunner(cfg.claude())
-        return tracker, wsm, runner
+        return tracker, wsm
+
+    def _select_runner(self, issue: Issue) -> AgentRunner:
+        cfg = self._cfg
+        assert cfg is not None
+        return self._runner_selector.select(cfg, issue)
 
     # -- workflow load / reload (core §5.1, §6.2) -------------------------------
 
@@ -189,7 +208,7 @@ class Orchestrator:
             mtime = self.workflow_path.stat().st_mtime
             defn = load_workflow(self.workflow_path)
             cfg = Config(defn, self.workflow_path.parent)
-            validate_dispatch(cfg)
+            validate_dispatch(cfg, provider_id=self._runner_selector.provider_id)
         except (WorkflowError, OSError) as exc:
             if initial:
                 raise
@@ -275,7 +294,7 @@ class Orchestrator:
         """core §8.6: remove workspaces for issues already terminal."""
         cfg = self._cfg
         assert cfg is not None
-        tracker, wsm, _ = self._components()
+        tracker, wsm = self._components()
         try:
             terminal = await tracker.fetch_issues_by_states(cfg.tracker().terminal_states)
         except TrackerError as exc:
@@ -308,12 +327,12 @@ class Orchestrator:
         cfg = self._cfg
         assert cfg is not None
         try:
-            validate_dispatch(cfg)
+            validate_dispatch(cfg, provider_id=self._runner_selector.provider_id)
         except WorkflowError as exc:
             log("dispatch preflight failed; skipping dispatch this tick", error=str(exc))
             return
 
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         try:
             issues = await tracker.fetch_candidate_issues()
         except TrackerError as exc:
@@ -353,6 +372,23 @@ class Orchestrator:
             return True
         count = sum(1 for e in self.running.values()
                     if e.issue.state.lower() == state.lower())
+        return count < limit
+
+    def _provider_slots_available(self, provider_id: str) -> bool:
+        """Whether a mixed-provider worker can start without exceeding its cap."""
+        if self._runner_selector.provider_id != "mixed":
+            return True
+        cfg = self._cfg
+        assert cfg is not None
+        mixed = cfg.mixed()
+        limit = mixed.max_concurrent_agents_by_provider.get(
+            provider_id,
+            cfg.agent().max_concurrent_agents,
+        )
+        count = sum(
+            1 for entry in self.running.values()
+            if entry.provider_id == provider_id
+        )
         return count < limit
 
     def _should_dispatch(self, issue: Issue) -> bool:
@@ -400,6 +436,13 @@ class Orchestrator:
     async def _dispatch(self, issue: Issue, attempt: int | None) -> None:
         cfg = self._cfg
         assert cfg is not None
+        try:
+            runner = self._select_runner(issue)
+        except MixedAssignmentRefused as exc:
+            log("mixed assignment refused; leaving issue untouched",
+                issue_id=issue.id, issue_identifier=issue.identifier, error=str(exc))
+            return
+
         # Config-driven dispatch guard (issue #29 / AgDR-011): refuse to claim an
         # issue whose current state requires a provenance marker it lacks (e.g. a
         # `status:todo` that never passed triage, so it carries no triage marker).
@@ -420,6 +463,33 @@ class Orchestrator:
             await self._park(issue, f"session cap reached ({spent}/{cap})")
             return
 
+        provider_id = runner.provider_id
+        reserved_for_assignment = False
+        if self._runner_selector.provider_id == "mixed" \
+                and f"provider:{provider_id}" not in issue.labels:
+            # The durable tracker assignment must precede the visible status
+            # claim, but its write awaits I/O. Reserve the issue locally across
+            # that await so a poll tick or retry timer cannot start a second
+            # worker for the same workspace meanwhile.
+            self.claimed.add(issue.id)
+            reserved_for_assignment = True
+            try:
+                assigned = await self._persist_provider_assignment(issue, provider_id)
+            except BaseException:
+                self.claimed.discard(issue.id)
+                raise
+            if not assigned:
+                self.claimed.discard(issue.id)
+                return
+
+        if not self._provider_slots_available(provider_id):
+            if reserved_for_assignment:
+                self.claimed.discard(issue.id)
+            log("mixed provider capacity reached; leaving issue unclaimed",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                provider_id=provider_id)
+            return
+
         # Claim before any await so a concurrent tick/retry timer cannot
         # double-dispatch while the label write below is in flight.
         self.claimed.add(issue.id)
@@ -434,25 +504,48 @@ class Orchestrator:
         if attempt is None and issue.state.lower() == "todo":
             await self._apply_in_progress_label(issue)
 
-        task = asyncio.create_task(self._worker(issue, attempt))
+        task = asyncio.create_task(self._worker(issue, attempt, runner))
         entry = RunningEntry(task=task, identifier=issue.identifier, issue=issue,
+                             provider_id=provider_id,
+                             stall_timeout_ms=runner.stall_timeout_ms,
                              retry_attempt=attempt)
         self.running[issue.id] = entry
         self._cancel_retry(issue.id)
         self.sessions_per_issue[issue.id] = spent + 1
         log("dispatched", issue_id=issue.id, issue_identifier=issue.identifier,
-            attempt=attempt, session_number=spent + 1)
+            provider_id=provider_id, attempt=attempt,
+            session_number=spent + 1)
         task.add_done_callback(
             lambda t, iid=issue.id: self._on_worker_done(iid, t))
 
-    async def _worker(self, issue: Issue, attempt: int | None) -> None:
+    async def _persist_provider_assignment(self, issue: Issue, provider_id: str) -> bool:
+        """Write a new mixed-provider assignment before claiming the issue."""
+        label = f"provider:{provider_id}"
+        tracker, _ = self._components()
+        try:
+            await tracker.add_labels(issue.id, [label])
+        except TrackerError as exc:
+            log("mixed provider assignment write failed; leaving issue unclaimed",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                provider_id=provider_id, error=str(exc))
+            return False
+        issue.labels.append(label)
+        log("mixed provider assignment persisted", issue_id=issue.id,
+            issue_identifier=issue.identifier, provider_id=provider_id)
+        return True
+
+    async def _worker(
+        self,
+        issue: Issue,
+        attempt: int | None,
+        runner: AgentRunner,
+    ) -> None:
         """One worker session: workspace -> before_run -> turn loop (core §16.5)."""
         cfg = self._cfg
         assert cfg is not None
         defn = self._defn
         assert defn is not None
-        tracker, wsm, runner = self._components()
-        claude_cfg = cfg.claude()
+        tracker, wsm = self._components()
 
         ws = await wsm.create_for_issue(issue.identifier)          # WorkspaceError -> abnormal
         try:
@@ -472,7 +565,7 @@ class Orchestrator:
                     prompt = CONTINUATION_PROMPT  # §7.1: don't resend the task prompt
                 # Fresh (cached) mint per turn: a session spanning the hourly
                 # installation-token expiry always injects a valid bot token.
-                agent_token = await self._agent_token()
+                agent_token = await self._agent_token(runner.turn_timeout_ms)
                 result = await runner.run_turn(
                     ws.path, prompt, resume_session_id=session_id,
                     on_event=self._on_agent_event, issue_id=issue.id,
@@ -506,8 +599,8 @@ class Orchestrator:
                     log("required label removed; ending session normally",
                         issue_id=issue.id, issue_identifier=issue.identifier)
                     break
-                if claude_cfg.max_budget_usd is not None \
-                        and cumulative_cost >= claude_cfg.max_budget_usd:
+                if runner.max_budget_usd is not None \
+                        and cumulative_cost >= runner.max_budget_usd:
                     log("worker budget ceiling reached; ending session normally",
                         issue_id=issue.id, issue_identifier=issue.identifier,
                         cost_usd=round(cumulative_cost, 4))
@@ -527,7 +620,7 @@ class Orchestrator:
         if entry.cancelled_by_reconciliation or task.cancelled():
             self.claimed.discard(issue_id)
             log("worker cancelled", issue_id=issue_id,
-                issue_identifier=entry.identifier)
+                issue_identifier=entry.identifier, provider_id=entry.provider_id)
             return
 
         exc = task.exception()
@@ -536,14 +629,16 @@ class Orchestrator:
                                  delay_ms=CONTINUATION_DELAY_MS)
             log("worker completed", issue_id=issue_id,
                 issue_identifier=entry.identifier,
-                session_id=entry.session_id, outcome="completed")
+                provider_id=entry.provider_id, session_id=entry.session_id,
+                outcome="completed")
         else:
             attempt = (entry.retry_attempt or 0) + 1
             self._schedule_retry(issue_id, entry.identifier, attempt=attempt,
                                  delay_ms=self._failure_backoff_ms(attempt))
             log("worker failed", issue_id=issue_id,
                 issue_identifier=entry.identifier,
-                session_id=entry.session_id, outcome="failed", error=str(exc))
+                provider_id=entry.provider_id, session_id=entry.session_id,
+                outcome="failed", error=str(exc))
 
     def _failure_backoff_ms(self, attempt: int) -> int:
         cfg = self._cfg
@@ -573,7 +668,7 @@ class Orchestrator:
         entry = self.retry_attempts.pop(issue_id, None)
         if entry is None or self._stopping:
             return
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         try:
             candidates = await tracker.fetch_candidate_issues()
         except Exception as exc:
@@ -622,21 +717,21 @@ class Orchestrator:
         cfg = self._cfg
         assert cfg is not None
         # Part A: stall detection
-        stall_ms = cfg.claude().stall_timeout_ms
-        if stall_ms > 0:
-            now = datetime.now(timezone.utc)
-            for issue_id, entry in list(self.running.items()):
-                anchor = entry.last_event_at or entry.started_at
-                if (now - anchor).total_seconds() * 1000 > stall_ms:
-                    log("stalled session; terminating and retrying",
-                        issue_id=issue_id, issue_identifier=entry.identifier,
-                        session_id=entry.session_id)
-                    self._terminate(issue_id, cleanup=False, retry=True)
+        now = datetime.now(timezone.utc)
+        for issue_id, entry in list(self.running.items()):
+            if entry.stall_timeout_ms <= 0:
+                continue
+            anchor = entry.last_event_at or entry.started_at
+            if (now - anchor).total_seconds() * 1000 > entry.stall_timeout_ms:
+                log("stalled session; terminating and retrying",
+                    issue_id=issue_id, issue_identifier=entry.identifier,
+                    provider_id=entry.provider_id, session_id=entry.session_id)
+                self._terminate(issue_id, cleanup=False, retry=True)
 
         if not self.running:
             return
         # Part B: tracker state refresh
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         try:
             refreshed = await tracker.fetch_issue_states_by_ids(list(self.running))
         except TrackerError as exc:
@@ -732,7 +827,7 @@ class Orchestrator:
         triage) to remedy by applying the marker. The comment is repost-guarded
         like `_park_notified` so poll ticks don't spam the issue; the guard set
         is cleared in `_dispatch` once the issue becomes eligible again."""
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         if issue.id in self._marker_refused:
             return
         body = (
@@ -773,7 +868,7 @@ class Orchestrator:
         this is visibility, not a lock, so we log and dispatch anyway, leaving the
         in-memory state untouched so `dispatch_state` still matches the tracker.
         """
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         try:
             await tracker.add_labels(issue.id, [IN_PROGRESS_LABEL])
             await tracker.remove_labels(issue.id, [TODO_LABEL])
@@ -840,7 +935,7 @@ class Orchestrator:
         """
         cfg = self._cfg
         assert cfg is not None
-        tracker, _, _ = self._components()
+        tracker, _ = self._components()
         try:
             candidates = await tracker.fetch_candidate_issues()
         except TrackerError as exc:
@@ -858,7 +953,7 @@ class Orchestrator:
 
     async def _park(self, issue: Issue, reason: str) -> None:
         self._cancel_retry(issue.id)
-        tracker, wsm, _ = self._components()
+        tracker, wsm = self._components()
         body = (
             f"**Switchboard parked this issue** — {reason}.\n\n"
             f"The orchestrator will not dispatch it again while it carries the "
@@ -921,4 +1016,5 @@ class Orchestrator:
             if sid:
                 entry.session_id = sid
                 log("session started", issue_id=issue_id,
-                    issue_identifier=entry.identifier, session_id=sid)
+                    issue_identifier=entry.identifier,
+                    provider_id=entry.provider_id, session_id=sid)

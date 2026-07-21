@@ -14,6 +14,11 @@ import sys
 from pathlib import Path
 
 from .log import log
+from .runner_selector import (
+    ClaudeOnlyRunnerSelector,
+    CodexOnlyRunnerSelector,
+    MixedRunnerSelector,
+)
 from .scheduler import Orchestrator
 
 
@@ -25,6 +30,12 @@ def main(argv: list[str] | None = None) -> int:
                         metavar="path-to-WORKFLOW.md")
     parser.add_argument("--workflow", dest="workflow_flag", default=None,
                         help="path to the composed WORKFLOW.md")
+    parser.add_argument(
+        "--provider",
+        choices=("claude", "codex", "mixed"),
+        default="claude",
+        help="execution provider (default: claude; mixed uses durable routing labels)",
+    )
     args = parser.parse_args(argv)
 
     raw = args.workflow_flag or args.workflow_positional or "WORKFLOW.md"
@@ -33,7 +44,13 @@ def main(argv: list[str] | None = None) -> int:
         log("startup failed", error=f"workflow file not found: {workflow_path}")
         return 2
 
-    orch = Orchestrator(workflow_path)
+    if args.provider == "codex":
+        selector = CodexOnlyRunnerSelector()
+    elif args.provider == "mixed":
+        selector = MixedRunnerSelector()
+    else:
+        selector = ClaudeOnlyRunnerSelector()
+    orch = Orchestrator(workflow_path, runner_selector=selector)
 
     async def _run() -> int:
         loop = asyncio.get_running_loop()

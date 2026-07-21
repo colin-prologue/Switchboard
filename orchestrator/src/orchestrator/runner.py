@@ -108,8 +108,13 @@ class ClaudeRunner:
     prompt rendering are the caller's responsibility (core §10.7 steps 1-2).
     """
 
+    provider_id = "claude"
+
     def __init__(self, cfg: ClaudeConfig) -> None:
         self.cfg = cfg
+        self.turn_timeout_ms = cfg.turn_timeout_ms
+        self.stall_timeout_ms = cfg.stall_timeout_ms
+        self.max_budget_usd = cfg.max_budget_usd
 
     @staticmethod
     def _build_env(agent_token: str | None) -> dict[str, str] | None:
