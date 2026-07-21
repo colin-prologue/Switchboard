@@ -4,21 +4,22 @@
 - **Status:** active; Stage 5B isolated live canary is complete: handoff,
   continuation/restart recovery, deterministic failure/parking, and GitHub App
   credential-refresh behavior all have named evidence. Stage 6 Slice 3
-  (provider capacity and assignment stickiness) is merged. Slice 4's inert
-  mixed-canary binding is ready for review; Claude-only production remains
-  unchanged.
+  (provider capacity and assignment stickiness) is merged. Slice 4's isolated
+  repository and inert binding are provisioned; the native checkpoint
+  procedure is ready for review. Claude-only production remains unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 6 Slice 3 merged as [PR #89](https://github.com/colin-prologue/Switchboard/pull/89).
-  Slice 4's binding is ready for review on `codex/stage6-mixed-canary-binding`:
-  a checked-in, separate mixed-canary project with `claude: 100, codex: 0`.
-  [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md) remains
-  accepted. No mixed process has launched. Stage 5B live workers launched only
-  from a native macOS terminal.
+- **Current stage:** Stage 6 Slice 4's inert binding merged as [PR #90](https://github.com/colin-prologue/Switchboard/pull/90).
+  The private mixed-canary repository is seeded and label-provisioned. The
+  native one-checkpoint-at-a-time procedure is ready for review on
+  `codex/stage6-mixed-canary-procedure`. Its first permitted launch is the
+  explicit Claude checkpoint after that procedure merges. No mixed process has
+  launched. [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
+  remains accepted.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -32,13 +33,13 @@
   retains that assignment through scheduler recovery paths.
 - **What remains deliberately disabled:** fallback, registration-script
   support, any mixed-process launch against an existing production repository,
-  and all live mixed-canary dispatch.
-- **Last verified source commit:** Stage 6 Slice 3 merged as `03a214e`; Slice 4
-  binding work is on `codex/stage6-mixed-canary-binding`.
+  and live mixed-canary dispatch until the procedure review merges.
+- **Last verified source commit:** Stage 6 Slice 4 binding merged as `45b849a`;
+  procedure work is on `codex/stage6-mixed-canary-procedure`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 344 passed in 11.34s on 2026-07-20 on the Slice 4
-  binding branch. Its focused binding/setup suite passed (7 in 1.12s). Slice 3
-  focused workflow/CLI/selector tests passed (102 in 0.59s).
+  orchestrator/tests -q` - 352 passed in 13.97s on 2026-07-20 on the Slice 4
+  procedure branch. Its focused checkpoint/binding/CLI suite passed (15 in
+  0.85s). Slice 3 focused workflow/CLI/selector tests passed (102 in 0.59s).
 - **Stage 6 Slice 3 verification:** explicit provider caps block only that
   provider, preserve a new durable assignment while capacity is full, and do
   not launch a worker or fall back. A durable assignment selects the same
@@ -139,14 +140,12 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review and merge the inert Stage 6 Slice 4 binding.
-  Then create the separate private `colin-prologue/switchboard-mixed-canary`
-  repository, grant the GitHub App access, and seed the fixture. Only then
-  prepare the controlled native-terminal evidence run with named stop and
-  rollback conditions. Do not expand registration support in this stage.
+- **Next single task:** review and merge the native checkpoint procedure. Then
+  run only `explicit-claude` from the normal macOS Terminal, review and merge
+  its synthetic handoff PR, and return before running `explicit-codex`.
 - **Do not dispatch:** a mixed process against any existing project. Slice 4 is
   the first permitted mixed launch and must use a separate synthetic canary;
-  do not bypass the sandbox.
+  do not bypass the sandbox or run more than one checkpoint at a time.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -521,10 +520,11 @@ Stage 6 planning starts.
 **Purpose:** add deterministic weighted selection, provider concurrency limits,
 and explicit issue overrides after both adapters are independently trusted.
 
-**Status:** Slice 3 merged as [PR #89](https://github.com/colin-prologue/Switchboard/pull/89).
-Slice 4's inert canary binding is ready for review. Keep the current Claude-only
-launch path as the default until isolated-canary evidence and the rollback gate
-are complete.
+**Status:** Slice 3 merged as [PR #89](https://github.com/colin-prologue/Switchboard/pull/89),
+and Slice 4's inert binding merged as [PR #90](https://github.com/colin-prologue/Switchboard/pull/90).
+The private canary is provisioned; its native checkpoint procedure is ready for
+review. Keep the current Claude-only launch path as the default until all four
+isolated checkpoints pass.
 
 **Accepted policy:** [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
 defines durable `provider:*` assignments, `agent:*` overrides, deterministic
@@ -590,6 +590,24 @@ canary rollout.
   operational slice after this binding merges.
 - The binding/setup suite passed (7 in 1.12s) and the full orchestrator suite
   passed (344 in 11.34s) on 2026-07-20.
+
+**Slice 4 provisioned baseline (2026-07-20):**
+
+- `colin-prologue/switchboard-mixed-canary` is private. The
+  `switchboard-agent` installation can write contents, issues, and pull
+  requests. All 13 required status, gate, operator, and provider labels exist.
+- Its `main` branch is seeded at `5f48d2c` with a dependency-free greeting
+  fixture and one passing unittest. The local seed clone is clean. No issues,
+  pull requests, workspaces, or agent launches exist.
+- The reviewed procedure runs explicit Claude, explicit Codex, unlabeled
+  `claude:100/codex:0`, and default Claude-only rollback as four separate native
+  terminal checkpoints. Each invocation enforces phase order and one open item,
+  stops the process at named outcomes, and preserves logs/workspaces for review.
+- This procedure does not raise the Codex routing weight. A nonzero weight is a
+  later reviewed rollout only after the checkpoint evidence passes.
+- The focused checkpoint/binding/CLI suite passed (15 in 0.85s), the setup
+  verifier reported no failures, and the full orchestrator suite passed (352 in
+  13.97s). No live checkpoint was launched during procedure verification.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,
 sticky retries, reload, unavailable-provider handling, and immediate rollback to
