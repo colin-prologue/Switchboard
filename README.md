@@ -206,8 +206,9 @@ to verify a fresh install.
 ## Experimental Codex-only canary
 
 The normal process remains Claude-only. Stage 5 adds an explicit Codex canary
-mode for isolated test projects; it does not enable a mixed pool. The canary
-workflow must use only the strict provider envelope:
+mode for isolated test projects. Mixed routing is separately opt-in and remains
+limited to the Stage 6 synthetic canary; it does not change the normal process.
+The Codex canary workflow must use only the strict provider envelope:
 
 ```yaml
 providers:
@@ -226,8 +227,9 @@ uv run --project orchestrator python -m orchestrator \
 
 Without `--provider codex`, startup still validates and selects Claude. Codex
 mode rejects legacy execution blocks and mixed `providers` maps. Use it only
-against a separate canary repository until the Stage 5 live-ticket evidence is
-complete; provider weighting, fallback, and per-issue overrides are later work.
+against a separate canary repository. The checked-in mixed-canary binding starts
+at `claude: 100, codex: 0`; do not launch it until the isolated mixed-canary
+rollout has been reviewed and its operator evidence procedure is in place.
 
 ---
 
