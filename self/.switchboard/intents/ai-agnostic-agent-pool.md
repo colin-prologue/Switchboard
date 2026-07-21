@@ -4,20 +4,21 @@
 - **Status:** active; Stage 5B isolated live canary is complete: handoff,
   continuation/restart recovery, deterministic failure/parking, and GitHub App
   credential-refresh behavior all have named evidence. Stage 6 Slice 3
-  (provider capacity and assignment stickiness) is ready for review;
-  Claude-only production remains unchanged.
+  (provider capacity and assignment stickiness) is merged. Slice 4's inert
+  mixed-canary binding is ready for review; Claude-only production remains
+  unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 6 Slice 3 is ready for review on
-  `codex/stage6-provider-capacity`. [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
-  is accepted. Mixed mode enforces optional per-provider running-worker caps
-  and keeps durable provider labels through retry, hot reload, and a fresh
-  orchestrator instance. Stage 5B live workers launched only from a native
-  macOS terminal.
+- **Current stage:** Stage 6 Slice 3 merged as [PR #89](https://github.com/colin-prologue/Switchboard/pull/89).
+  Slice 4's binding is ready for review on `codex/stage6-mixed-canary-binding`:
+  a checked-in, separate mixed-canary project with `claude: 100, codex: 0`.
+  [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md) remains
+  accepted. No mixed process has launched. Stage 5B live workers launched only
+  from a native macOS terminal.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -31,12 +32,13 @@
   retains that assignment through scheduler recovery paths.
 - **What remains deliberately disabled:** fallback, registration-script
   support, any mixed-process launch against an existing production repository,
-  and the isolated mixed canary.
-- **Last verified source commit:** Stage 6 Slice 2 merged as `8ed3326`; Slice 3
-  is review-ready on `codex/stage6-provider-capacity`.
+  and all live mixed-canary dispatch.
+- **Last verified source commit:** Stage 6 Slice 3 merged as `03a214e`; Slice 4
+  binding work is on `codex/stage6-mixed-canary-binding`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 340 passed in 11.40s on 2026-07-20. Focused
-  workflow/CLI/selector tests passed (102 in 0.59s).
+  orchestrator/tests -q` - 344 passed in 11.34s on 2026-07-20 on the Slice 4
+  binding branch. Its focused binding/setup suite passed (7 in 1.12s). Slice 3
+  focused workflow/CLI/selector tests passed (102 in 0.59s).
 - **Stage 6 Slice 3 verification:** explicit provider caps block only that
   provider, preserve a new durable assignment while capacity is full, and do
   not launch a worker or fall back. A durable assignment selects the same
@@ -137,9 +139,11 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review and merge Stage 6 Slice 3. Then implement only
-  Slice 4: a separate synthetic mixed-provider canary with named stop and
-  rollback conditions. Do not expand registration support in that slice.
+- **Next single task:** review and merge the inert Stage 6 Slice 4 binding.
+  Then create the separate private `colin-prologue/switchboard-mixed-canary`
+  repository, grant the GitHub App access, and seed the fixture. Only then
+  prepare the controlled native-terminal evidence run with named stop and
+  rollback conditions. Do not expand registration support in this stage.
 - **Do not dispatch:** a mixed process against any existing project. Slice 4 is
   the first permitted mixed launch and must use a separate synthetic canary;
   do not bypass the sandbox.
@@ -517,9 +521,10 @@ Stage 6 planning starts.
 **Purpose:** add deterministic weighted selection, provider concurrency limits,
 and explicit issue overrides after both adapters are independently trusted.
 
-**Status:** Slice 3 is ready for review. Keep the current Claude-only launch
-path as the default until isolated-canary evidence and the rollback gate are
-complete.
+**Status:** Slice 3 merged as [PR #89](https://github.com/colin-prologue/Switchboard/pull/89).
+Slice 4's inert canary binding is ready for review. Keep the current Claude-only
+launch path as the default until isolated-canary evidence and the rollback gate
+are complete.
 
 **Accepted policy:** [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
 defines durable `provider:*` assignments, `agent:*` overrides, deterministic
@@ -554,7 +559,7 @@ canary rollout.
   full retry/reload stickiness are intentionally Slice 3 work.
 - Focused tests passed (97) and the full suite passed (335).
 
-**Slice 3 evidence (2026-07-20, review branch `codex/stage6-provider-capacity`):**
+**Slice 3 evidence (2026-07-20, merged as [PR #89](https://github.com/colin-prologue/Switchboard/pull/89)):**
 
 - A configured provider cap is a limit on live `RunningEntry` instances for
   that provider; omitted caps inherit the global worker cap. The global cap
@@ -567,8 +572,24 @@ canary rollout.
   recovery fetches the issue anew and reselects its durable provider label.
   Focused tests also prove hot reload and a fresh orchestrator instance keep
   `provider:codex` despite `claude: 100, codex: 0` weights.
-- Focused tests passed (102) and the full suite passed (340). Slice 4 starts
-  only after this review branch merges.
+- Focused tests passed (102) and the full suite passed (340).
+
+**Slice 4 binding (review branch `codex/stage6-mixed-canary-binding`):**
+
+- Adds only a checked-in `mixed-canary` binding and composed template for the
+  future private `colin-prologue/switchboard-mixed-canary` repository. The
+  binding is constrained to one global worker and one per-provider slot.
+- Its initial weights are exactly `claude: 100, codex: 0`. Regression coverage
+  validates that policy, both provider envelopes, the durable-label prompt
+  guard, and template composition; setup verification allowlists the template.
+- A mixed-canary-only provisioning command idempotently creates all gate-state,
+  operator `agent:*`, and durable `provider:*` labels. Its tested dry-run is
+  offline, and the preflight makes label provisioning mandatory before launch.
+- This PR does not create the external repository, grant App access, start a
+  process, create an issue, or dispatch a worker. Those are the next reviewed
+  operational slice after this binding merges.
+- The binding/setup suite passed (7 in 1.12s) and the full orchestrator suite
+  passed (344 in 11.34s) on 2026-07-20.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,
 sticky retries, reload, unavailable-provider handling, and immediate rollback to
