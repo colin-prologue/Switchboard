@@ -101,13 +101,12 @@ def _summarize_message(msg: dict) -> dict:
     return {"type": msg_type, "text": text[:NOTIFICATION_TEXT_CHARS]}
 
 
-def _result_error_text(msg: dict) -> str:
-    for key in ("error", "result", "message"):
-        value = msg.get(key)
-        if isinstance(value, str):
-            return value[:NOTIFICATION_TEXT_CHARS]
-        if isinstance(value, dict) and isinstance(value.get("message"), str):
-            return value["message"][:NOTIFICATION_TEXT_CHARS]
+def _structured_error_text(msg: dict) -> str:
+    value = msg.get("error")
+    if isinstance(value, str):
+        return value[:NOTIFICATION_TEXT_CHARS]
+    if isinstance(value, dict) and isinstance(value.get("message"), str):
+        return value["message"][:NOTIFICATION_TEXT_CHARS]
     return ""
 
 
@@ -388,7 +387,7 @@ class ClaudeRunner:
                             error=subtype,
                             failure_class=classify_claude_failure(
                                 code=subtype,
-                                detail=_result_error_text(msg),
+                                detail=_structured_error_text(msg),
                             ),
                             cost_usd=cost_usd,
                             usage=usage,

@@ -264,6 +264,23 @@ async def test_provider_diagnostic_does_not_enter_normalized_error(
     assert secret not in (result.error or "")
 
 
+async def test_model_result_text_cannot_create_provider_failure_class(
+    workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_SCENARIO", "error_max_turns")
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_RESULT_TEXT",
+        "The application returned rate limit exceeded during its own test.",
+    )
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-1"
+    )
+
+    assert result.error == "error_max_turns"
+    assert result.failure_class is FailureClass.WORKER_FAILURE
+
+
 async def test_prompt_delivered_via_stdin(workspace: Path, monkeypatch, tmp_path: Path):
     stdin_file = tmp_path / "stdin.txt"
     monkeypatch.setenv("FAKE_SCENARIO", "success")

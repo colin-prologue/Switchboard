@@ -82,7 +82,10 @@ def main() -> None:
     if scenario == "error_max_turns":
         record_stdin()
         emit({"type": "system", "subtype": "init", "session_id": "sess-err"})
-        emit(result_line("error_max_turns", session_id="sess-err"))
+        payload = result_line("error_max_turns", session_id="sess-err")
+        if result_text := os.environ.get("FAKE_CLAUDE_RESULT_TEXT"):
+            payload["result"] = result_text
+        emit(payload)
         sys.exit(1)  # real CLI exits nonzero on error result subtypes
 
     if scenario == "provider_error":
