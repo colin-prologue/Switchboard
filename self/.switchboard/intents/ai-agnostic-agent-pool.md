@@ -1,24 +1,24 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 5B isolated live canary is complete: handoff,
-  continuation/restart recovery, deterministic failure/parking, and GitHub App
-  credential-refresh behavior all have named evidence. Stage 6 Slice 3
-  (provider capacity and assignment stickiness) is merged. Slice 4's isolated
-  repository and inert binding are provisioned; the native checkpoint
-  procedure is ready for review. Claude-only production remains unchanged.
+- **Status:** active; Stage 5B isolated live canary is complete. Stage 6 Slice 4
+  now has named live evidence for explicit Claude, explicit Codex, deterministic
+  zero-weight routing to Claude, and rollback to the default Claude-only path.
+  All four synthetic handoffs merged and closed their issues. A nonzero Codex
+  routing weight remains a separately reviewed rollout; Claude-only production
+  remains unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 6 Slice 4's inert binding merged as [PR #90](https://github.com/colin-prologue/Switchboard/pull/90).
-  The private mixed-canary repository is seeded and label-provisioned. The
-  native one-checkpoint-at-a-time procedure is ready for review on
-  `codex/stage6-mixed-canary-procedure`. Its first permitted launch is the
-  explicit Claude checkpoint after that procedure merges. No mixed process has
-  launched. [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
+- **Current stage:** Stage 6 Slice 4's native mixed-canary procedure merged as
+  [PR #91](https://github.com/colin-prologue/Switchboard/pull/91), and all four
+  isolated checkpoints passed on 2026-07-21. Explicit assignments exercised
+  both providers, the unlabeled `claude: 100, codex: 0` route selected Claude,
+  and the default Claude-only rollback ignored but preserved a historical
+  `provider:codex` label. [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
   remains accepted.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
@@ -33,19 +33,42 @@
   retains that assignment through scheduler recovery paths.
 - **What remains deliberately disabled:** fallback, registration-script
   support, any mixed-process launch against an existing production repository,
-  and live mixed-canary dispatch until the procedure review merges.
-- **Last verified source commit:** Stage 6 Slice 4 binding merged as `45b849a`;
-  procedure work is on `codex/stage6-mixed-canary-procedure`.
+  and any automatic Codex routing weight above zero. The completed checkpoint
+  issues must not be rerun.
+- **Last verified source commit:** Stage 6 Slice 4 procedure merged as `3f4694a`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 352 passed in 13.03s on 2026-07-20 on the Slice 4
-  procedure branch. Its focused checkpoint/binding/CLI suite passed (15 in
-  1.01s). Slice 3 focused workflow/CLI/selector tests passed (102 in 0.59s).
+  orchestrator/tests -q` - 352 passed in 11.74s on 2026-07-21 on the Slice 4
+  evidence branch. Its focused checkpoint/binding/setup/CLI suite passed (16 in
+  2.47s), and `scripts/verify-setup.sh` reported zero failures. Slice 3 focused
+  workflow/CLI/selector tests passed (102 in 0.59s).
 - **Stage 6 Slice 3 verification:** explicit provider caps block only that
   provider, preserve a new durable assignment while capacity is full, and do
   not launch a worker or fall back. A durable assignment selects the same
   provider from continuation/failure/stall retry, hot reload, and a fresh
   orchestrator fixture even when weights favor the other provider. The full
   suite confirms the legacy Claude-only and Codex-only paths remain unchanged.
+- **Stage 6 Slice 4 live verification:** all four native-terminal checkpoints
+  reached `status:human-review`, opened a scoped fixture PR, passed their full
+  external unittest suite, and stopped before merge. Explicit Claude
+  [issue #1](https://github.com/colin-prologue/switchboard-mixed-canary/issues/1)
+  persisted `provider:claude` and merged [PR #2](https://github.com/colin-prologue/switchboard-mixed-canary/pull/2)
+  as `8506ac1` with 3 tests. Explicit Codex
+  [issue #3](https://github.com/colin-prologue/switchboard-mixed-canary/issues/3)
+  persisted `provider:codex` and merged [PR #4](https://github.com/colin-prologue/switchboard-mixed-canary/pull/4)
+  as `f927cd6` with 5 tests. Unlabeled zero-weight Codex
+  [issue #5](https://github.com/colin-prologue/switchboard-mixed-canary/issues/5)
+  selected `provider:claude` and merged [PR #6](https://github.com/colin-prologue/switchboard-mixed-canary/pull/6)
+  as `cc74e56` with 7 tests. Rollback
+  [issue #7](https://github.com/colin-prologue/switchboard-mixed-canary/issues/7)
+  dispatched `provider_id=claude` through the default CLI path while preserving
+  its existing `provider:codex` audit label, then merged [PR #8](https://github.com/colin-prologue/switchboard-mixed-canary/pull/8)
+  as `18c8e19` with 9 tests. Each merge automatically closed its issue and each
+  handoff branch was deleted.
+- **Slice 4 operational observation:** one rollback polling snapshot briefly
+  exposed both `status:todo` and `status:in-progress`; the next snapshot
+  contained only `status:in-progress`, and the checkpoint completed normally.
+  Preserve this as evidence that separate GitHub label mutations are observable
+  between writes. It did not duplicate dispatch or alter provider ownership.
 - **Last end-to-end evidence:** [canary issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   dispatched as `provider_id=codex`, session `019f6325-7419-75e0-b33d-13dbba7407c0`,
   reached `status:human-review`, and opened clean
@@ -140,12 +163,14 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review and merge the native checkpoint procedure. Then
-  run only `explicit-claude` from the normal macOS Terminal, review and merge
-  its synthetic handoff PR, and return before running `explicit-codex`.
-- **Do not dispatch:** a mixed process against any existing project. Slice 4 is
-  the first permitted mixed launch and must use a separate synthetic canary;
-  do not bypass the sandbox or run more than one checkpoint at a time.
+- **Next single task:** design and review the isolated nonzero-Codex-weight
+  checkpoint before changing `projects/mixed-canary/WORKFLOW.md`. The proposal
+  must choose a deterministic evidence strategy, preserve one-at-a-time native
+  launch and named stop conditions, retain the default Claude-only rollback,
+  and state how the checked-in `claude: 100, codex: 0` baseline is restored.
+- **Do not dispatch:** a mixed process against an existing project or another
+  mixed-canary issue until the nonzero-weight procedure and exact weights have
+  human approval. Do not rerun checkpoints 1 through 4.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -520,11 +545,12 @@ Stage 6 planning starts.
 **Purpose:** add deterministic weighted selection, provider concurrency limits,
 and explicit issue overrides after both adapters are independently trusted.
 
-**Status:** Slice 3 merged as [PR #89](https://github.com/colin-prologue/Switchboard/pull/89),
-and Slice 4's inert binding merged as [PR #90](https://github.com/colin-prologue/Switchboard/pull/90).
-The private canary is provisioned; its native checkpoint procedure is ready for
-review. Keep the current Claude-only launch path as the default until all four
-isolated checkpoints pass.
+**Status:** Slice 3 merged as [PR #89](https://github.com/colin-prologue/Switchboard/pull/89).
+Slice 4's inert binding and procedure merged as [PR #90](https://github.com/colin-prologue/Switchboard/pull/90)
+and [PR #91](https://github.com/colin-prologue/Switchboard/pull/91); all four
+isolated live checkpoints passed and their handoffs merged. Keep the current
+Claude-only launch path as the default while the nonzero-Codex-weight canary is
+designed and reviewed separately.
 
 **Accepted policy:** [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
 defines durable `provider:*` assignments, `agent:*` overrides, deterministic
@@ -608,6 +634,25 @@ canary rollout.
 - The focused checkpoint/binding/CLI suite passed (15 in 1.01s), the setup
   verifier reported no failures, and the full orchestrator suite passed (352 in
   13.03s). No live checkpoint was launched during procedure verification.
+
+**Slice 4 live evidence (2026-07-21, source `3f4694a`):**
+
+- The explicit-Claude, explicit-Codex, zero-weight-Codex, and Claude-only
+  rollback checkpoints all reached human review with the expected dispatch and
+  durable provider labels. Their fixture suites grew from 3 to 9 passing tests.
+- Canary issues #1, #3, #5, and #7 closed automatically after merge. Canary
+  PRs #2, #4, #6, and #8 merged as `8506ac1`, `f927cd6`, `cc74e56`, and
+  `18c8e19`; all four worker branches were deleted.
+- Explicit assignments proved both adapters under one mixed process. The
+  unlabeled issue proved deterministic `claude: 100, codex: 0` selection. The
+  rollback proved the unchanged default process dispatches Claude without
+  rewriting historical `provider:codex` evidence.
+- One rollback label poll observed both `status:todo` and
+  `status:in-progress` between separate tracker mutations. It settled on the
+  next poll, caused no duplicate worker, and is retained as an operational
+  observability note for Stage 7.
+- No existing project used mixed mode, no nonzero Codex weight was enabled, and
+  the production Claude-only launch remained unchanged.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,
 sticky retries, reload, unavailable-provider handling, and immediate rollback to
