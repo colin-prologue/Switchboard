@@ -6,8 +6,8 @@ point it at Switchboard or another existing project.
 
 ## Current evidence state
 
-The private repository began at `5f48d2c` and completed the four reviewed
-checkpoints on 2026-07-21. Its `main` is now `18c8e19` with nine passing
+The private repository began at `5f48d2c` and completed five reviewed
+checkpoints on 2026-07-22. Its `main` is now `14fe89a` with eleven passing
 standard-library tests. The `switchboard-agent` installation has contents,
 issues, and pull-request write access, and all gate-state, `agent:*`, and
 `provider:*` labels remain provisioned.
@@ -33,8 +33,8 @@ Before creating a dispatchable issue or starting `--provider mixed`:
    before claiming an issue. The `agent:claude` and `agent:codex` labels enable
    the later explicit-assignment evidence tickets.
 4. Confirm the reviewed synthetic fixture tests pass on `main`.
-5. Stop unless the next checkpoint procedure and its exact routing weights have
-   merged. Checkpoints 1 through 4 are complete and must not be rerun.
+5. Stop unless a later checkpoint procedure and its exact routing policy have
+   merged. Checkpoints 1 through 5 are complete and must not be rerun.
 
 The initial workflow remains `claude: 100, codex: 0`. Provisioning labels does
 not change that routing policy, create an issue, or start a worker.
@@ -69,31 +69,26 @@ merge. During rollback, one poll briefly observed both `status:todo` and
 `status:in-progress` between label writes; the next poll settled and no
 duplicate worker launched.
 
-This procedure does not change the mixed workflow's routing weights. Moving
-Codex above zero remains the next separately reviewed rollout. Before another
-live issue is created, review a procedure that chooses the exact weights and a
-deterministic evidence strategy, preserves the one-checkpoint stop conditions,
-and restores the checked-in `claude: 100, codex: 0` baseline.
+The initial four-checkpoint procedure did not change the mixed workflow's
+routing weights. The separately reviewed automatic-Codex checkpoint below also
+kept the checked-in `claude: 100, codex: 0` baseline unchanged. Any further live
+issue or routing change requires a new reviewed procedure after the Stage 7
+observability gate.
 
-## Proposed checkpoint 5
+## Completed checkpoint 5
 
-Checkpoint `weighted-codex` is the separately reviewed automatic-Codex proof.
+Checkpoint `weighted-codex` was the separately reviewed automatic-Codex proof.
 It uses `WORKFLOW.weighted-codex.md`, whose `claude: 0, codex: 100` weights
 guarantee that one unlabeled issue takes the weighted path to Codex. This split
 is not a proposed operating ratio. The normal `WORKFLOW.md` remains at
 `claude: 100, codex: 0` and is never edited during the checkpoint.
 
-Do not launch checkpoint 5 until its procedure PR merges. Then refresh the
-primary checkout and preview only this phase from the normal macOS Terminal:
+Issue #9 launched with no `agent:*` or `provider:*` label. Weighted selection
+persisted `provider:codex`, dispatched Codex, retained a raw JSONL transcript,
+passed eleven tests, and stopped at `status:human-review`. PR #10 merged as
+`14fe89a`, closed issue #9 automatically, and its branch was deleted.
 
-```bash
-git -C "$HOME/Developer/Switchboard" pull --ff-only origin main
-bash "$HOME/Developer/Switchboard/scripts/run-mixed-canary-checkpoint.sh" \
-  weighted-codex --dry-run
-```
-
-The preview must declare mixed mode, no `agent:*` issue label, the dedicated
-weighted-Codex workflow, expected dispatch and durable provider `codex`, and all
-four completed checkpoints as prerequisites. It performs no GitHub writes and
-launches no process. Return to the migration session with that output before
-running the phase live.
+Do not rerun checkpoint 5. The dedicated workflow remains inert evidence; the
+normal `100/0` workflow remains the only mixed-canary baseline. No existing
+project is authorized to launch mixed mode until the Stage 7 observability gate
+is reviewed and completed.

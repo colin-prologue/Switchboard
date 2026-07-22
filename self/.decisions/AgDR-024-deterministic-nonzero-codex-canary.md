@@ -1,6 +1,6 @@
 # AgDR-024: Deterministic nonzero-Codex canary
 
-**Status:** proposed (2026-07-21)
+**Status:** accepted (2026-07-22)
 **Surfaces:** isolated mixed-canary workflow, native checkpoint launcher,
 automatic weighted assignment, and rollout evidence
 
