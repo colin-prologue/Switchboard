@@ -34,18 +34,21 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source:** Stage 7 Slice 1 implementation commit `8406f03`,
-  based on accepted contract commit `a0b125a`. The branch passes
+- **Last verified source:** Stage 7 Slice 1 reviewed implementation commit
+  `c8ac8a6`, based on accepted contract commit `a0b125a`. The branch passes
   `UV_CACHE_DIR=/private/tmp/switchboard-uv-cache
-  uv run python -m pytest -q` from `orchestrator/`: 400 tests in 12.25s on
+  uv run python -m pytest -q` from `orchestrator/`: 401 tests in 12.33s on
   2026-07-22. Its focused classifier/Claude/Codex/contract/selector/scheduler
-  suite passes 139 tests in 6.33s. `git diff --check` is clean.
+  suite passes 139 tests in 6.33s; the post-review Claude/classifier/contract
+  subset passes 57 tests in 2.02s. `git diff --check` is clean.
 - **Stage 7 Slice 1 evidence:** every failed adapter result carries a closed
   `FailureClass`; success carries none. Claude and Codex classify explicit
   authentication, plan, credit, rate-limit, and availability signals while
   near-matches and unknowns remain `worker_failure`. Scheduler lifecycle logs
   carry stable provider/outcome/failure fields for dispatch, completion,
   failure, cancellation, assignment refusal, capacity refusal, and stalls.
+  Claude classification ignores top-level model `result` text and reads only
+  structured error detail, preventing task output from opening a false circuit.
   Tests prove classified failures retain the same retry attempt and session
   accounting, and existing parking, sticky assignment, capacity, no-fallback,
   and Claude-only paths remain unchanged. Raw provider diagnostics do not enter
