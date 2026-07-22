@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "run-mixed-canary-checkpoint.sh"
 PROJECT = REPO_ROOT / "projects" / "mixed-canary"
 ROLLBACK_WORKFLOW = PROJECT / "WORKFLOW.rollback-claude.md"
+WEIGHTED_CODEX_WORKFLOW = PROJECT / "WORKFLOW.weighted-codex.md"
 
 PHASES = {
     "explicit-claude": {
@@ -40,6 +41,13 @@ PHASES = {
         "labels": "status:todo,gate:triage-passed,provider:codex",
         "dispatch": "claude",
         "durable": "codex",
+    },
+    "weighted-codex": {
+        "cli": "mixed",
+        "labels": "status:todo,gate:triage-passed",
+        "dispatch": "codex",
+        "durable": "codex",
+        "workflow": "WORKFLOW.weighted-codex.md",
     },
 }
 
@@ -71,6 +79,11 @@ def test_checkpoint_dry_run_is_offline_and_declares_exact_contract(
     assert f"issue labels: {expected['labels']}" in result.stdout
     assert f"expected dispatch provider: {expected['dispatch']}" in result.stdout
     assert f"expected durable provider label: {expected['durable']}" in result.stdout
+    if workflow := expected.get("workflow"):
+        workflow_line = next(
+            line for line in result.stdout.splitlines() if line.startswith("workflow: ")
+        )
+        assert workflow_line.endswith(f"/projects/mixed-canary/{workflow}")
     assert "no GitHub writes and no process launch" in result.stdout
 
 
@@ -84,9 +97,10 @@ def test_checkpoint_rejects_unknown_phase_without_side_effects() -> None:
     )
 
     assert result.returncode == 2
-    assert "explicit-claude|explicit-codex|weighted-claude|rollback-claude" in (
-        result.stderr
-    )
+    assert (
+        "explicit-claude|explicit-codex|weighted-claude|rollback-claude|"
+        "weighted-codex"
+    ) in result.stderr
 
 
 def test_checkpoint_script_is_executable_and_pins_named_stop_conditions() -> None:
@@ -120,6 +134,33 @@ def test_rollback_workflow_is_strict_claude_only(monkeypatch) -> None:
     )
 
 
+def test_weighted_codex_workflow_is_isolated_from_zero_weight_baseline(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    baseline_definition = load_workflow(PROJECT / "WORKFLOW.md")
+    weighted_definition = load_workflow(WEIGHTED_CODEX_WORKFLOW)
+    baseline = Config(baseline_definition, PROJECT)
+    weighted = Config(weighted_definition, PROJECT)
+
+    validate_dispatch(weighted, provider_id="mixed")
+
+    assert baseline.mixed().weights == {"claude": 100, "codex": 0}
+    assert weighted.mixed().weights == {"claude": 0, "codex": 100}
+    assert {
+        key: value
+        for key, value in weighted_definition.config.items()
+        if key != "routing"
+    } == {
+        key: value
+        for key, value in baseline_definition.config.items()
+        if key != "routing"
+    }
+    assert weighted.tracker().repo == "colin-prologue/switchboard-mixed-canary"
+    assert weighted.agent().max_concurrent_agents == 1
+    assert weighted_definition.prompt_template == baseline_definition.prompt_template
+
+
 def test_checkpoint_issue_contracts_are_sequential_and_executable() -> None:
     bodies = sorted((PROJECT / "checkpoints").glob("*.md"))
 
@@ -128,6 +169,7 @@ def test_checkpoint_issue_contracts_are_sequential_and_executable() -> None:
         "02-explicit-codex.md",
         "03-weighted-claude.md",
         "04-rollback-claude.md",
+        "05-weighted-codex.md",
     ]
     for body in bodies:
         text = body.read_text(encoding="utf-8")
