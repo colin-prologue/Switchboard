@@ -38,6 +38,7 @@ from .tracker import GitHubTracker
 from .transitions import load_requires_marker
 from .types import (
     AgentEvent,
+    FailureClass,
     Issue,
     RetryEntry,
     TrackerError,
@@ -104,9 +105,14 @@ class RunningEntry:
 
 
 class WorkerFailure(Exception):
-    def __init__(self, reason: str):
+    def __init__(
+        self,
+        reason: str,
+        failure_class: FailureClass = FailureClass.WORKER_FAILURE,
+    ):
         super().__init__(reason)
         self.reason = reason
+        self.failure_class = failure_class
 
 
 class Orchestrator:
@@ -440,7 +446,10 @@ class Orchestrator:
             runner = self._select_runner(issue)
         except MixedAssignmentRefused as exc:
             log("mixed assignment refused; leaving issue untouched",
-                issue_id=issue.id, issue_identifier=issue.identifier, error=str(exc))
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                outcome="refused",
+                failure_class=FailureClass.ASSIGNMENT_REFUSED.value,
+                error=str(exc))
             return
 
         # Config-driven dispatch guard (issue #29 / AgDR-011): refuse to claim an
@@ -487,7 +496,8 @@ class Orchestrator:
                 self.claimed.discard(issue.id)
             log("mixed provider capacity reached; leaving issue unclaimed",
                 issue_id=issue.id, issue_identifier=issue.identifier,
-                provider_id=provider_id)
+                provider_id=provider_id, outcome="refused",
+                failure_class=FailureClass.PROVIDER_CAPACITY.value)
             return
 
         # Claim before any await so a concurrent tick/retry timer cannot
@@ -514,7 +524,7 @@ class Orchestrator:
         self.sessions_per_issue[issue.id] = spent + 1
         log("dispatched", issue_id=issue.id, issue_identifier=issue.identifier,
             provider_id=provider_id, attempt=attempt,
-            session_number=spent + 1)
+            session_number=spent + 1, outcome="started")
         task.add_done_callback(
             lambda t, iid=issue.id: self._on_worker_done(iid, t))
 
@@ -527,7 +537,9 @@ class Orchestrator:
         except TrackerError as exc:
             log("mixed provider assignment write failed; leaving issue unclaimed",
                 issue_id=issue.id, issue_identifier=issue.identifier,
-                provider_id=provider_id, error=str(exc))
+                provider_id=provider_id, outcome="refused",
+                failure_class=FailureClass.WORKER_FAILURE.value,
+                error=str(exc))
             return False
         issue.labels.append(label)
         log("mixed provider assignment persisted", issue_id=issue.id,
@@ -573,7 +585,10 @@ class Orchestrator:
                 cumulative_cost += result.cost_usd
                 entry = self.running.get(issue.id)
                 if result.status != "succeeded":
-                    raise WorkerFailure(result.error or result.status)
+                    raise WorkerFailure(
+                        result.error or result.status,
+                        result.failure_class or FailureClass.WORKER_FAILURE,
+                    )
                 session_id = result.session_id or session_id
 
                 try:  # §16.5: re-check tracker state between turns
@@ -620,7 +635,8 @@ class Orchestrator:
         if entry.cancelled_by_reconciliation or task.cancelled():
             self.claimed.discard(issue_id)
             log("worker cancelled", issue_id=issue_id,
-                issue_identifier=entry.identifier, provider_id=entry.provider_id)
+                issue_identifier=entry.identifier, provider_id=entry.provider_id,
+                outcome="cancelled")
             return
 
         exc = task.exception()
@@ -632,13 +648,19 @@ class Orchestrator:
                 provider_id=entry.provider_id, session_id=entry.session_id,
                 outcome="completed")
         else:
+            failure_class = (
+                exc.failure_class
+                if isinstance(exc, WorkerFailure)
+                else FailureClass.WORKER_FAILURE
+            )
             attempt = (entry.retry_attempt or 0) + 1
             self._schedule_retry(issue_id, entry.identifier, attempt=attempt,
                                  delay_ms=self._failure_backoff_ms(attempt))
             log("worker failed", issue_id=issue_id,
                 issue_identifier=entry.identifier,
                 provider_id=entry.provider_id, session_id=entry.session_id,
-                outcome="failed", error=str(exc))
+                outcome="failed", failure_class=failure_class.value,
+                error=str(exc))
 
     def _failure_backoff_ms(self, attempt: int) -> int:
         cfg = self._cfg
@@ -726,7 +748,12 @@ class Orchestrator:
                 log("stalled session; terminating and retrying",
                     issue_id=issue_id, issue_identifier=entry.identifier,
                     provider_id=entry.provider_id, session_id=entry.session_id)
-                self._terminate(issue_id, cleanup=False, retry=True)
+                self._terminate(
+                    issue_id,
+                    cleanup=False,
+                    retry=True,
+                    failure_class=FailureClass.RUNNER_TIMEOUT,
+                )
 
         if not self.running:
             return
@@ -758,7 +785,14 @@ class Orchestrator:
             else:
                 self._terminate(issue.id, cleanup=False, retry=False)
 
-    def _terminate(self, issue_id: str, *, cleanup: bool, retry: bool) -> None:
+    def _terminate(
+        self,
+        issue_id: str,
+        *,
+        cleanup: bool,
+        retry: bool,
+        failure_class: FailureClass | None = None,
+    ) -> None:
         """Take authority over a running worker (§8.5): pop the entry *before*
         cancelling so the done-callback becomes a no-op, then decide retry vs
         release ourselves — deterministic regardless of callback ordering.
@@ -784,17 +818,34 @@ class Orchestrator:
         # let a workspace.root/hook change retarget cleanup at the wrong root.
         wsm = self._components()[1] if cleanup else None
         teardown = asyncio.create_task(
-            self._finish_termination(issue_id, entry, wsm=wsm, retry=retry))
+            self._finish_termination(
+                issue_id,
+                entry,
+                wsm=wsm,
+                retry=retry,
+                failure_class=failure_class,
+            ))
         self.terminating[issue_id] = teardown
         teardown.add_done_callback(
             lambda t, iid=issue_id: self.terminating.pop(iid, None))
 
     async def _finish_termination(self, issue_id: str, entry: RunningEntry, *,
-                                  wsm: WorkspaceManager | None, retry: bool) -> None:
+                                  wsm: WorkspaceManager | None, retry: bool,
+                                  failure_class: FailureClass | None) -> None:
         try:
             await asyncio.gather(entry.task, return_exceptions=True)
             if wsm is not None:
                 await wsm.cleanup_terminal([entry.identifier])
+            if failure_class is None:
+                log("worker cancelled", issue_id=issue_id,
+                    issue_identifier=entry.identifier,
+                    provider_id=entry.provider_id, session_id=entry.session_id,
+                    outcome="cancelled")
+            else:
+                log("worker failed", issue_id=issue_id,
+                    issue_identifier=entry.identifier,
+                    provider_id=entry.provider_id, session_id=entry.session_id,
+                    outcome="failed", failure_class=failure_class.value)
             if retry and not self._stopping:
                 attempt = (entry.retry_attempt or 0) + 1
                 self._schedule_retry(issue_id, entry.identifier, attempt=attempt,

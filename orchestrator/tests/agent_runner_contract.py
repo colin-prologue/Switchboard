@@ -6,7 +6,7 @@ import inspect
 from pathlib import Path
 
 from orchestrator.agent_runner import AgentRunner
-from orchestrator.types import AgentEvent
+from orchestrator.types import AgentEvent, FailureClass
 
 
 class EventRecorder:
@@ -53,6 +53,30 @@ async def assert_success_contract(
 
     assert result.status == "succeeded"
     assert result.session_id == expected_session_id
+    assert result.failure_class is None
     assert recorder.events
     assert all(issue_id == "contract-issue" for issue_id, _ in recorder.events)
     assert recorder.events[-1][1].event == "turn_completed"
+
+
+async def assert_failure_contract(
+    runner: AgentRunner,
+    workspace: Path,
+    *,
+    expected_provider_id: str,
+    expected_failure_class: FailureClass,
+) -> None:
+    """Exercise the scheduler-facing typed failure contract."""
+    recorder = EventRecorder()
+    result = await runner.run_turn(
+        workspace,
+        "contract prompt",
+        resume_session_id=None,
+        on_event=recorder,
+        issue_id="contract-issue",
+        agent_token="contract-token",
+    )
+
+    assert runner.provider_id == expected_provider_id
+    assert result.status == "failed"
+    assert result.failure_class is expected_failure_class

@@ -28,7 +28,8 @@ import signal
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .types import AgentEvent, ClaudeConfig, EventCallback, TurnResult
+from .failure_classification import classify_claude_failure
+from .types import AgentEvent, ClaudeConfig, EventCallback, FailureClass, TurnResult
 
 MAX_LINE_BYTES = 10 * 1024 * 1024  # core §10.1
 STDERR_TAIL_CHARS = 500
@@ -98,6 +99,16 @@ def _summarize_message(msg: dict) -> dict:
                         parts.append("[tool_result]")
             text = " ".join(parts)
     return {"type": msg_type, "text": text[:NOTIFICATION_TEXT_CHARS]}
+
+
+def _result_error_text(msg: dict) -> str:
+    for key in ("error", "result", "message"):
+        value = msg.get(key)
+        if isinstance(value, str):
+            return value[:NOTIFICATION_TEXT_CHARS]
+        if isinstance(value, dict) and isinstance(value.get("message"), str):
+            return value["message"][:NOTIFICATION_TEXT_CHARS]
+    return ""
 
 
 class ClaudeRunner:
@@ -185,7 +196,12 @@ class ClaudeRunner:
             )
         except (OSError, FileNotFoundError) as exc:
             emit("startup_failed", {"error": str(exc), "command": command}, None)
-            return TurnResult(status="failed", session_id=None, error="claude_not_found")
+            return TurnResult(
+                status="failed",
+                session_id=None,
+                error="claude_not_found",
+                failure_class=FailureClass.RUNNER_STARTUP,
+            )
 
         pid = proc.pid
         stderr_chunks: list[bytes] = []
@@ -262,7 +278,12 @@ class ClaudeRunner:
                         {"error": "turn_timeout", "stderr": _stderr_tail(stderr_chunks)},
                         pid,
                     )
-                    return TurnResult(status="timed_out", session_id=session_id, error="turn_timeout")
+                    return TurnResult(
+                        status="timed_out",
+                        session_id=session_id,
+                        error="turn_timeout",
+                        failure_class=FailureClass.RUNNER_TIMEOUT,
+                    )
 
                 if first_line:
                     read_timeout = min(self.cfg.read_timeout_ms / 1000.0, remaining_turn)
@@ -276,7 +297,12 @@ class ClaudeRunner:
                             {"error": "no protocol output before read_timeout_ms", "stderr": _stderr_tail(stderr_chunks)},
                             pid,
                         )
-                        return TurnResult(status="failed", session_id=None, error="response_timeout")
+                        return TurnResult(
+                            status="failed",
+                            session_id=None,
+                            error="response_timeout",
+                            failure_class=FailureClass.RUNNER_TIMEOUT,
+                        )
                 else:
                     try:
                         line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining_turn)
@@ -288,7 +314,12 @@ class ClaudeRunner:
                             {"error": "turn_timeout", "stderr": _stderr_tail(stderr_chunks)},
                             pid,
                         )
-                        return TurnResult(status="timed_out", session_id=session_id, error="turn_timeout")
+                        return TurnResult(
+                            status="timed_out",
+                            session_id=session_id,
+                            error="turn_timeout",
+                            failure_class=FailureClass.RUNNER_TIMEOUT,
+                        )
 
                 if not line:
                     # EOF: process exited without further output.
@@ -355,6 +386,10 @@ class ClaudeRunner:
                             status="failed",
                             session_id=session_id,
                             error=subtype,
+                            failure_class=classify_claude_failure(
+                                code=subtype,
+                                detail=_result_error_text(msg),
+                            ),
                             cost_usd=cost_usd,
                             usage=usage,
                             num_turns=num_turns,
@@ -385,7 +420,17 @@ class ClaudeRunner:
                 {"error": "bash launch failure", "returncode": proc.returncode, "stderr": _stderr_tail(stderr_chunks)},
                 pid,
             )
-            return TurnResult(status="failed", session_id=None, error="claude_not_found")
+            return TurnResult(
+                status="failed",
+                session_id=None,
+                error="claude_not_found",
+                failure_class=FailureClass.RUNNER_STARTUP,
+            )
 
         emit("turn_failed", {"error": "port_exit", "stderr": _stderr_tail(stderr_chunks)}, pid)
-        return TurnResult(status="failed", session_id=session_id, error="port_exit")
+        return TurnResult(
+            status="failed",
+            session_id=session_id,
+            error="port_exit",
+            failure_class=FailureClass.RUNNER_PROTOCOL,
+        )

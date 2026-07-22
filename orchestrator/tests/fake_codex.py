@@ -45,6 +45,15 @@ elif scenario == "failed":
 elif scenario == "error":
     emit({"type": "thread.started", "thread_id": "codex-error"})
     emit({"type": "error", "message": "transport failed"})
+elif scenario == "provider_error":
+    emit({"type": "thread.started", "thread_id": "codex-provider-error"})
+    emit({
+        "type": "error",
+        "error": {
+            "code": os.environ.get("FAKE_CODEX_ERROR_CODE", "provider_error"),
+            "message": os.environ.get("FAKE_CODEX_ERROR_DETAIL", "provider failed"),
+        },
+    })
 elif scenario in {"turn_timeout", "hang"}:
     emit({"type": "thread.started", "thread_id": "codex-hang"})
     if path := os.environ.get("FAKE_CODEX_PID_FILE"):

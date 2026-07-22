@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
 
-from .types import AgentEvent, CodexConfig, EventCallback, TurnResult
+from .failure_classification import classify_codex_failure
+from .types import AgentEvent, CodexConfig, EventCallback, FailureClass, TurnResult
 
 
 MAX_LINE_BYTES = 10 * 1024 * 1024
@@ -41,6 +42,15 @@ def _error_text(message: dict) -> str:
     if isinstance(message.get("message"), str):
         return message["message"][:NOTIFICATION_TEXT_CHARS]
     return ""
+
+
+def _error_code(message: dict) -> str | None:
+    error = message.get("error")
+    if isinstance(error, dict) and isinstance(error.get("code"), str):
+        return error["code"]
+    if isinstance(message.get("code"), str):
+        return message["code"]
+    return None
 
 
 def _notification(message: dict) -> dict:
@@ -184,7 +194,12 @@ class CodexRunner:
             )
         except (OSError, ValueError) as exc:
             emit("startup_failed", {"error": str(exc)}, None)
-            return TurnResult(status="failed", session_id=None, error="codex_not_found")
+            return TurnResult(
+                status="failed",
+                session_id=None,
+                error="codex_not_found",
+                failure_class=FailureClass.RUNNER_STARTUP,
+            )
 
         pid = proc.pid
         stderr_chunks: list[bytes] = []
@@ -255,6 +270,7 @@ class CodexRunner:
                         status="timed_out",
                         session_id=session_id,
                         error="turn_timeout",
+                        failure_class=FailureClass.RUNNER_TIMEOUT,
                     )
 
                 timeout = remaining
@@ -277,6 +293,7 @@ class CodexRunner:
                             status="failed",
                             session_id=None,
                             error="response_timeout",
+                            failure_class=FailureClass.RUNNER_TIMEOUT,
                         )
                     emit(
                         "turn_failed",
@@ -287,6 +304,7 @@ class CodexRunner:
                         status="timed_out",
                         session_id=session_id,
                         error="turn_timeout",
+                        failure_class=FailureClass.RUNNER_TIMEOUT,
                     )
 
                 if not line:
@@ -322,6 +340,7 @@ class CodexRunner:
                             status="failed",
                             session_id=None,
                             error="missing_session_id",
+                            failure_class=FailureClass.RUNNER_PROTOCOL,
                         )
                     else:
                         usage = message.get("usage")
@@ -337,28 +356,36 @@ class CodexRunner:
                     break
 
                 if message_type == "turn.failed":
+                    detail = _error_text(message)
                     emit(
                         "turn_failed",
-                        {"error": _error_text(message)},
+                        {"error": detail},
                         pid,
                     )
                     result = TurnResult(
                         status="failed",
                         session_id=session_id,
                         error="codex_turn_failed",
+                        failure_class=classify_codex_failure(
+                            code=_error_code(message), detail=detail
+                        ),
                     )
                     break
 
                 if message_type == "error":
+                    detail = _error_text(message)
                     emit(
                         "turn_failed",
-                        {"error": _error_text(message)},
+                        {"error": detail},
                         pid,
                     )
                     result = TurnResult(
                         status="failed",
                         session_id=session_id,
                         error="codex_error",
+                        failure_class=classify_codex_failure(
+                            code=_error_code(message), detail=detail
+                        ),
                     )
                     break
 
@@ -383,4 +410,9 @@ class CodexRunner:
             {"error": "port_exit", "stderr": _stderr_tail(stderr_chunks)},
             pid,
         )
-        return TurnResult(status="failed", session_id=session_id, error="port_exit")
+        return TurnResult(
+            status="failed",
+            session_id=session_id,
+            error="port_exit",
+            failure_class=FailureClass.RUNNER_PROTOCOL,
+        )

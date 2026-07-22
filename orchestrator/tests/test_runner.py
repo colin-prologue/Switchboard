@@ -19,7 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from orchestrator.runner import ClaudeRunner
-from orchestrator.types import AgentEvent, ClaudeConfig
+from orchestrator.types import AgentEvent, ClaudeConfig, FailureClass
 
 FIXTURE = str(Path(__file__).resolve().parent / "fake_claude.py")
 
@@ -74,6 +74,7 @@ async def test_success_path(workspace: Path, monkeypatch):
     assert result.cost_usd == pytest.approx(0.0123)
     assert result.usage == {"input_tokens": 10, "output_tokens": 20}
     assert result.num_turns == 2
+    assert result.failure_class is None
 
     assert recorder.names == [
         "session_started",
@@ -134,6 +135,7 @@ async def test_error_result_subtype(workspace: Path, monkeypatch):
     assert result.status == "failed"
     assert result.error == "error_max_turns"
     assert result.session_id == "sess-err"
+    assert result.failure_class is FailureClass.WORKER_FAILURE
     assert "turn_failed" in recorder.names
 
 
@@ -147,6 +149,7 @@ async def test_turn_timeout(workspace: Path, monkeypatch):
 
     assert result.status == "timed_out"
     assert result.error == "turn_timeout"
+    assert result.failure_class is FailureClass.RUNNER_TIMEOUT
 
     # process must actually be dead afterwards
     pid = recorder.events[-1][1].pid
@@ -165,6 +168,7 @@ async def test_read_timeout(workspace: Path, monkeypatch):
 
     assert result.status == "failed"
     assert result.error == "response_timeout"
+    assert result.failure_class is FailureClass.RUNNER_TIMEOUT
     assert "startup_failed" in recorder.names
 
 
@@ -191,6 +195,7 @@ async def test_no_result_line_is_port_exit(workspace: Path, monkeypatch):
 
     assert result.status == "failed"
     assert result.error == "port_exit"
+    assert result.failure_class is FailureClass.RUNNER_PROTOCOL
 
 
 async def test_nonexistent_command_is_claude_not_found(workspace: Path):
@@ -209,6 +214,54 @@ async def test_nonexistent_command_is_claude_not_found(workspace: Path):
 
     assert result.status == "failed"
     assert result.error == "claude_not_found"
+    assert result.failure_class is FailureClass.RUNNER_STARTUP
+
+
+@pytest.mark.parametrize(
+    ("code", "detail", "expected"),
+    [
+        ("authentication_required", "", FailureClass.PROVIDER_AUTHENTICATION),
+        ("provider_error", "Usage limit reached", FailureClass.PROVIDER_PLAN_LIMIT),
+        ("provider_error", "Credits are exhausted", FailureClass.PROVIDER_CREDITS_EXHAUSTED),
+        ("provider_error", "Rate limit exceeded", FailureClass.PROVIDER_RATE_LIMIT),
+        ("provider_error", "Service is unavailable", FailureClass.PROVIDER_UNAVAILABLE),
+        ("provider_error", "Rate limit policy loaded", FailureClass.WORKER_FAILURE),
+    ],
+)
+async def test_provider_failure_classification(
+    workspace: Path,
+    monkeypatch,
+    code: str,
+    detail: str,
+    expected: FailureClass,
+) -> None:
+    monkeypatch.setenv("FAKE_SCENARIO", "provider_error")
+    monkeypatch.setenv("FAKE_CLAUDE_ERROR_CODE", code)
+    monkeypatch.setenv("FAKE_CLAUDE_ERROR_DETAIL", detail)
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-1"
+    )
+
+    assert result.status == "failed"
+    assert result.error == code
+    assert result.failure_class is expected
+
+
+async def test_provider_diagnostic_does_not_enter_normalized_error(
+    workspace: Path, monkeypatch
+) -> None:
+    secret = "ghs-must-not-enter-turn-result"
+    monkeypatch.setenv("FAKE_SCENARIO", "provider_error")
+    monkeypatch.setenv("FAKE_CLAUDE_ERROR_CODE", "authentication_required")
+    monkeypatch.setenv("FAKE_CLAUDE_ERROR_DETAIL", f"Authentication required {secret}")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-1"
+    )
+
+    assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION
+    assert secret not in (result.error or "")
 
 
 async def test_prompt_delivered_via_stdin(workspace: Path, monkeypatch, tmp_path: Path):

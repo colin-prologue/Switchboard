@@ -85,6 +85,19 @@ def main() -> None:
         emit(result_line("error_max_turns", session_id="sess-err"))
         sys.exit(1)  # real CLI exits nonzero on error result subtypes
 
+    if scenario == "provider_error":
+        record_stdin()
+        emit({"type": "system", "subtype": "init", "session_id": "sess-provider"})
+        payload = result_line(
+            os.environ.get("FAKE_CLAUDE_ERROR_CODE", "provider_error"),
+            session_id="sess-provider",
+        )
+        payload["error"] = {
+            "message": os.environ.get("FAKE_CLAUDE_ERROR_DETAIL", "provider failed")
+        }
+        emit(payload)
+        sys.exit(1)
+
     if scenario == "turn_timeout":
         record_stdin()
         emit({"type": "system", "subtype": "init", "session_id": "sess-slow"})
