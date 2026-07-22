@@ -1,25 +1,25 @@
 # Product intent: AI-agnostic agent pool
 
 - **Slug:** `ai-agnostic-agent-pool`
-- **Status:** active; Stage 5B isolated live canary is complete. Stage 6 Slice 4
-  now has named live evidence for explicit Claude, explicit Codex, deterministic
-  zero-weight routing to Claude, and rollback to the default Claude-only path.
-  All four synthetic handoffs merged and closed their issues. A nonzero Codex
-  routing weight remains a separately reviewed rollout; Claude-only production
-  remains unchanged.
+- **Status:** active; Stage 6 isolated mixed-pool validation is complete. Five
+  named live checkpoints prove explicit Claude and Codex, deterministic
+  automatic routing to each provider, and rollback to the default Claude-only
+  path. Every synthetic handoff merged and closed its issue. Stage 7 operational
+  hardening is next; Claude-only production remains unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 6 Slice 4 evidence merged as [PR #92](https://github.com/colin-prologue/Switchboard/pull/92)
-  at `abad70c`. All four initial checkpoints passed. The next proposed gate is
-  one automatic Codex assignment through a dedicated, inert `claude: 0,
-  codex: 100` evidence workflow; this guarantees deterministic evidence without
-  changing the checked-in `100/0` baseline. [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
-  remains accepted and [AgDR-024](../../.decisions/AgDR-024-deterministic-nonzero-codex-canary.md)
-  is proposed.
+- **Current stage:** Stage 6 is complete. The accepted AgDR-024 checkpoint
+  launched an unlabeled synthetic issue through the dedicated `claude: 0,
+  codex: 100` evidence workflow, persisted `provider:codex`, dispatched Codex,
+  and merged its handoff. Stage 7 Slice 1 must add provider outcome visibility
+  and explicit subscription usage-limit classification before any mixed launch
+  against an existing project. [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
+  and [AgDR-024](../../.decisions/AgDR-024-deterministic-nonzero-codex-canary.md)
+  are accepted.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -33,13 +33,14 @@
   retains that assignment through scheduler recovery paths.
 - **What remains deliberately disabled:** fallback, registration-script
   support, any mixed-process launch against an existing production repository,
-  and any automatic Codex routing weight above zero. The completed checkpoint
-  issues must not be rerun.
-- **Last verified source commit:** Stage 6 Slice 4 evidence merged as `abad70c`.
+  and any automatic Codex routing weight above zero outside the dedicated inert
+  evidence workflow. The completed checkpoint issues must not be rerun.
+- **Last verified source commit:** Stage 6 checkpoint 5 procedure merged as
+  `b843e27`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 354 passed in 10.66s on 2026-07-21 on the proposed
-  Slice 5 branch. Its focused checkpoint/binding/setup/CLI suite passed (18 in
-  0.93s), and `scripts/verify-setup.sh` reported zero failures. Slice 3 focused
+  orchestrator/tests -q` - 354 passed in 13.42s on 2026-07-22 on the Stage 6
+  closeout branch. Its focused checkpoint/binding/setup/CLI suite passed (18 in
+  1.02s), and `scripts/verify-setup.sh` reported zero failures. Slice 3 focused
   workflow/CLI/selector tests passed (102 in 0.59s).
 - **Stage 6 Slice 3 verification:** explicit provider caps block only that
   provider, preserve a new durable assignment while capacity is full, and do
@@ -69,6 +70,16 @@
   contained only `status:in-progress`, and the checkpoint completed normally.
   Preserve this as evidence that separate GitHub label mutations are observable
   between writes. It did not duplicate dispatch or alter provider ownership.
+- **Stage 6 checkpoint 5 live verification:** unlabeled
+  [mixed-canary issue #9](https://github.com/colin-prologue/switchboard-mixed-canary/issues/9)
+  used the dedicated `claude: 0, codex: 100` workflow. Weighted selection wrote
+  durable `provider:codex` before `status:in-progress`, dispatched
+  `provider_id=codex`, retained at least one raw JSONL transcript, passed all 11
+  fixture tests, and stopped at `status:human-review`. Its scoped
+  [PR #10](https://github.com/colin-prologue/switchboard-mixed-canary/pull/10)
+  merged as `14fe89a`, automatically closed issue #9, and its branch was
+  deleted. No `agent:*` override appeared, the normal `100/0` workflow was not
+  edited, and no existing project used mixed mode.
 - **Last end-to-end evidence:** [canary issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   dispatched as `provider_id=codex`, session `019f6325-7419-75e0-b33d-13dbba7407c0`,
   reached `status:human-review`, and opened clean
@@ -163,14 +174,15 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review the proposed AgDR-024 and checkpoint 5 procedure.
-  After merge, run only `weighted-codex --dry-run` from the normal macOS
-  Terminal and return with its output before any live launch. The separate
-  evidence workflow guarantees Codex with `0/100`; it is not an operating ratio,
-  and the normal `projects/mixed-canary/WORKFLOW.md` remains `100/0`.
+- **Next single task:** define and review Stage 7 Slice 1's provider
+  observability contract before implementation: provider-tagged dispatch and
+  terminal outcomes, explicit subscription usage-limit classification, and an
+  operator-visible signal that distinguishes capacity/quota refusal from worker
+  failure. Keep routing and fallback behavior unchanged in this slice.
 - **Do not dispatch:** a mixed process against an existing project or another
-  mixed-canary issue until the nonzero-weight procedure and exact weights have
-  human approval. Do not rerun checkpoints 1 through 4.
+  mixed-canary issue until Stage 7's observability gate says how operators detect
+  provider-specific quota/failure and when to invoke Claude-only rollback. Do
+  not rerun checkpoints 1 through 5.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -545,13 +557,13 @@ Stage 6 planning starts.
 **Purpose:** add deterministic weighted selection, provider concurrency limits,
 and explicit issue overrides after both adapters are independently trusted.
 
-**Status:** Slice 3 merged as [PR #89](https://github.com/colin-prologue/Switchboard/pull/89).
+**Status:** complete. Slice 3 merged as [PR #89](https://github.com/colin-prologue/Switchboard/pull/89).
 Slice 4's inert binding and procedure merged as [PR #90](https://github.com/colin-prologue/Switchboard/pull/90)
 and [PR #91](https://github.com/colin-prologue/Switchboard/pull/91); all four
 isolated live checkpoints passed and their handoffs merged. Their evidence
 merged as [PR #92](https://github.com/colin-prologue/Switchboard/pull/92). Keep
-the current Claude-only launch path as the default while the proposed
-nonzero-Codex-weight canary is reviewed separately.
+the current Claude-only launch path as the default. Checkpoint 5 subsequently
+proved automatic Codex routing through the accepted AgDR-024 evidence workflow.
 
 **Accepted policy:** [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
 defines durable `provider:*` assignments, `agent:*` overrides, deterministic
@@ -655,9 +667,9 @@ canary rollout.
 - No existing project used mixed mode, no nonzero Codex weight was enabled, and
   the production Claude-only launch remained unchanged.
 
-**Proposed Slice 5 deterministic nonzero-weight gate:**
+**Slice 5 deterministic nonzero-weight evidence (2026-07-22):**
 
-- [AgDR-024](../../.decisions/AgDR-024-deterministic-nonzero-codex-canary.md)
+- Accepted [AgDR-024](../../.decisions/AgDR-024-deterministic-nonzero-codex-canary.md)
   adds a separate inert `WORKFLOW.weighted-codex.md` with `claude: 0,
   codex: 100`. One unlabeled issue therefore proves automatic Codex assignment
   without relying on chance or creating routing-probe issues.
@@ -669,6 +681,8 @@ canary rollout.
   The checked-in mixed-canary baseline remains `100/0`, so stopping the process
   restores the baseline without editing a workflow. No existing project is in
   scope.
+- Live issue #9 satisfied that contract, and PR #10 merged as `14fe89a` after
+  all 11 fixture tests passed. Stage 6 is complete.
 
 **Test:** weighted selection, capacity, `agent:claude`/`agent:codex` overrides,
 sticky retries, reload, unavailable-provider handling, and immediate rollback to
@@ -677,6 +691,11 @@ Claude-only mode. Begin with Codex opt-in or low weight.
 ### Stage 7 - Operational hardening
 
 **Purpose:** make mixed execution observable and production-ready.
+
+**Status:** planning. Slice 1 should add provider-tagged dispatch/outcome
+visibility and explicit subscription usage-limit classification without
+changing selection, retry, parking, fallback, or any project binding. This is
+the gate before choosing a low Codex percentage for an existing project.
 
 **Test:** provider metrics, usage-limit classification, circuit breaking,
 credential expiry, restart recovery, transcript handling, and rollback drills.
