@@ -35,7 +35,7 @@
   evidence workflow. The completed checkpoint issues must not be rerun.
 - **Last verified source commit:** Stage 6 closeout merged as `679322f`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 354 passed in 11.78s on 2026-07-22 on the Stage 7
+  orchestrator/tests -q` - 354 passed in 11.68s on 2026-07-22 on the Stage 7
   observability-contract branch. The focused runner/Codex/contract/selector/
   scheduler/CLI suite passed (96 in 5.32s). The Stage 6 closeout setup verifier
   reported zero failures.

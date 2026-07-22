@@ -61,11 +61,19 @@ make operators or scheduler policy parse that field after Slice 1.
 
 ### Classification ownership and false-positive posture
 
-Provider adapters own classification because they understand their structured
-protocol. Prefer explicit error codes, event types, or structured fields. A
-bounded diagnostic message or stderr tail may be used only through a
-table-driven provider-specific classifier with positive fixtures and
-near-miss/unknown fixtures.
+Provider adapters own provider-originated turn classification because they
+understand their structured protocol. They classify the `provider_*` and
+`runner_*` values produced while launching or running a turn. Prefer explicit
+error codes, event types, or structured fields. A bounded diagnostic message or
+stderr tail may be used only through a table-driven provider-specific
+classifier with positive fixtures and near-miss/unknown fixtures.
+
+The scheduler owns outcomes produced before or outside a provider turn. It
+emits `provider_capacity` when a configured provider slot is unavailable,
+`assignment_refused` when mixed assignment policy rejects an issue, and
+`worker_failure` for scheduler-owned hook, tracker, or orchestration failures.
+For a failed provider turn, it propagates the adapter's typed class without
+re-parsing the adapter error or a human-readable log message.
 
 Unknown or ambiguous failures classify as `worker_failure`. False provider
 availability positives are more dangerous than false negatives because Slice 2
