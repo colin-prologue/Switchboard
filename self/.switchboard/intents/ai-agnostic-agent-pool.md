@@ -12,14 +12,12 @@
 
 ## Resume here
 
-- **Current stage:** Stage 6 is complete. The accepted AgDR-024 checkpoint
-  launched an unlabeled synthetic issue through the dedicated `claude: 0,
-  codex: 100` evidence workflow, persisted `provider:codex`, dispatched Codex,
-  and merged its handoff. Stage 7 Slice 1 must add provider outcome visibility
-  and explicit subscription usage-limit classification before any mixed launch
-  against an existing project. [AgDR-023](../../.decisions/AgDR-023-stage6-mixed-routing-policy.md)
-  and [AgDR-024](../../.decisions/AgDR-024-deterministic-nonzero-codex-canary.md)
-  are accepted.
+- **Current stage:** Stage 6 is complete and its closeout merged as
+  [PR #94](https://github.com/colin-prologue/Switchboard/pull/94) at `679322f`.
+  Stage 7 Slice 1's provider observability contract is proposed in
+  [AgDR-025](../../.decisions/AgDR-025-provider-observability-taxonomy.md): add
+  typed outcome/failure fields and conservative provider-owned classification
+  without changing retry, parking, fallback, routing, or project bindings.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -35,13 +33,12 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source commit:** Stage 6 checkpoint 5 procedure merged as
-  `b843e27`.
+- **Last verified source commit:** Stage 6 closeout merged as `679322f`.
 - **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 354 passed in 13.42s on 2026-07-22 on the Stage 6
-  closeout branch. Its focused checkpoint/binding/setup/CLI suite passed (18 in
-  1.02s), and `scripts/verify-setup.sh` reported zero failures. Slice 3 focused
-  workflow/CLI/selector tests passed (102 in 0.59s).
+  orchestrator/tests -q` - 354 passed in 11.68s on 2026-07-22 on the Stage 7
+  observability-contract branch. The focused runner/Codex/contract/selector/
+  scheduler/CLI suite passed (96 in 5.32s). The Stage 6 closeout setup verifier
+  reported zero failures.
 - **Stage 6 Slice 3 verification:** explicit provider caps block only that
   provider, preserve a new durable assignment while capacity is full, and do
   not launch a worker or fall back. A durable assignment selects the same
@@ -174,11 +171,10 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** define and review Stage 7 Slice 1's provider
-  observability contract before implementation: provider-tagged dispatch and
-  terminal outcomes, explicit subscription usage-limit classification, and an
-  operator-visible signal that distinguishes capacity/quota refusal from worker
-  failure. Keep routing and fallback behavior unchanged in this slice.
+- **Next single task:** review AgDR-025's closed failure taxonomy, conservative
+  classifier boundary, structured lifecycle fields, and observability-only
+  scope. Do not implement it until accepted. Slice 2 circuit behavior remains a
+  later decision and is required before an existing-project pilot.
 - **Do not dispatch:** a mixed process against an existing project or another
   mixed-canary issue until Stage 7's observability gate says how operators detect
   provider-specific quota/failure and when to invoke Claude-only rollback. Do
@@ -692,10 +688,13 @@ Claude-only mode. Begin with Codex opt-in or low weight.
 
 **Purpose:** make mixed execution observable and production-ready.
 
-**Status:** planning. Slice 1 should add provider-tagged dispatch/outcome
-visibility and explicit subscription usage-limit classification without
-changing selection, retry, parking, fallback, or any project binding. This is
-the gate before choosing a low Codex percentage for an existing project.
+**Status:** planning. Proposed
+[AgDR-025](../../.decisions/AgDR-025-provider-observability-taxonomy.md) splits
+the work into an observability-only taxonomy followed by separately reviewed
+circuit behavior. Slice 1 adds provider-tagged lifecycle outcomes and explicit
+subscription failure classes without changing selection, retry, parking,
+fallback, or any project binding. Slice 2 must use that contract to prevent
+provider availability failures from burning issue retries before a pilot.
 
 **Test:** provider metrics, usage-limit classification, circuit breaking,
 credential expiry, restart recovery, transcript handling, and rollback drills.
