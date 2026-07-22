@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run exactly one reviewed Stage 6 mixed-canary evidence checkpoint.
 # Usage: scripts/run-mixed-canary-checkpoint.sh <phase> [--dry-run]
-# Phases: explicit-claude, explicit-codex, weighted-claude, rollback-claude
+# Phases: explicit-claude, explicit-codex, weighted-claude, rollback-claude,
+# weighted-codex
 set -euo pipefail
 
 SB_HOME="${SB_HOME:-$HOME/Developer/Switchboard}"
@@ -9,6 +10,7 @@ REPO="colin-prologue/switchboard-mixed-canary"
 PROJECT_ENV="$SB_HOME/projects/mixed-canary/project.env"
 MIXED_WORKFLOW="$SB_HOME/projects/mixed-canary/WORKFLOW.md"
 ROLLBACK_WORKFLOW="$SB_HOME/projects/mixed-canary/WORKFLOW.rollback-claude.md"
+WEIGHTED_CODEX_WORKFLOW="$SB_HOME/projects/mixed-canary/WORKFLOW.weighted-codex.md"
 CHECKPOINT_DIR="$SB_HOME/projects/mixed-canary/checkpoints"
 APP_ENV="$HOME/.config/switchboard/app.env"
 PHASE="${1:-}"
@@ -66,14 +68,29 @@ Canary checkpoint 2: explicit Codex assignment"
 Canary checkpoint 2: explicit Codex assignment
 Canary checkpoint 3: zero-weight Codex routes to Claude"
     ;;
+  weighted-codex)
+    TITLE="Canary checkpoint 5: nonzero Codex weight routes to Codex"
+    BODY_FILE="$CHECKPOINT_DIR/05-weighted-codex.md"
+    ISSUE_LABELS="status:todo,gate:triage-passed"
+    EXPECTED_PROVIDER="codex"
+    EXPECTED_DURABLE_PROVIDER="codex"
+    RUN_MODE="mixed"
+    PREREQUISITES="Canary checkpoint 1: explicit Claude assignment
+Canary checkpoint 2: explicit Codex assignment
+Canary checkpoint 3: zero-weight Codex routes to Claude
+Canary checkpoint 4: Claude-only rollback ignores mixed assignment"
+    ;;
   *)
     printf 'usage: %s <%s> [--dry-run]\n' "$0" \
-      "explicit-claude|explicit-codex|weighted-claude|rollback-claude" >&2
+      "explicit-claude|explicit-codex|weighted-claude|rollback-claude|weighted-codex" >&2
     exit 2
     ;;
 esac
 
-if [ "$RUN_MODE" = "mixed" ]; then
+if [ "$PHASE" = "weighted-codex" ]; then
+  WORKFLOW="$WEIGHTED_CODEX_WORKFLOW"
+  CLI_PROVIDER="mixed"
+elif [ "$RUN_MODE" = "mixed" ]; then
   WORKFLOW="$MIXED_WORKFLOW"
   CLI_PROVIDER="mixed"
 else
@@ -253,7 +270,7 @@ case ",$FINAL_LABELS," in
   *,provider:$EXPECTED_DURABLE_PROVIDER,*) ;;
   *) fail "missing expected provider:$EXPECTED_DURABLE_PROVIDER label (labels: $FINAL_LABELS)" ;;
 esac
-if [ "$PHASE" = "weighted-claude" ]; then
+if [ "$PHASE" = "weighted-claude" ] || [ "$PHASE" = "weighted-codex" ]; then
   case ",$FINAL_LABELS," in
     *,agent:claude,*|*,agent:codex,*) fail "weighted checkpoint acquired an agent override" ;;
   esac

@@ -74,3 +74,26 @@ Codex above zero remains the next separately reviewed rollout. Before another
 live issue is created, review a procedure that chooses the exact weights and a
 deterministic evidence strategy, preserves the one-checkpoint stop conditions,
 and restores the checked-in `claude: 100, codex: 0` baseline.
+
+## Proposed checkpoint 5
+
+Checkpoint `weighted-codex` is the separately reviewed automatic-Codex proof.
+It uses `WORKFLOW.weighted-codex.md`, whose `claude: 0, codex: 100` weights
+guarantee that one unlabeled issue takes the weighted path to Codex. This split
+is not a proposed operating ratio. The normal `WORKFLOW.md` remains at
+`claude: 100, codex: 0` and is never edited during the checkpoint.
+
+Do not launch checkpoint 5 until its procedure PR merges. Then refresh the
+primary checkout and preview only this phase from the normal macOS Terminal:
+
+```bash
+git -C "$HOME/Developer/Switchboard" pull --ff-only origin main
+bash "$HOME/Developer/Switchboard/scripts/run-mixed-canary-checkpoint.sh" \
+  weighted-codex --dry-run
+```
+
+The preview must declare mixed mode, no `agent:*` issue label, the dedicated
+weighted-Codex workflow, expected dispatch and durable provider `codex`, and all
+four completed checkpoints as prerequisites. It performs no GitHub writes and
+launches no process. Return to the migration session with that output before
+running the phase live.
