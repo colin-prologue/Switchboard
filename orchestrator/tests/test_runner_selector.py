@@ -271,6 +271,29 @@ def test_mixed_selector_refuses_conflicting_or_unknown_labels(
         MixedRunnerSelector().select(_mixed_config(tmp_path), issue)
 
 
+async def test_mixed_dispatch_logs_assignment_refusal(
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("prompt")
+    orchestrator = Orchestrator(
+        workflow_path,
+        runner_selector=MixedRunnerSelector(),
+    )
+    orchestrator._cfg = _mixed_config(tmp_path)
+    issue = _issue()
+    issue.labels.extend(["provider:claude", "provider:codex"])
+
+    await orchestrator._dispatch(issue, attempt=None)
+
+    assert issue.id not in orchestrator.claimed
+    assert issue.id not in orchestrator.running
+    err = capfd.readouterr().err
+    assert "outcome=refused" in err
+    assert "failure_class=assignment_refused" in err
+
+
 class _LabelTracker:
     def __init__(self, add_error: TrackerError | None = None) -> None:
         self.add_error = add_error
@@ -449,6 +472,7 @@ async def test_mixed_dispatch_reuses_existing_assignment_without_a_second_write(
 async def test_mixed_dispatch_persists_full_provider_assignment_without_launching(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
 ) -> None:
     workflow_path = tmp_path / "WORKFLOW.md"
     workflow_path.write_text("prompt")
@@ -479,6 +503,10 @@ async def test_mixed_dispatch_persists_full_provider_assignment_without_launchin
     assert issue.id not in orchestrator.running
     assert "provider:codex" in issue.labels
     assert orchestrator._provider_slots_available("claude")
+    err = capfd.readouterr().err
+    assert "provider_id=codex" in err
+    assert "outcome=refused" in err
+    assert "failure_class=provider_capacity" in err
 
 
 def test_mixed_provider_capacity_defaults_to_global_cap(tmp_path: Path) -> None:

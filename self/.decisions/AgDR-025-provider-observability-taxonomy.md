@@ -1,6 +1,6 @@
 # AgDR-025: Provider observability taxonomy before circuit behavior
 
-**Status:** proposed (2026-07-22)
+**Status:** accepted (2026-07-22, PR #95)
 **Surfaces:** provider adapters, neutral turn results, scheduler lifecycle logs,
 failure fixtures, and Stage 7 rollout gates
 

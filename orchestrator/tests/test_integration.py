@@ -30,7 +30,13 @@ import pytest
 
 import orchestrator.scheduler as scheduler_mod
 from orchestrator.scheduler import CONTINUATION_PROMPT, Orchestrator
-from orchestrator.types import BlockerRef, Issue, TrackerError, TurnResult
+from orchestrator.types import (
+    BlockerRef,
+    FailureClass,
+    Issue,
+    TrackerError,
+    TurnResult,
+)
 from orchestrator.workspace import WorkspaceManager
 
 UTC = timezone.utc
@@ -369,7 +375,7 @@ async def test_nonactive_reconcile_cancels_without_cleanup(harness):
     assert wsdir.is_dir()  # workspace preserved (§8.5 non-active branch)
 
 
-async def test_stall_detection_terminates_and_retries(harness, monkeypatch):
+async def test_stall_detection_terminates_and_retries(harness, monkeypatch, capfd):
     orch, tracker, runner, _ = harness
     # keep the retry entry observable (capped at 500ms) once teardown lands
     monkeypatch.setattr(scheduler_mod, "FAILURE_BASE_BACKOFF_MS", 10000)
@@ -391,6 +397,10 @@ async def test_stall_detection_terminates_and_retries(harness, monkeypatch):
     assert "node-1" in orch.claimed
     # §8.5: stall -> terminate + retry, scheduled once teardown reports back
     await wait_for(lambda: "node-1" in orch.retry_attempts)
+    err = capfd.readouterr().err
+    assert "provider_id=fake" in err
+    assert "outcome=failed" in err
+    assert "failure_class=runner_timeout" in err
 
 
 async def test_session_cap_parks_issue(harness):
@@ -727,6 +737,8 @@ async def test_multi_turn_continuation_resumes_session(tmp_path, monkeypatch, ca
     assert "worker completed" in err
     assert "worker failed" not in err
     assert "provider_id=fake" in err
+    assert "outcome=started" in err
+    assert "outcome=completed" in err
 
 
 async def test_budget_ceiling_ends_session_normally(tmp_path, monkeypatch, capfd):
@@ -975,11 +987,53 @@ async def test_codex_mode_failure_retries_and_releases_claim(
     err = capfd.readouterr().err
     assert "provider_id=codex" in err
     assert "worker failed" in err
+    assert "outcome=failed" in err
+    assert "failure_class=worker_failure" in err
+
+
+async def test_codex_failure_class_is_logged_without_changing_retry_behavior(
+    tmp_path,
+    monkeypatch,
+    capfd,
+):
+    runner = FakeRunner()
+    runner.provider_id = "codex"
+
+    async def failing_turn(*args, **kwargs):
+        return TurnResult(
+            status="failed",
+            session_id=None,
+            error="codex_error",
+            failure_class=FailureClass.PROVIDER_PLAN_LIMIT,
+        )
+
+    runner.run_turn = failing_turn
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=CODEX_WORKFLOW_TMPL,
+        runner=runner,
+        provider_id="codex",
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.retry_attempts)
+
+    assert orch.retry_attempts[issue.id].attempt == 1
+    assert orch.sessions_per_issue[issue.id] == 1
+    err = capfd.readouterr().err
+    assert "provider_id=codex" in err
+    assert "outcome=failed" in err
+    assert "failure_class=provider_plan_limit" in err
 
 
 async def test_codex_mode_enforces_capacity_and_cancels_terminal_worker(
     tmp_path,
     monkeypatch,
+    capfd,
 ):
     tmpl = CODEX_WORKFLOW_TMPL.replace(
         "max_concurrent_agents: 2",
@@ -1008,6 +1062,9 @@ async def test_codex_mode_enforces_capacity_and_cancels_terminal_worker(
     await orch._reconcile_running()
     assert first.id not in orch.running
     await wait_for(lambda: first.id not in orch.claimed)
+    err = capfd.readouterr().err
+    assert "provider_id=codex" in err
+    assert "outcome=cancelled" in err
 
 
 async def test_codex_mode_parks_after_session_cap(tmp_path, monkeypatch):

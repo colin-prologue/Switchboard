@@ -4,20 +4,21 @@
 - **Status:** active; Stage 6 isolated mixed-pool validation is complete. Five
   named live checkpoints prove explicit Claude and Codex, deterministic
   automatic routing to each provider, and rollback to the default Claude-only
-  path. Every synthetic handoff merged and closed its issue. Stage 7 operational
-  hardening is next; Claude-only production remains unchanged.
+  path. Every synthetic handoff merged and closed its issue. Stage 7 Slice 1's
+  observability implementation is under review; Claude-only production remains
+  unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 6 is complete and its closeout merged as
-  [PR #94](https://github.com/colin-prologue/Switchboard/pull/94) at `679322f`.
-  Stage 7 Slice 1's provider observability contract is proposed in
-  [AgDR-025](../../.decisions/AgDR-025-provider-observability-taxonomy.md): add
-  typed outcome/failure fields and conservative provider-owned classification
-  without changing retry, parking, fallback, routing, or project bindings.
+- **Current stage:** Stage 7 Slice 1 implementation. The accepted
+  [AgDR-025](../../.decisions/AgDR-025-provider-observability-taxonomy.md)
+  contract merged in [PR #95](https://github.com/colin-prologue/Switchboard/pull/95)
+  at `a0b125a`. The implementation adds typed outcome/failure fields,
+  conservative provider-owned classification, and stable provider lifecycle
+  logs without changing retry, parking, fallback, routing, or project bindings.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -33,12 +34,25 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source commit:** Stage 6 closeout merged as `679322f`.
-- **Last passing command:** `uv run --project orchestrator python -m pytest
-  orchestrator/tests -q` - 354 passed in 11.68s on 2026-07-22 on the Stage 7
-  observability-contract branch. The focused runner/Codex/contract/selector/
-  scheduler/CLI suite passed (96 in 5.32s). The Stage 6 closeout setup verifier
-  reported zero failures.
+- **Last verified source:** Stage 7 Slice 1 reviewed implementation commit
+  `c8ac8a6`, based on accepted contract commit `a0b125a`. The branch passes
+  `UV_CACHE_DIR=/private/tmp/switchboard-uv-cache
+  uv run python -m pytest -q` from `orchestrator/`: 401 tests in 12.33s on
+  2026-07-22. Its focused classifier/Claude/Codex/contract/selector/scheduler
+  suite passes 139 tests in 6.33s; the post-review Claude/classifier/contract
+  subset passes 57 tests in 2.02s. `git diff --check` is clean.
+- **Stage 7 Slice 1 evidence:** every failed adapter result carries a closed
+  `FailureClass`; success carries none. Claude and Codex classify explicit
+  authentication, plan, credit, rate-limit, and availability signals while
+  near-matches and unknowns remain `worker_failure`. Scheduler lifecycle logs
+  carry stable provider/outcome/failure fields for dispatch, completion,
+  failure, cancellation, assignment refusal, capacity refusal, and stalls.
+  Claude classification ignores top-level model `result` text and reads only
+  structured error detail, preventing task output from opening a false circuit.
+  Tests prove classified failures retain the same retry attempt and session
+  accounting, and existing parking, sticky assignment, capacity, no-fallback,
+  and Claude-only paths remain unchanged. Raw provider diagnostics do not enter
+  normalized scheduler errors.
 - **Stage 6 Slice 3 verification:** explicit provider caps block only that
   provider, preserve a new durable assignment while capacity is full, and do
   not launch a worker or fall back. A durable assignment selects the same
@@ -171,10 +185,11 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review AgDR-025's closed failure taxonomy, conservative
-  classifier boundary, structured lifecycle fields, and observability-only
-  scope. Do not implement it until accepted. Slice 2 circuit behavior remains a
-  later decision and is required before an existing-project pilot.
+- **Next single task:** review and merge the Stage 7 Slice 1 implementation PR.
+  Confirm the closed taxonomy, conservative false-positive boundary, stable
+  lifecycle fields, and unchanged retry/session behavior. Slice 2 circuit
+  behavior remains a separate decision and is required before an
+  existing-project pilot.
 - **Do not dispatch:** a mixed process against an existing project or another
   mixed-canary issue until Stage 7's observability gate says how operators detect
   provider-specific quota/failure and when to invoke Claude-only rollback. Do
@@ -688,13 +703,14 @@ Claude-only mode. Begin with Codex opt-in or low weight.
 
 **Purpose:** make mixed execution observable and production-ready.
 
-**Status:** planning. Proposed
+**Status:** Slice 1 implemented and awaiting review. Accepted
 [AgDR-025](../../.decisions/AgDR-025-provider-observability-taxonomy.md) splits
 the work into an observability-only taxonomy followed by separately reviewed
 circuit behavior. Slice 1 adds provider-tagged lifecycle outcomes and explicit
 subscription failure classes without changing selection, retry, parking,
-fallback, or any project binding. Slice 2 must use that contract to prevent
-provider availability failures from burning issue retries before a pilot.
+fallback, or any project binding. Its full 400-test suite and focused 139-test
+suite pass. Slice 2 must use that contract to prevent provider availability
+failures from burning issue retries before a pilot.
 
 **Test:** provider metrics, usage-limit classification, circuit breaking,
 credential expiry, restart recovery, transcript handling, and rollback drills.
