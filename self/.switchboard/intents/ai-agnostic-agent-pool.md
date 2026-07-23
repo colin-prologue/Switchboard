@@ -187,8 +187,10 @@
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
 - **Next single task:** review AgDR-026's circuit trigger allowlist, latched vs
   cooldown recovery, half-open probe rule, provider-wait ownership, session and
-  retry refund, restart behavior, and isolated test slices. Do not implement it
-  until accepted; an existing-project pilot remains prohibited.
+  retry refund, concurrency-bounded restart behavior, and isolated test slices.
+  The subscription-backed Codex cap stays at one through the first pilot. Do not
+  implement until the decision is accepted; an existing-project pilot remains
+  prohibited.
 - **Do not dispatch:** a mixed process against an existing project or another
   mixed-canary issue until AgDR-026 is accepted, its circuit behavior is
   implemented, and the isolated circuit canary plus Claude-only rollback drill

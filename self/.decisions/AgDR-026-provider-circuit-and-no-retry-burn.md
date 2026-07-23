@@ -63,10 +63,14 @@ Each provider starts `closed`.
 
 An operator resets an `open_latched` circuit by correcting the external
 condition and restarting the process. A process restart starts circuits closed;
-if the condition persists, the first typed provider failure reopens the circuit
-without consuming that issue's retry or session allowance. This bounds restart
-cost to one provider probe per process start without adding durable provider
-health storage.
+if the condition persists, the first completed typed provider failure reopens
+the circuit without consuming that issue's retry or session allowance. The
+current scheduler can fill the provider's effective concurrency capacity before
+that first result arrives, so one restart may launch at most that many provider
+calls, not exactly one. Every circuit-triggering result in that already-running
+batch receives the same accounting refund; the open circuit blocks any further
+dispatch. This keeps the bound explicit without adding startup serialization or
+durable provider-health storage.
 
 ### No-retry-burn issue handling
 
@@ -138,6 +142,12 @@ existing startup claim sweep may restore a stranded `status:in-progress` issue
 to `status:todo`; its durable `provider:*` assignment and preserved workspace
 still force the same provider on redispatch.
 
+The restart probe bound is the provider's effective running capacity: its
+configured provider cap in mixed mode, or the remaining global cap in a
+single-provider process. The isolated subscription-backed canary and first
+existing-project pilot must keep the Codex provider cap at `1`; raising it is a
+separate rollout decision backed by restart-outage evidence.
+
 No new tracker labels, files, external health service, or cross-process lock are
 introduced. The existing single-runner-per-repository premise still applies.
 
@@ -150,7 +160,8 @@ introduced. The existing single-runner-per-repository premise still applies.
    failures still retry and park exactly as before.
 3. **Recovery and concurrency:** prove other providers continue, existing
    workers are not cancelled, only one half-open probe runs, waiters drain under
-   capacity, and restart reopens a persistent outage without issue-cap burn.
+   capacity, and a restart outage launches no more than the provider's effective
+   concurrency bound while refunding every affected issue.
 4. **Isolated canary:** use only the synthetic mixed-canary repository with a
    deterministic fake provider failure. Prove circuit logs and recovery, then
    repeat the unchanged Claude-only rollback drill. Do not use an existing
@@ -178,10 +189,13 @@ Implementation is acceptable only when tests prove:
    create a probe stampede.
 7. Latched circuits require restart unless an already-running success supplies
    direct health evidence.
-8. Healthy success, normal continuation, ordinary failure retry/backoff,
+8. A persistent outage immediately after restart launches no more than the
+   provider's effective concurrency cap, refunds every affected issue, and
+   dispatches no additional provider work after the circuit opens.
+9. Healthy success, normal continuation, ordinary failure retry/backoff,
    session-cap parking, Claude-only launch, and immediate Claude-only rollback
    remain unchanged.
-9. Circuit logs expose only stable fields and no credentials, prompts, model
+10. Circuit logs expose only stable fields and no credentials, prompts, model
    output, balances, or raw diagnostics.
 
 ## Rejected options
@@ -199,7 +213,11 @@ Implementation is acceptable only when tests prove:
   healthy provider.
 - **Persist circuit state in GitHub labels or workspace files.** Provider health
   is process/operator state, not issue state; partial multi-issue writes create
-  a harder recovery protocol than one bounded restart probe.
+  a harder recovery protocol than one concurrency-bounded restart batch.
+- **Serialize every provider's first startup call.** This would force healthy
+  restarts through an artificial one-worker ramp and complicate runner progress
+  reporting. The existing concurrency cap is already an explicit upper bound;
+  the initial Codex rollout keeps that bound at one.
 - **Add workflow-tunable circuit settings immediately.** Hot-reload semantics,
   invalid values, and per-project policy would enlarge the first behavior slice.
   A fixed initial cooldown is easier to test and revisit after canary evidence.
@@ -217,7 +235,9 @@ prohibited until the isolated circuit canary and rollback drill pass.
 ## Weakest point
 
 Circuit state is process-local, so restarting after an unresolved latched
-failure launches one more provider probe. Persisting health would avoid that
-call but would add stale-state and cross-process recovery problems. The initial
-design accepts one bounded probe per restart because it refunds issue accounting,
-preserves assignment, and immediately reopens on the same typed failure.
+failure may launch one provider call per effective provider slot before the
+first failure result opens the circuit. Persisting health or serializing startup
+would reduce that batch but would add stale-state recovery or healthy-start
+latency. The initial design accepts the explicit concurrency bound because it
+refunds every affected issue, preserves assignment, blocks subsequent dispatch,
+and keeps the subscription-backed rollout cap at one.
