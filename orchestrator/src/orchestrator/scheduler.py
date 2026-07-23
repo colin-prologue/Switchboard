@@ -22,6 +22,7 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,11 @@ import httpx
 from .agent_runner import AgentRunner
 from .log import log
 from .prompt import render_prompt
+from .provider_circuit import (
+    CircuitState,
+    CircuitTransition,
+    ProviderCircuit,
+)
 from .runner_selector import (
     AgentRunnerSelector,
     ClaudeOnlyRunnerSelector,
@@ -100,8 +106,31 @@ class RunningEntry:
     session_id: str | None = None
     last_event_at: datetime | None = None  # stall-detection anchor (§8.5)
     retry_attempt: int | None = None
+    circuit_probe_token: int | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     cancelled_by_reconciliation: bool = False
+
+
+@dataclass
+class ProviderWaitEntry:
+    identifier: str
+    issue: Issue
+    provider_id: str
+    retry_attempt: int | None
+    queued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class DispatchResult(StrEnum):
+    STARTED = "started"
+    CIRCUIT_BLOCKED = "circuit_blocked"
+    DEFERRED = "deferred"
+    REFUSED = "refused"
+
+
+@dataclass(frozen=True)
+class DispatchOutcome:
+    result: DispatchResult
+    provider_id: str | None = None
 
 
 class WorkerFailure(Exception):
@@ -137,6 +166,9 @@ class Orchestrator:
         self.terminating: dict[str, asyncio.Task] = {}  # in-flight teardowns
         self.claimed: set[str] = set()
         self.retry_attempts: dict[str, RetryEntry] = {}
+        self.provider_circuits: dict[str, ProviderCircuit] = {}
+        self.provider_waiting: dict[str, ProviderWaitEntry] = {}
+        self._circuit_refusals: set[tuple[str, str, int]] = set()
 
         # owned extension state (SPEC.md §4 session cap / parking)
         self.sessions_per_issue: dict[str, int] = {}
@@ -206,6 +238,39 @@ class Orchestrator:
         cfg = self._cfg
         assert cfg is not None
         return self._runner_selector.select(cfg, issue)
+
+    def _provider_circuit(self, provider_id: str) -> ProviderCircuit:
+        circuit = self.provider_circuits.get(provider_id)
+        if circuit is None:
+            circuit = ProviderCircuit(provider_id)
+            self.provider_circuits[provider_id] = circuit
+        return circuit
+
+    def _log_circuit_transition(
+        self,
+        transition: CircuitTransition | None,
+        entry: RunningEntry | ProviderWaitEntry | None = None,
+    ) -> None:
+        if transition is None:
+            return
+        fields = transition.log_fields()
+        if entry is not None:
+            fields["issue_id"] = entry.issue.id
+            fields["issue_identifier"] = entry.identifier
+        log("provider circuit transition", **fields)
+        if transition.state is CircuitState.CLOSED:
+            self._tick_wakeup.set()
+
+    def _abandon_circuit_probe(
+        self,
+        provider_id: str,
+        probe_token: int | None,
+        entry: RunningEntry | ProviderWaitEntry | None = None,
+    ) -> None:
+        if probe_token is None:
+            return
+        transition = self._provider_circuit(provider_id).abandon_probe(probe_token)
+        self._log_circuit_transition(transition, entry)
 
     # -- workflow load / reload (core §5.1, §6.2) -------------------------------
 
@@ -345,6 +410,8 @@ class Orchestrator:
             log("candidate fetch failed; skipping dispatch this tick", error=str(exc))
             return
 
+        await self._resume_provider_waiters(issues)
+
         for issue in self._sort_for_dispatch(issues):
             if self._stopping:  # shutdown arrived while we awaited the fetch
                 return
@@ -439,7 +506,11 @@ class Orchestrator:
 
     # -- dispatch / worker (core §16.4, §16.5) ------------------------------------
 
-    async def _dispatch(self, issue: Issue, attempt: int | None) -> None:
+    async def _dispatch(
+        self,
+        issue: Issue,
+        attempt: int | None,
+    ) -> DispatchOutcome:
         cfg = self._cfg
         assert cfg is not None
         try:
@@ -450,7 +521,7 @@ class Orchestrator:
                 outcome="refused",
                 failure_class=FailureClass.ASSIGNMENT_REFUSED.value,
                 error=str(exc))
-            return
+            return DispatchOutcome(DispatchResult.REFUSED)
 
         # Config-driven dispatch guard (issue #29 / AgDR-011): refuse to claim an
         # issue whose current state requires a provenance marker it lacks (e.g. a
@@ -462,7 +533,7 @@ class Orchestrator:
         missing = self._missing_marker(issue)
         if missing is not None:
             await self._refuse_missing_marker(issue, missing)
-            return
+            return DispatchOutcome(DispatchResult.REFUSED, runner.provider_id)
         self._marker_refused.discard(issue.id)  # eligible again -> re-arm the notice
         # The cap is always positive (workflow.py coerces invalid values back
         # to the default) — parking cannot be configured off.
@@ -470,9 +541,27 @@ class Orchestrator:
         spent = self.sessions_per_issue.get(issue.id, 0)
         if spent >= cap:
             await self._park(issue, f"session cap reached ({spent}/{cap})")
-            return
+            return DispatchOutcome(DispatchResult.REFUSED, runner.provider_id)
 
         provider_id = runner.provider_id
+        dispatch_context = ProviderWaitEntry(
+            issue.identifier, issue, provider_id, attempt)
+        circuit = self._provider_circuit(provider_id)
+        permit = circuit.acquire_dispatch()
+        self._log_circuit_transition(permit.transition, dispatch_context)
+        if not permit.allowed:
+            refusal_key = (issue.id, provider_id, circuit.generation)
+            if refusal_key not in self._circuit_refusals:
+                self._circuit_refusals.add(refusal_key)
+                log("provider circuit blocked dispatch",
+                    issue_id=issue.id, issue_identifier=issue.identifier,
+                    provider_id=provider_id, outcome="refused",
+                    circuit_state=circuit.state.value,
+                    circuit_generation=circuit.generation,
+                    failure_class=(circuit.failure_class.value
+                                   if circuit.failure_class else None))
+            return DispatchOutcome(DispatchResult.CIRCUIT_BLOCKED, provider_id)
+
         reserved_for_assignment = False
         if self._runner_selector.provider_id == "mixed" \
                 and f"provider:{provider_id}" not in issue.labels:
@@ -486,19 +575,31 @@ class Orchestrator:
                 assigned = await self._persist_provider_assignment(issue, provider_id)
             except BaseException:
                 self.claimed.discard(issue.id)
+                self._abandon_circuit_probe(
+                    provider_id, permit.probe_token,
+                    dispatch_context,
+                )
                 raise
             if not assigned:
                 self.claimed.discard(issue.id)
-                return
+                self._abandon_circuit_probe(
+                    provider_id, permit.probe_token,
+                    dispatch_context,
+                )
+                return DispatchOutcome(DispatchResult.REFUSED, provider_id)
 
         if not self._provider_slots_available(provider_id):
             if reserved_for_assignment:
                 self.claimed.discard(issue.id)
+            self._abandon_circuit_probe(
+                provider_id, permit.probe_token,
+                dispatch_context,
+            )
             log("mixed provider capacity reached; leaving issue unclaimed",
                 issue_id=issue.id, issue_identifier=issue.identifier,
                 provider_id=provider_id, outcome="refused",
                 failure_class=FailureClass.PROVIDER_CAPACITY.value)
-            return
+            return DispatchOutcome(DispatchResult.DEFERRED, provider_id)
 
         # Claim before any await so a concurrent tick/retry timer cannot
         # double-dispatch while the label write below is in flight.
@@ -518,7 +619,8 @@ class Orchestrator:
         entry = RunningEntry(task=task, identifier=issue.identifier, issue=issue,
                              provider_id=provider_id,
                              stall_timeout_ms=runner.stall_timeout_ms,
-                             retry_attempt=attempt)
+                             retry_attempt=attempt,
+                             circuit_probe_token=permit.probe_token)
         self.running[issue.id] = entry
         self._cancel_retry(issue.id)
         self.sessions_per_issue[issue.id] = spent + 1
@@ -527,6 +629,7 @@ class Orchestrator:
             session_number=spent + 1, outcome="started")
         task.add_done_callback(
             lambda t, iid=issue.id: self._on_worker_done(iid, t))
+        return DispatchOutcome(DispatchResult.STARTED, provider_id)
 
     async def _persist_provider_assignment(self, issue: Issue, provider_id: str) -> bool:
         """Write a new mixed-provider assignment before claiming the issue."""
@@ -634,6 +737,8 @@ class Orchestrator:
 
         if entry.cancelled_by_reconciliation or task.cancelled():
             self.claimed.discard(issue_id)
+            self._abandon_circuit_probe(
+                entry.provider_id, entry.circuit_probe_token, entry)
             log("worker cancelled", issue_id=issue_id,
                 issue_identifier=entry.identifier, provider_id=entry.provider_id,
                 outcome="cancelled")
@@ -641,6 +746,8 @@ class Orchestrator:
 
         exc = task.exception()
         if exc is None:
+            transition = self._provider_circuit(entry.provider_id).record_success()
+            self._log_circuit_transition(transition, entry)
             self._schedule_retry(issue_id, entry.identifier, attempt=1,
                                  delay_ms=CONTINUATION_DELAY_MS)
             log("worker completed", issue_id=issue_id,
@@ -653,6 +760,26 @@ class Orchestrator:
                 if isinstance(exc, WorkerFailure)
                 else FailureClass.WORKER_FAILURE
             )
+            circuit = self._provider_circuit(entry.provider_id)
+            transition = circuit.record_failure(
+                failure_class,
+                probe_token=entry.circuit_probe_token,
+            )
+            self._log_circuit_transition(transition, entry)
+            if circuit.is_circuit_failure(failure_class):
+                self._refund_issue_session(issue_id)
+                self.provider_waiting[issue_id] = ProviderWaitEntry(
+                    identifier=entry.identifier,
+                    issue=entry.issue,
+                    provider_id=entry.provider_id,
+                    retry_attempt=entry.retry_attempt,
+                )
+                log("worker failed", issue_id=issue_id,
+                    issue_identifier=entry.identifier,
+                    provider_id=entry.provider_id, session_id=entry.session_id,
+                    outcome="failed", failure_class=failure_class.value,
+                    retry_disposition="provider_wait", error=str(exc))
+                return
             attempt = (entry.retry_attempt or 0) + 1
             self._schedule_retry(issue_id, entry.identifier, attempt=attempt,
                                  delay_ms=self._failure_backoff_ms(attempt))
@@ -661,6 +788,104 @@ class Orchestrator:
                 provider_id=entry.provider_id, session_id=entry.session_id,
                 outcome="failed", failure_class=failure_class.value,
                 error=str(exc))
+
+    def _refund_issue_session(self, issue_id: str) -> None:
+        spent = self.sessions_per_issue.get(issue_id, 0)
+        if spent <= 1:
+            self.sessions_per_issue.pop(issue_id, None)
+        else:
+            self.sessions_per_issue[issue_id] = spent - 1
+
+    async def _resume_provider_waiters(self, candidates: list[Issue]) -> None:
+        if not self.provider_waiting:
+            return
+        cfg = self._cfg
+        assert cfg is not None
+        tracker, wsm = self._components()
+        candidate_by_id = {issue.id: issue for issue in candidates}
+        missing_ids = [
+            issue_id for issue_id in self.provider_waiting
+            if issue_id not in candidate_by_id
+        ]
+        missing_state_fetch_succeeded = True
+        refreshed_by_id: dict[str, Issue] = {}
+        if missing_ids:
+            try:
+                refreshed = await tracker.fetch_issue_states_by_ids(missing_ids)
+                refreshed_by_id = {issue.id: issue for issue in refreshed}
+            except TrackerError as exc:
+                missing_state_fetch_succeeded = False
+                log("provider waiter state refresh failed; keeping waiters",
+                    issue_count=len(missing_ids), error=str(exc))
+
+        waiters = sorted(
+            self.provider_waiting.items(),
+            key=lambda item: (item[1].queued_at, item[1].identifier),
+        )
+        for issue_id, waiter in waiters:
+            if self._stopping:
+                return
+            issue = candidate_by_id.get(issue_id)
+            if issue is None:
+                if not missing_state_fetch_succeeded:
+                    continue
+                refreshed_issue = refreshed_by_id.get(issue_id)
+                self.provider_waiting.pop(issue_id, None)
+                self.claimed.discard(issue_id)
+                terminal = (
+                    refreshed_issue is not None
+                    and refreshed_issue.state.lower() in cfg.tracker().terminal_states
+                )
+                if terminal:
+                    await wsm.cleanup_terminal([waiter.identifier])
+                elif refreshed_issue is not None:
+                    await self._release_in_progress_claim(
+                        tracker, refreshed_issue, comment=True)
+                log("provider wait released",
+                    issue_id=issue_id, issue_identifier=waiter.identifier,
+                    provider_id=waiter.provider_id,
+                    reason=("terminal" if terminal else "no_longer_candidate"))
+                continue
+            waiter.issue = issue
+
+            state = issue.state.lower()
+            if state in cfg.tracker().terminal_states:
+                self.provider_waiting.pop(issue_id, None)
+                self.claimed.discard(issue_id)
+                await wsm.cleanup_terminal([waiter.identifier])
+                log("provider wait released", issue_id=issue_id,
+                    issue_identifier=waiter.identifier,
+                    provider_id=waiter.provider_id, reason="terminal")
+                continue
+
+            # Capacity is temporary: keep ownership and try another tick. Check
+            # it before acquiring a half-open permit so a busy provider cannot
+            # consume the sole recovery probe and restart its cooldown.
+            if self._available_slots() <= 0 \
+                    or not self._state_slots_available(issue.state) \
+                    or not self._provider_slots_available(waiter.provider_id):
+                continue
+
+            # Re-run every non-capacity eligibility gate against fresh tracker
+            # state. Temporarily remove the waiter's own claim because
+            # `_should_dispatch` correctly rejects any already-claimed issue.
+            self.claimed.discard(issue_id)
+            if not self._should_dispatch(issue):
+                self.provider_waiting.pop(issue_id, None)
+                await self._release_in_progress_claim(
+                    tracker, issue, comment=True)
+                log("provider wait released", issue_id=issue_id,
+                    issue_identifier=waiter.identifier,
+                    provider_id=waiter.provider_id, reason="ineligible")
+                continue
+            self.claimed.add(issue_id)
+
+            result = await self._dispatch(issue, attempt=waiter.retry_attempt)
+            if result.result is DispatchResult.STARTED:
+                self.provider_waiting.pop(issue_id, None)
+            elif result.result is DispatchResult.REFUSED:
+                self.provider_waiting.pop(issue_id, None)
+                self.claimed.discard(issue_id)
 
     def _failure_backoff_ms(self, attempt: int) -> int:
         cfg = self._cfg
@@ -722,7 +947,16 @@ class Orchestrator:
         # re-run eligibility checks (blockers/labels/state may have changed)
         self.claimed.discard(issue_id)
         if self._should_dispatch(issue):
-            await self._dispatch(issue, attempt=entry.attempt)
+            result = await self._dispatch(issue, attempt=entry.attempt)
+            if result.result is DispatchResult.CIRCUIT_BLOCKED:
+                assert result.provider_id is not None
+                self.claimed.add(issue_id)
+                self.provider_waiting[issue_id] = ProviderWaitEntry(
+                    identifier=entry.identifier,
+                    issue=issue,
+                    provider_id=result.provider_id,
+                    retry_attempt=entry.attempt,
+                )
         else:
             # The claim dies here: revert its status:in-progress board marker to
             # status:todo with a one-line comment (issue #14 / AgDR-010). The
@@ -836,6 +1070,8 @@ class Orchestrator:
             await asyncio.gather(entry.task, return_exceptions=True)
             if wsm is not None:
                 await wsm.cleanup_terminal([entry.identifier])
+            self._abandon_circuit_probe(
+                entry.provider_id, entry.circuit_probe_token, entry)
             if failure_class is None:
                 log("worker cancelled", issue_id=issue_id,
                     issue_identifier=entry.identifier,

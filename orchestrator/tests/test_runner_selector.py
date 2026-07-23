@@ -19,8 +19,14 @@ from orchestrator.runner_selector import (
     MixedAssignmentRefused,
     MixedRunnerSelector,
 )
-from orchestrator.scheduler import Orchestrator
-from orchestrator.types import Issue, RetryEntry, TrackerError, WorkflowDefinition
+from orchestrator.scheduler import DispatchResult, Orchestrator
+from orchestrator.types import (
+    FailureClass,
+    Issue,
+    RetryEntry,
+    TrackerError,
+    WorkflowDefinition,
+)
 from orchestrator.workflow import Config
 
 
@@ -399,6 +405,42 @@ async def test_mixed_assignment_write_failure_leaves_issue_unclaimed(
     assert issue.id not in orchestrator.claimed
     assert issue.id not in orchestrator.running
     assert "provider:claude" not in issue.labels
+    assert "provider:codex" not in issue.labels
+
+
+async def test_open_circuit_refuses_before_new_mixed_assignment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("prompt")
+    orchestrator = Orchestrator(
+        workflow_path,
+        runner_selector=MixedRunnerSelector(),
+    )
+    orchestrator._cfg = _mixed_config(
+        tmp_path,
+        weights={"claude": 0, "codex": 100},
+    )
+    orchestrator._provider_circuit("codex").record_failure(
+        FailureClass.PROVIDER_CREDITS_EXHAUSTED)
+    issue = _issue()
+    tracker = _LabelTracker()
+
+    async def _unexpected_worker(*args, **kwargs) -> None:
+        pytest.fail("an open provider circuit must not launch a worker")
+
+    monkeypatch.setattr(orchestrator, "_components", lambda: (tracker, None))
+    monkeypatch.setattr(orchestrator, "_worker", _unexpected_worker)
+
+    outcome = await orchestrator._dispatch(issue, attempt=None)
+
+    assert outcome.result is DispatchResult.CIRCUIT_BLOCKED
+    assert outcome.provider_id == "codex"
+    assert tracker.operations == []
+    assert issue.id not in orchestrator.claimed
+    assert issue.id not in orchestrator.running
+    assert issue.id not in orchestrator.sessions_per_issue
     assert "provider:codex" not in issue.labels
 
 
