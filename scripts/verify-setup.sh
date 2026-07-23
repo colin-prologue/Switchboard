@@ -24,7 +24,9 @@ for f in spec/SPEC.md spec/SPEC.core.md spec/PROVENANCE.md \
          hooks/after_create.sh hooks/before_run.sh hooks/after_run.sh \
          scripts/register-project.sh scripts/run-project.sh scripts/list-projects.sh \
          scripts/new-ticket.sh scripts/provision-mixed-canary-labels.sh \
-         scripts/run-mixed-canary-checkpoint.sh scripts/verify-setup.sh \
+         scripts/run-mixed-canary-checkpoint.sh \
+         scripts/codex-circuit-canary.sh \
+         scripts/run-stage7-circuit-canary.sh scripts/verify-setup.sh \
          deploy/switchboard@.service; do
   if [ -f "$f" ]; then :; else fail "missing $f"; KIT_OK=0; fi
 done
