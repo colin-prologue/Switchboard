@@ -7,23 +7,27 @@
   path. Every synthetic handoff merged and closed its issue. Stage 7 Slice 1
   merged as PR #96 and the Slice 2 circuit contract merged as PR #97. The pure
   circuit policy merged as PR #98 and scheduler no-retry-burn integration
-  merged as PR #99. Slice 2.3 recovery/concurrency evidence is complete on its
-  review branch. Claude-only production remains unchanged.
+  merged as PR #99. Slice 2.3 recovery/concurrency evidence merged as PR #100.
+  Slice 4's isolated circuit-canary procedure is complete on its review branch;
+  no live checkpoint issue has been created. Claude-only production remains
+  unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 7 Slice 2 implementation, slice 3 of 4. Accepted
+- **Current stage:** Stage 7 Slice 2 implementation, slice 4 of 4. Accepted
   [AgDR-026](../../.decisions/AgDR-026-provider-circuit-and-no-retry-burn.md)
   merged in [PR #97](https://github.com/colin-prologue/Switchboard/pull/97) at
   `5d1cf05`, the scheduler-independent circuit policy merged in
   [PR #98](https://github.com/colin-prologue/Switchboard/pull/98) at `94b966f`,
-  and scheduler integration merged in
-  [PR #99](https://github.com/colin-prologue/Switchboard/pull/99) at `e418580`.
-  The current branch adds focused recovery/concurrency coverage without changing
-  scheduler policy, project workflows, or enabling a live circuit canary.
+  scheduler integration merged in
+  [PR #99](https://github.com/colin-prologue/Switchboard/pull/99) at `e418580`,
+  and recovery/concurrency evidence merged in
+  [PR #100](https://github.com/colin-prologue/Switchboard/pull/100) at `12eee81`.
+  The current branch defines the separately reviewed, still-inert Slice 4 live
+  procedure. It does not create an issue or launch a canary.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -39,11 +43,25 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source:** Stage 7 Slice 2.3 recovery/concurrency branch
-  `codex/stage7-circuit-recovery-concurrency`, based on scheduler-integration
-  merge `e418580`. `orchestrator/.venv/bin/python -m pytest orchestrator/tests
-  -q` passes 437 tests in 24.76s on 2026-07-22. Its three focused recovery and
-  concurrency scenarios pass in 1.43s, and `git diff --check` is clean.
+- **Last verified source:** Stage 7 Slice 4 procedure branch
+  `codex/stage7-circuit-canary-procedure`, based on recovery/concurrency merge
+  `12eee81`. `orchestrator/.venv/bin/python -m pytest orchestrator/tests -q`
+  passes 444 tests in 15.63s on 2026-07-22. The 21 focused Stage 6/7 canary
+  procedure and binding tests pass in 0.80s. Both new shell scripts pass
+  `bash -n`, `git diff --check` is clean, and `scripts/verify-setup.sh` reports
+  zero failures (its sandboxed invocation cannot read the host keyring and
+  reports `gh` authentication as pending).
+- **Stage 7 Slice 4 prepared procedure:** a dedicated `100/0` mixed workflow
+  uses an explicit `agent:codex` checkpoint and a workspace-local, git-excluded
+  injector marker. The first adapter invocation emits one structured
+  `service_unavailable` error; every later invocation delegates unchanged argv
+  and stdin to the real subscription-authenticated Codex CLI. The one-at-a-time
+  native-terminal launcher requires the typed cooldown open, no-retry-burn
+  provider wait, exactly one half-open probe, circuit close, exactly two
+  session-number-one dispatches, no parking, raw outage/recovery transcripts,
+  clean workspace, and one handoff PR. Only after that PR merges and its issue
+  closes may the launcher run a new rollback checkpoint through the unchanged
+  Claude-only workflow. Dry runs are offline. No live issue exists yet.
 - **Stage 7 Slice 2.3 recovery/concurrency evidence:** mixed-provider
   integration tests prove a Codex circuit opening does not cancel another
   in-flight Codex worker or block fresh Claude work; the in-flight Codex
@@ -218,15 +236,16 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review and merge the Stage 7 Slice 2.3
-  recovery/concurrency evidence. After merge, prepare Slice 4's isolated
-  mixed-canary circuit drill with a deterministic fake provider failure and an
-  unchanged Claude-only rollback drill. Do not use an existing project, real
-  subscription exhaustion, or rerun completed checkpoints.
-- **Do not dispatch:** a mixed process against an existing project or another
-  mixed-canary issue until the recovery/concurrency implementation is reviewed
-  and the isolated circuit canary plus Claude-only rollback drill pass. Do not
-  rerun checkpoints 1 through 5.
+- **Next single task:** review and merge the Stage 7 Slice 4 procedure. After
+  merge, run only `circuit-recovery` from the normal macOS Terminal, retain its
+  named evidence, and stop at human review. Merge that synthetic fixture PR and
+  confirm issue closure before running the separately named Claude-only
+  rollback phase. Do not use an existing project, real subscription exhaustion,
+  or rerun completed checkpoints.
+- **Do not dispatch:** any new mixed-canary issue until the dedicated Slice 4
+  procedure is reviewed and merged, or any mixed process against an existing
+  project until both the isolated circuit canary and Claude-only rollback drill
+  pass. Do not rerun checkpoints 1 through 5.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
