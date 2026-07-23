@@ -30,7 +30,13 @@ import pytest
 
 import orchestrator.scheduler as scheduler_mod
 from orchestrator.provider_circuit import CircuitState
-from orchestrator.scheduler import CONTINUATION_PROMPT, Orchestrator
+from orchestrator.scheduler import (
+    CLAIM_RELEASE_COMMENT,
+    CONTINUATION_PROMPT,
+    IN_PROGRESS_LABEL,
+    TODO_LABEL,
+    Orchestrator,
+)
 from orchestrator.types import (
     BlockerRef,
     FailureClass,
@@ -1132,6 +1138,91 @@ async def test_provider_waiter_reconciliation_releases_without_resurrection(
     err = capfd.readouterr().err
     assert "provider wait released" in err
     assert f"reason={release_reason}" in err
+
+
+async def test_terminal_provider_waiter_reconciles_while_capacity_is_full(
+    tmp_path,
+    monkeypatch,
+):
+    runner = FakeRunner()
+    runner.provider_id = "codex"
+
+    async def failing_turn(*args, **kwargs):
+        return TurnResult(
+            status="failed",
+            session_id=None,
+            error="provider unavailable",
+            failure_class=FailureClass.PROVIDER_UNAVAILABLE,
+        )
+
+    runner.run_turn = failing_turn
+    orch, tracker, _, ws_root = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=CODEX_WORKFLOW_TMPL,
+        runner=runner,
+        provider_id="codex",
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+
+    workspace = ws_root / issue.identifier
+    tracker.candidates = []
+    tracker.states[issue.id] = make_issue(1, "closed")
+    monkeypatch.setattr(orch, "_available_slots", lambda: 0)
+
+    await orch._resume_provider_waiters([])
+
+    assert issue.id not in orch.provider_waiting
+    assert issue.id not in orch.claimed
+    assert not workspace.exists()
+
+
+async def test_ineligible_provider_waiter_reverts_visible_claim(
+    tmp_path,
+    monkeypatch,
+):
+    workflow = CODEX_WORKFLOW_TMPL.replace(
+        '  terminal_states: ["done", "closed", "cancelled"]',
+        '  terminal_states: ["done", "closed", "cancelled"]\n'
+        '  required_labels: ["gate:triage-passed"]',
+    )
+    runner = FakeRunner()
+    runner.provider_id = "codex"
+
+    async def failing_turn(*args, **kwargs):
+        return TurnResult(
+            status="failed",
+            session_id=None,
+            error="provider unavailable",
+            failure_class=FailureClass.PROVIDER_UNAVAILABLE,
+        )
+
+    runner.run_turn = failing_turn
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=workflow,
+        runner=runner,
+        provider_id="codex",
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+    issue.labels.remove("gate:triage-passed")
+
+    await orch._resume_provider_waiters([issue])
+
+    assert issue.id not in orch.provider_waiting
+    assert issue.id not in orch.claimed
+    assert TODO_LABEL in issue.labels
+    assert IN_PROGRESS_LABEL not in issue.labels
+    assert tracker.comments == [(issue.id, CLAIM_RELEASE_COMMENT)]
 
 
 async def test_codex_mode_enforces_capacity_and_cancels_terminal_worker(

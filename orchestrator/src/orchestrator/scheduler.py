@@ -823,7 +823,7 @@ class Orchestrator:
             key=lambda item: (item[1].queued_at, item[1].identifier),
         )
         for issue_id, waiter in waiters:
-            if self._stopping or self._available_slots() <= 0:
+            if self._stopping:
                 return
             issue = candidate_by_id.get(issue_id)
             if issue is None:
@@ -838,6 +838,9 @@ class Orchestrator:
                 )
                 if terminal:
                     await wsm.cleanup_terminal([waiter.identifier])
+                elif refreshed_issue is not None:
+                    await self._release_in_progress_claim(
+                        tracker, refreshed_issue, comment=True)
                 log("provider wait released",
                     issue_id=issue_id, issue_identifier=waiter.identifier,
                     provider_id=waiter.provider_id,
@@ -858,7 +861,8 @@ class Orchestrator:
             # Capacity is temporary: keep ownership and try another tick. Check
             # it before acquiring a half-open permit so a busy provider cannot
             # consume the sole recovery probe and restart its cooldown.
-            if not self._state_slots_available(issue.state) \
+            if self._available_slots() <= 0 \
+                    or not self._state_slots_available(issue.state) \
                     or not self._provider_slots_available(waiter.provider_id):
                 continue
 
@@ -868,6 +872,8 @@ class Orchestrator:
             self.claimed.discard(issue_id)
             if not self._should_dispatch(issue):
                 self.provider_waiting.pop(issue_id, None)
+                await self._release_in_progress_claim(
+                    tracker, issue, comment=True)
                 log("provider wait released", issue_id=issue_id,
                     issue_identifier=waiter.identifier,
                     provider_id=waiter.provider_id, reason="ineligible")
