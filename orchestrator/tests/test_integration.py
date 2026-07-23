@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 import orchestrator.scheduler as scheduler_mod
+from orchestrator.provider_circuit import CircuitState
 from orchestrator.scheduler import CONTINUATION_PROMPT, Orchestrator
 from orchestrator.types import (
     BlockerRef,
@@ -991,15 +992,18 @@ async def test_codex_mode_failure_retries_and_releases_claim(
     assert "failure_class=worker_failure" in err
 
 
-async def test_codex_failure_class_is_logged_without_changing_retry_behavior(
+async def test_codex_provider_failure_waits_without_burning_retry_or_session(
     tmp_path,
     monkeypatch,
     capfd,
 ):
     runner = FakeRunner()
     runner.provider_id = "codex"
+    calls = 0
 
     async def failing_turn(*args, **kwargs):
+        nonlocal calls
+        calls += 1
         return TurnResult(
             status="failed",
             session_id=None,
@@ -1020,14 +1024,114 @@ async def test_codex_failure_class_is_logged_without_changing_retry_behavior(
     tracker.states[issue.id] = issue
 
     await orch._tick()
-    await wait_for(lambda: issue.id in orch.retry_attempts)
+    await wait_for(lambda: issue.id in orch.provider_waiting)
 
-    assert orch.retry_attempts[issue.id].attempt == 1
-    assert orch.sessions_per_issue[issue.id] == 1
+    assert issue.id not in orch.retry_attempts
+    assert issue.id not in orch.sessions_per_issue
+    assert issue.id in orch.claimed
+    assert issue.id not in orch.parked
+    assert orch.provider_waiting[issue.id].retry_attempt is None
+    assert orch.provider_circuits["codex"].state is CircuitState.OPEN_LATCHED
+
+    # The same candidate remains claimed and provider-pinned, but another poll
+    # cannot launch it while the provider circuit is open.
+    await orch._tick()
+    await asyncio.sleep(0)
+    assert calls == 1
+
     err = capfd.readouterr().err
     assert "provider_id=codex" in err
     assert "outcome=failed" in err
     assert "failure_class=provider_plan_limit" in err
+    assert "retry_disposition=provider_wait" in err
+    assert "circuit_state=open_latched" in err
+    assert err.count("provider circuit blocked dispatch") == 1
+
+
+async def test_retry_maturing_during_open_circuit_preserves_attempt_in_wait(
+    tmp_path,
+    monkeypatch,
+):
+    runner = FakeRunner()
+    runner.provider_id = "codex"
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=CODEX_WORKFLOW_TMPL,
+        runner=runner,
+        provider_id="codex",
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    orch._provider_circuit("codex").record_failure(
+        FailureClass.PROVIDER_AUTHENTICATION)
+    orch._schedule_retry(issue.id, issue.identifier, attempt=4, delay_ms=60_000)
+    orch.retry_attempts[issue.id].timer_handle.cancel()
+
+    await orch._on_retry_timer(issue.id)
+
+    assert issue.id not in orch.retry_attempts
+    assert issue.id in orch.claimed
+    assert issue.id in orch.provider_waiting
+    assert orch.provider_waiting[issue.id].retry_attempt == 4
+    assert issue.id not in orch.sessions_per_issue
+    assert runner.turns == []
+
+
+@pytest.mark.parametrize(
+    ("next_state", "workspace_preserved", "release_reason"),
+    [
+        ("closed", False, "terminal"),
+        ("human review", True, "no_longer_candidate"),
+    ],
+)
+async def test_provider_waiter_reconciliation_releases_without_resurrection(
+    tmp_path,
+    monkeypatch,
+    capfd,
+    next_state,
+    workspace_preserved,
+    release_reason,
+):
+    runner = FakeRunner()
+    runner.provider_id = "codex"
+
+    async def failing_turn(*args, **kwargs):
+        return TurnResult(
+            status="failed",
+            session_id=None,
+            error="provider unavailable",
+            failure_class=FailureClass.PROVIDER_UNAVAILABLE,
+        )
+
+    runner.run_turn = failing_turn
+    orch, tracker, _, ws_root = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=CODEX_WORKFLOW_TMPL,
+        runner=runner,
+        provider_id="codex",
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+    workspace = ws_root / issue.identifier
+    assert workspace.is_dir()
+
+    tracker.candidates = []
+    tracker.states[issue.id] = make_issue(1, next_state)
+    await orch._tick()
+
+    assert issue.id not in orch.provider_waiting
+    assert issue.id not in orch.claimed
+    assert workspace.exists() is workspace_preserved
+    err = capfd.readouterr().err
+    assert "provider wait released" in err
+    assert f"reason={release_reason}" in err
 
 
 async def test_codex_mode_enforces_capacity_and_cancels_terminal_worker(
