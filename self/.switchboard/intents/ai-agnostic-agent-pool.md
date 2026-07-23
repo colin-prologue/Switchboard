@@ -4,21 +4,21 @@
 - **Status:** active; Stage 6 isolated mixed-pool validation is complete. Five
   named live checkpoints prove explicit Claude and Codex, deterministic
   automatic routing to each provider, and rollback to the default Claude-only
-  path. Every synthetic handoff merged and closed its issue. Stage 7 Slice 1's
-  observability implementation is under review; Claude-only production remains
-  unchanged.
+  path. Every synthetic handoff merged and closed its issue. Stage 7 Slice 1
+  merged as PR #96; Slice 2's provider-circuit contract is now proposed.
+  Claude-only production remains unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 7 Slice 1 implementation. The accepted
-  [AgDR-025](../../.decisions/AgDR-025-provider-observability-taxonomy.md)
-  contract merged in [PR #95](https://github.com/colin-prologue/Switchboard/pull/95)
-  at `a0b125a`. The implementation adds typed outcome/failure fields,
-  conservative provider-owned classification, and stable provider lifecycle
-  logs without changing retry, parking, fallback, routing, or project bindings.
+- **Current stage:** Stage 7 Slice 1 is complete. Its reviewed implementation
+  merged in [PR #96](https://github.com/colin-prologue/Switchboard/pull/96) at
+  `48f3932`. Slice 2 is a decision checkpoint only:
+  [AgDR-026](../../.decisions/AgDR-026-provider-circuit-and-no-retry-burn.md)
+  proposes provider-scoped circuits and no-retry-burn semantics. Do not
+  implement circuit behavior until that contract is reviewed and accepted.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -34,8 +34,8 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source:** Stage 7 Slice 1 reviewed implementation commit
-  `c8ac8a6`, based on accepted contract commit `a0b125a`. The branch passes
+- **Last verified source:** Stage 7 Slice 1 merge commit `48f3932` contains the
+  reviewed implementation commit `c8ac8a6`. The implementation branch passed
   `UV_CACHE_DIR=/private/tmp/switchboard-uv-cache
   uv run python -m pytest -q` from `orchestrator/`: 401 tests in 12.33s on
   2026-07-22. Its focused classifier/Claude/Codex/contract/selector/scheduler
@@ -185,15 +185,16 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review and merge the Stage 7 Slice 1 implementation PR.
-  Confirm the closed taxonomy, conservative false-positive boundary, stable
-  lifecycle fields, and unchanged retry/session behavior. Slice 2 circuit
-  behavior remains a separate decision and is required before an
-  existing-project pilot.
+- **Next single task:** review AgDR-026's circuit trigger allowlist, latched vs
+  cooldown recovery, half-open probe rule, provider-wait ownership, session and
+  retry refund, concurrency-bounded restart behavior, and isolated test slices.
+  The subscription-backed Codex cap stays at one through the first pilot. Do not
+  implement until the decision is accepted; an existing-project pilot remains
+  prohibited.
 - **Do not dispatch:** a mixed process against an existing project or another
-  mixed-canary issue until Stage 7's observability gate says how operators detect
-  provider-specific quota/failure and when to invoke Claude-only rollback. Do
-  not rerun checkpoints 1 through 5.
+  mixed-canary issue until AgDR-026 is accepted, its circuit behavior is
+  implemented, and the isolated circuit canary plus Claude-only rollback drill
+  pass. Do not rerun checkpoints 1 through 5.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -703,14 +704,15 @@ Claude-only mode. Begin with Codex opt-in or low weight.
 
 **Purpose:** make mixed execution observable and production-ready.
 
-**Status:** Slice 1 implemented and awaiting review. Accepted
+**Status:** Slice 1 merged in PR #96. Accepted
 [AgDR-025](../../.decisions/AgDR-025-provider-observability-taxonomy.md) splits
 the work into an observability-only taxonomy followed by separately reviewed
 circuit behavior. Slice 1 adds provider-tagged lifecycle outcomes and explicit
 subscription failure classes without changing selection, retry, parking,
-fallback, or any project binding. Its full 400-test suite and focused 139-test
-suite pass. Slice 2 must use that contract to prevent provider availability
-failures from burning issue retries before a pilot.
+fallback, or any project binding. Its final full suite passed 401 tests. Proposed
+[AgDR-026](../../.decisions/AgDR-026-provider-circuit-and-no-retry-burn.md)
+defines Slice 2's provider-scoped pause, no-retry-burn accounting, half-open
+recovery, and isolated implementation gates. It must be accepted before code.
 
 **Test:** provider metrics, usage-limit classification, circuit breaking,
 credential expiry, restart recovery, transcript handling, and rollback drills.
