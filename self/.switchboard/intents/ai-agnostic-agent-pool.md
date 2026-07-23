@@ -37,12 +37,12 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source:** Stage 7 Slice 2 scheduler-integration commit
-  `41e26c6`, based on pure-policy merge `94b966f`. The branch passes
-  `orchestrator/.venv/bin/python -m pytest orchestrator/tests -q`: 432 tests in
-  17.68s on 2026-07-22. Its focused circuit, scheduler-integration, and selector
-  suite passes 91 tests in 3.89s. `git diff --check` was clean before the
-  checkpoint commit.
+- **Last verified source:** Stage 7 Slice 2 scheduler-integration review-fix
+  commit `f9bedde`, based on pure-policy merge `94b966f`. The branch passes
+  `orchestrator/.venv/bin/python -m pytest orchestrator/tests -q`: 434 tests in
+  13.47s on 2026-07-22. Its full integration file passes 43 tests in 3.68s;
+  the focused waiter regression set passes 6 tests in 0.69s. `git diff
+  --check` was clean before the review-fix commit.
 - **Stage 7 Slice 2.1 policy evidence:** a scheduler-independent `ProviderCircuit`
   covers the exact five trigger classes, latched and fixed-cooldown opens,
   tokenized single half-open probes, stale-token rejection, cooldown restart
@@ -59,7 +59,10 @@
   terminal waiter's workspace, and cannot resurrect either. Mixed-mode tests
   prove a newly selected open provider remains unclaimed and receives no
   durable assignment. Ordinary worker failures still use the original retry,
-  session-cap, and parking behavior.
+  session-cap, and parking behavior. PR review additionally proves terminal and
+  ineligible waiters release even while global worker capacity is full, and
+  every nonterminal release passes through the existing guarded
+  `status:in-progress` claim revert.
 - **Stage 7 Slice 1 evidence:** every failed adapter result carries a closed
   `FailureClass`; success carries none. Claude and Codex classify explicit
   authentication, plan, credit, rate-limit, and availability signals while
@@ -205,8 +208,8 @@
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
 - **Next single task:** review the scheduler no-retry-burn integration in commit
-  `41e26c6`, especially claim ownership, session refund, preserved retry attempt,
-  refusal-before-assignment, and terminal/gated waiter release. After merge,
+  `f9bedde`, especially claim ownership, session refund, preserved retry attempt,
+  refusal-before-assignment, and capacity-independent waiter release. After merge,
   implement the separately tested recovery/concurrency slice: one half-open
   probe, oldest-first draining under capacity, unaffected peer-provider work,
   already-running success recovery, and bounded restart-outage fanout. No live
