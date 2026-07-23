@@ -35,8 +35,8 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source:** Stage 7 Slice 2 contract merge commit `5d1cf05`.
-  The pure-policy branch passes
+- **Last verified source:** Stage 7 Slice 2 pure-policy commit `73fa743`, based
+  on accepted contract merge `5d1cf05`. The branch passes
   `UV_CACHE_DIR=/private/tmp/switchboard-uv-cache
   uv run python -m pytest -q` from `orchestrator/`: 428 tests in 12.30s on
   2026-07-22. Its focused circuit-policy/classifier suite passes 55 tests in
