@@ -6,20 +6,22 @@
   automatic routing to each provider, and rollback to the default Claude-only
   path. Every synthetic handoff merged and closed its issue. Stage 7 Slice 1
   merged as PR #96 and the Slice 2 circuit contract merged as PR #97. The pure
-  circuit-policy implementation is under review; Claude-only production remains
-  unchanged.
+  circuit policy merged as PR #98; the scheduler no-retry-burn integration is
+  complete on its review branch. Claude-only production remains unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 7 Slice 2 implementation, slice 1 of 4. Accepted
+- **Current stage:** Stage 7 Slice 2 implementation, slice 2 of 4. Accepted
   [AgDR-026](../../.decisions/AgDR-026-provider-circuit-and-no-retry-burn.md)
   merged in [PR #97](https://github.com/colin-prologue/Switchboard/pull/97) at
-  `5d1cf05`. The current branch adds only the pure provider circuit policy and
-  tests. It does not connect the policy to dispatch, retries, sessions, claims,
-  parking, tracker state, or project workflows.
+  `5d1cf05`, and the scheduler-independent circuit policy merged in
+  [PR #98](https://github.com/colin-prologue/Switchboard/pull/98) at `94b966f`.
+  The current branch integrates that policy with dispatch, issue retry/session
+  accounting, provider waiting, and fresh tracker-state reconciliation. It does
+  not change project workflows or enable a live circuit canary.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -35,18 +37,29 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source:** Stage 7 Slice 2 pure-policy commit `73fa743`, based
-  on accepted contract merge `5d1cf05`. The branch passes
-  `UV_CACHE_DIR=/private/tmp/switchboard-uv-cache
-  uv run python -m pytest -q` from `orchestrator/`: 428 tests in 12.30s on
-  2026-07-22. Its focused circuit-policy/classifier suite passes 55 tests in
-  0.08s. `git diff --check` is clean.
-- **Stage 7 Slice 2 policy evidence:** a scheduler-independent `ProviderCircuit`
+- **Last verified source:** Stage 7 Slice 2 scheduler-integration commit
+  `41e26c6`, based on pure-policy merge `94b966f`. The branch passes
+  `orchestrator/.venv/bin/python -m pytest orchestrator/tests -q`: 432 tests in
+  17.68s on 2026-07-22. Its focused circuit, scheduler-integration, and selector
+  suite passes 91 tests in 3.89s. `git diff --check` was clean before the
+  checkpoint commit.
+- **Stage 7 Slice 2.1 policy evidence:** a scheduler-independent `ProviderCircuit`
   covers the exact five trigger classes, latched and fixed-cooldown opens,
   tokenized single half-open probes, stale-token rejection, cooldown restart
   after an abandoned probe, success recovery, transient-to-latched escalation,
-  injected monotonic time, and sanitized transition fields. It is not imported
-  by the scheduler, so runtime behavior remains identical to merged Slice 1.
+  injected monotonic time, and sanitized transition fields.
+- **Stage 7 Slice 2.2 scheduler evidence:** the scheduler now asks the selected
+  provider circuit before assignment, claim-status, workspace, session, or
+  worker side effects. A typed provider-availability failure refunds the
+  reserved issue session, preserves the existing retry attempt and local claim,
+  and enters an oldest-first provider wait instead of issue backoff or parking.
+  Repeated open-circuit polls are generation-deduplicated. A retry that matures
+  after another issue opens the circuit preserves its attempt in the same wait
+  path. Fresh candidate/state reads release gated or missing waiters, clean a
+  terminal waiter's workspace, and cannot resurrect either. Mixed-mode tests
+  prove a newly selected open provider remains unclaimed and receives no
+  durable assignment. Ordinary worker failures still use the original retry,
+  session-cap, and parking behavior.
 - **Stage 7 Slice 1 evidence:** every failed adapter result carries a closed
   `FailureClass`; success carries none. Claude and Codex classify explicit
   authentication, plan, credit, rate-limit, and availability signals while
@@ -191,15 +204,17 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review the pure circuit policy's transition semantics,
-  trigger allowlist, tokenized half-open gate, deterministic clock, and sanitized
-  records. Do not expect retry/session behavior to change in this PR. Scheduler
-  no-retry-burn integration is the next separately reviewed code slice; an
-  existing-project pilot remains prohibited.
+- **Next single task:** review the scheduler no-retry-burn integration in commit
+  `41e26c6`, especially claim ownership, session refund, preserved retry attempt,
+  refusal-before-assignment, and terminal/gated waiter release. After merge,
+  implement the separately tested recovery/concurrency slice: one half-open
+  probe, oldest-first draining under capacity, unaffected peer-provider work,
+  already-running success recovery, and bounded restart-outage fanout. No live
+  canary or existing-project pilot belongs in that code slice.
 - **Do not dispatch:** a mixed process against an existing project or another
-  mixed-canary issue until AgDR-026 is accepted, its circuit behavior is
-  implemented, and the isolated circuit canary plus Claude-only rollback drill
-  pass. Do not rerun checkpoints 1 through 5.
+  mixed-canary issue until the recovery/concurrency implementation is reviewed
+  and the isolated circuit canary plus Claude-only rollback drill pass. Do not
+  rerun checkpoints 1 through 5.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -717,8 +732,10 @@ subscription failure classes without changing selection, retry, parking,
 fallback, or any project binding. Its final full suite passed 401 tests. Accepted
 [AgDR-026](../../.decisions/AgDR-026-provider-circuit-and-no-retry-burn.md)
 defines Slice 2's provider-scoped pause, no-retry-burn accounting, half-open
-recovery, and isolated implementation gates. Slice 2.1's pure policy is
-implemented without scheduler wiring and passes the full 428-test suite.
+recovery, and isolated implementation gates. Slice 2.1's pure policy merged in
+PR #98 after passing the full 428-test suite. Slice 2.2's scheduler integration
+is complete on its review branch and passes the full 432-test suite; project
+bindings and live launch behavior remain unchanged.
 
 **Test:** provider metrics, usage-limit classification, circuit breaking,
 credential expiry, restart recovery, transcript handling, and rollback drills.
