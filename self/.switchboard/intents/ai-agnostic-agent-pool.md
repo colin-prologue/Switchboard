@@ -6,22 +6,24 @@
   automatic routing to each provider, and rollback to the default Claude-only
   path. Every synthetic handoff merged and closed its issue. Stage 7 Slice 1
   merged as PR #96 and the Slice 2 circuit contract merged as PR #97. The pure
-  circuit policy merged as PR #98; the scheduler no-retry-burn integration is
-  complete on its review branch. Claude-only production remains unchanged.
+  circuit policy merged as PR #98 and scheduler no-retry-burn integration
+  merged as PR #99. Slice 2.3 recovery/concurrency evidence is complete on its
+  review branch. Claude-only production remains unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 7 Slice 2 implementation, slice 2 of 4. Accepted
+- **Current stage:** Stage 7 Slice 2 implementation, slice 3 of 4. Accepted
   [AgDR-026](../../.decisions/AgDR-026-provider-circuit-and-no-retry-burn.md)
   merged in [PR #97](https://github.com/colin-prologue/Switchboard/pull/97) at
-  `5d1cf05`, and the scheduler-independent circuit policy merged in
-  [PR #98](https://github.com/colin-prologue/Switchboard/pull/98) at `94b966f`.
-  The current branch integrates that policy with dispatch, issue retry/session
-  accounting, provider waiting, and fresh tracker-state reconciliation. It does
-  not change project workflows or enable a live circuit canary.
+  `5d1cf05`, the scheduler-independent circuit policy merged in
+  [PR #98](https://github.com/colin-prologue/Switchboard/pull/98) at `94b966f`,
+  and scheduler integration merged in
+  [PR #99](https://github.com/colin-prologue/Switchboard/pull/99) at `e418580`.
+  The current branch adds focused recovery/concurrency coverage without changing
+  scheduler policy, project workflows, or enabling a live circuit canary.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -37,12 +39,21 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source:** Stage 7 Slice 2 scheduler-integration review-fix
-  commit `f9bedde`, based on pure-policy merge `94b966f`. The branch passes
-  `orchestrator/.venv/bin/python -m pytest orchestrator/tests -q`: 434 tests in
-  13.47s on 2026-07-22. Its full integration file passes 43 tests in 3.68s;
-  the focused waiter regression set passes 6 tests in 0.69s. `git diff
-  --check` was clean before the review-fix commit.
+- **Last verified source:** Stage 7 Slice 2.3 recovery/concurrency branch
+  `codex/stage7-circuit-recovery-concurrency`, based on scheduler-integration
+  merge `e418580`. `orchestrator/.venv/bin/python -m pytest orchestrator/tests
+  -q` passes 437 tests in 24.76s on 2026-07-22. Its three focused recovery and
+  concurrency scenarios pass in 1.43s, and `git diff --check` is clean.
+- **Stage 7 Slice 2.3 recovery/concurrency evidence:** mixed-provider
+  integration tests prove a Codex circuit opening does not cancel another
+  in-flight Codex worker or block fresh Claude work; the in-flight Codex
+  success closes the latched circuit. A transient cooldown admits exactly one
+  half-open probe, preserves waiter retry attempts, and drains remaining
+  waiters oldest-first under global and provider capacity. A simulated fresh
+  process with five outage-bound Codex candidates launches only the configured
+  two-worker provider capacity, refunds both affected sessions, preserves both
+  waiters, and starts no further Codex work after the first result opens the
+  circuit.
 - **Stage 7 Slice 2.1 policy evidence:** a scheduler-independent `ProviderCircuit`
   covers the exact five trigger classes, latched and fixed-cooldown opens,
   tokenized single half-open probes, stale-token rejection, cooldown restart
@@ -207,13 +218,11 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review the scheduler no-retry-burn integration in commit
-  `f9bedde`, especially claim ownership, session refund, preserved retry attempt,
-  refusal-before-assignment, and capacity-independent waiter release. After merge,
-  implement the separately tested recovery/concurrency slice: one half-open
-  probe, oldest-first draining under capacity, unaffected peer-provider work,
-  already-running success recovery, and bounded restart-outage fanout. No live
-  canary or existing-project pilot belongs in that code slice.
+- **Next single task:** review and merge the Stage 7 Slice 2.3
+  recovery/concurrency evidence. After merge, prepare Slice 4's isolated
+  mixed-canary circuit drill with a deterministic fake provider failure and an
+  unchanged Claude-only rollback drill. Do not use an existing project, real
+  subscription exhaustion, or rerun completed checkpoints.
 - **Do not dispatch:** a mixed process against an existing project or another
   mixed-canary issue until the recovery/concurrency implementation is reviewed
   and the isolated circuit canary plus Claude-only rollback drill pass. Do not
