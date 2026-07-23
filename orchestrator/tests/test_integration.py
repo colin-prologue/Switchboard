@@ -29,13 +29,14 @@ from pathlib import Path
 import pytest
 
 import orchestrator.scheduler as scheduler_mod
-from orchestrator.provider_circuit import CircuitState
+from orchestrator.provider_circuit import CircuitState, ProviderCircuit
 from orchestrator.scheduler import (
     CLAIM_RELEASE_COMMENT,
     CONTINUATION_PROMPT,
     IN_PROGRESS_LABEL,
     TODO_LABEL,
     Orchestrator,
+    ProviderWaitEntry,
 )
 from orchestrator.types import (
     BlockerRef,
@@ -216,6 +217,26 @@ class FixedRunnerSelector:
         return self.runner
 
 
+class MixedFixedRunnerSelector:
+    provider_id = "mixed"
+
+    def __init__(self, runners):
+        self.runners = runners
+
+    def select(self, cfg, issue):
+        provider_id = next(
+            label.removeprefix("provider:")
+            for label in issue.labels
+            if label.startswith("provider:")
+        )
+        runner = self.runners[provider_id]
+        provider_cfg = getattr(cfg.mixed(), provider_id)
+        runner.turn_timeout_ms = provider_cfg.turn_timeout_ms
+        runner.stall_timeout_ms = provider_cfg.stall_timeout_ms
+        runner.max_budget_usd = getattr(provider_cfg, "max_budget_usd", None)
+        return runner
+
+
 WORKFLOW_TMPL = """---
 tracker:
   kind: github
@@ -260,12 +281,47 @@ CODEX_WORKFLOW_TMPL = WORKFLOW_TMPL.replace(
 )
 
 
+MIXED_WORKFLOW_TMPL = WORKFLOW_TMPL.replace(
+    "max_concurrent_agents: 2",
+    """max_concurrent_agents: 4
+  max_concurrent_agents_by_provider:
+    claude: 2
+    codex: 2""",
+).replace(
+    """claude:
+  command: "unused-by-fake-runner"
+  max_turns: 1
+  turn_timeout_ms: 5000
+  read_timeout_ms: 3000
+  stall_timeout_ms: 0""",
+    """providers:
+  claude:
+    kind: claude-cli
+    command: "unused-by-fake-runner"
+    max_turns: 1
+    turn_timeout_ms: 5000
+    read_timeout_ms: 3000
+    stall_timeout_ms: 0
+  codex:
+    kind: codex-cli
+    command: "unused-by-fake-runner"
+    turn_timeout_ms: 5000
+    read_timeout_ms: 3000
+    stall_timeout_ms: 0
+routing:
+  weights:
+    claude: 100
+    codex: 0""",
+)
+
+
 def _build_harness(
     tmp_path,
     monkeypatch,
     workflow_tmpl=WORKFLOW_TMPL,
     runner=None,
     provider_id="claude",
+    runner_selector=None,
 ):
     monkeypatch.setattr(scheduler_mod, "CONTINUATION_DELAY_MS", 30)
     monkeypatch.setattr(scheduler_mod, "FAILURE_BASE_BACKOFF_MS", 30)
@@ -276,7 +332,11 @@ def _build_harness(
     runner = runner if runner is not None else FakeRunner()
     orch = Orchestrator(
         wf,
-        runner_selector=FixedRunnerSelector(runner, provider_id=provider_id),
+        runner_selector=(
+            runner_selector
+            if runner_selector is not None
+            else FixedRunnerSelector(runner, provider_id=provider_id)
+        ),
     )
     orch._load_workflow(initial=True)
     tracker = FakeTracker()
@@ -1052,6 +1112,181 @@ async def test_codex_provider_failure_waits_without_burning_retry_or_session(
     assert "retry_disposition=provider_wait" in err
     assert "circuit_state=open_latched" in err
     assert err.count("provider circuit blocked dispatch") == 1
+
+
+def assigned_issue(n: int, provider_id: str, state: str = "todo") -> Issue:
+    issue = make_issue(n, state)
+    issue.labels.append(f"provider:{provider_id}")
+    return issue
+
+
+async def test_open_codex_circuit_does_not_cancel_running_work_or_block_claude(
+    tmp_path,
+    monkeypatch,
+):
+    codex = FakeRunner()
+    codex.provider_id = "codex"
+    claude = FakeRunner()
+    claude.provider_id = "claude"
+    failure_release = asyncio.Event()
+    success_release = asyncio.Event()
+
+    async def codex_turn(*args, issue_id, **kwargs):
+        if issue_id == "node-1":
+            await failure_release.wait()
+            return TurnResult(
+                status="failed",
+                session_id=None,
+                error="plan unavailable",
+                failure_class=FailureClass.PROVIDER_PLAN_LIMIT,
+            )
+        await success_release.wait()
+        return TurnResult(status="succeeded", session_id="healthy-codex")
+
+    codex.run_turn = codex_turn
+    selector = MixedFixedRunnerSelector({"claude": claude, "codex": codex})
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=MIXED_WORKFLOW_TMPL,
+        runner=codex,
+        runner_selector=selector,
+    )
+    failing = assigned_issue(1, "codex")
+    already_running = assigned_issue(2, "codex")
+    tracker.candidates = [failing, already_running]
+    tracker.states = {issue.id: issue for issue in tracker.candidates}
+
+    await orch._tick()
+    await wait_for(lambda: set(orch.running) == {failing.id, already_running.id})
+    failure_release.set()
+    await wait_for(lambda: failing.id in orch.provider_waiting)
+    assert already_running.id in orch.running
+    assert not orch.running[already_running.id].task.cancelled()
+    assert orch.provider_circuits["codex"].state is CircuitState.OPEN_LATCHED
+
+    peer = assigned_issue(3, "claude")
+    tracker.candidates.append(peer)
+    tracker.states[peer.id] = peer
+    await orch._tick()
+    await wait_for(lambda: any(turn[0] == peer.id for turn in claude.turns))
+
+    success_release.set()
+    await wait_for(
+        lambda: orch.provider_circuits["codex"].state is CircuitState.CLOSED
+    )
+
+
+async def test_half_open_runs_one_probe_then_drains_waiters_oldest_first(
+    tmp_path,
+    monkeypatch,
+):
+    codex = FakeRunner(hold=True)
+    codex.provider_id = "codex"
+    claude = FakeRunner()
+    claude.provider_id = "claude"
+    selector = MixedFixedRunnerSelector({"claude": claude, "codex": codex})
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=MIXED_WORKFLOW_TMPL,
+        runner=codex,
+        runner_selector=selector,
+    )
+    now = [0.0]
+    circuit = ProviderCircuit("codex", cooldown_ms=1000, clock=lambda: now[0])
+    circuit.record_failure(FailureClass.PROVIDER_UNAVAILABLE)
+    orch.provider_circuits["codex"] = circuit
+    issues = [assigned_issue(n, "codex", "in progress") for n in (1, 2, 3)]
+    tracker.candidates = list(reversed(issues))
+    tracker.states = {issue.id: issue for issue in issues}
+    queued = datetime(2026, 7, 1, tzinfo=UTC)
+    for offset, issue in enumerate(issues):
+        orch.claimed.add(issue.id)
+        orch.provider_waiting[issue.id] = ProviderWaitEntry(
+            issue.identifier,
+            issue,
+            "codex",
+            retry_attempt=7,
+            queued_at=queued + timedelta(seconds=offset),
+        )
+
+    now[0] = 1.0
+    await orch._resume_provider_waiters(tracker.candidates)
+    await wait_for(lambda: len(codex.turns) == 1)
+    assert [turn[0] for turn in codex.turns] == [issues[0].id]
+    assert circuit.state is CircuitState.HALF_OPEN
+    assert set(orch.provider_waiting) == {issues[1].id, issues[2].id}
+
+    await orch._resume_provider_waiters(tracker.candidates)
+    assert [turn[0] for turn in codex.turns] == [issues[0].id]
+
+    codex.release.set()
+    await wait_for(lambda: circuit.state is CircuitState.CLOSED)
+    codex.release.clear()
+    await orch._resume_provider_waiters(tracker.candidates)
+    await wait_for(lambda: len(codex.turns) >= 3)
+    assert [turn[0] for turn in codex.turns[:3]] == [
+        issues[0].id,
+        issues[1].id,
+        issues[2].id,
+    ]
+    assert set(orch.running) == {issues[1].id, issues[2].id}
+    assert all(orch.running[issue.id].retry_attempt == 7 for issue in issues[1:])
+    codex.release.set()
+
+
+async def test_restart_outage_is_bounded_by_provider_capacity_and_refunds_batch(
+    tmp_path,
+    monkeypatch,
+):
+    codex = FakeRunner(hold=True)
+    codex.provider_id = "codex"
+    claude = FakeRunner()
+    claude.provider_id = "claude"
+    codex_calls = 0
+
+    async def unavailable_turn(*args, **kwargs):
+        nonlocal codex_calls
+        codex_calls += 1
+        await codex.release.wait()
+        return TurnResult(
+            status="failed",
+            session_id=None,
+            error="provider unavailable",
+            failure_class=FailureClass.PROVIDER_UNAVAILABLE,
+        )
+
+    codex.run_turn = unavailable_turn
+    selector = MixedFixedRunnerSelector({"claude": claude, "codex": codex})
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=MIXED_WORKFLOW_TMPL,
+        runner=codex,
+        runner_selector=selector,
+    )
+    issues = [assigned_issue(n, "codex") for n in range(1, 6)]
+    tracker.candidates = issues
+    tracker.states = {issue.id: issue for issue in issues}
+
+    await orch._tick()
+    assert len(orch.running) == 2
+    assert set(orch.sessions_per_issue) == {issues[0].id, issues[1].id}
+    codex.release.set()
+    await wait_for(lambda: len(orch.provider_waiting) == 2)
+
+    assert orch.provider_circuits["codex"].state is CircuitState.OPEN_COOLDOWN
+    assert orch.sessions_per_issue == {}
+    assert all(
+        waiter.retry_attempt is None
+        for waiter in orch.provider_waiting.values()
+    )
+    await orch._tick()
+    await asyncio.sleep(0)
+    assert len(orch.provider_waiting) == 2
+    assert codex_calls == 2
+    assert all(issue.id not in orch.sessions_per_issue for issue in issues)
 
 
 async def test_retry_maturing_during_open_circuit_preserves_attempt_in_wait(
