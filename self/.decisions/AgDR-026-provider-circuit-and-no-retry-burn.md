@@ -1,6 +1,6 @@
 # AgDR-026: Provider circuits pause issue retry accounting
 
-**Status:** proposed (2026-07-22)
+**Status:** accepted (2026-07-22, PR #97)
 **Surfaces:** scheduler provider health, issue retry/session accounting,
 dispatch eligibility, lifecycle logs, shutdown/restart recovery, and Stage 7
 rollout gates
