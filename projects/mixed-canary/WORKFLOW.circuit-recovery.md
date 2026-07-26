@@ -49,7 +49,7 @@ providers:
     stall_timeout_ms: 300000
   codex:
     kind: codex-cli
-    command: "/Users/colindwan/Developer/Switchboard/scripts/codex-circuit-canary.sh"
+    command: "/Users/colindwan/Developer/Switchboard/scripts/codex-circuit-canary.sh --ask-for-approval never --sandbox workspace-write --config sandbox_workspace_write.network_access=true"
     turn_timeout_ms: 3600000
     read_timeout_ms: 30000
     stall_timeout_ms: 300000
