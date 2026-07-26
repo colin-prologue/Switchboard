@@ -190,6 +190,14 @@ cleanup() {
   fi
   wait "$ORCHESTRATOR_PID" 2>/dev/null || true
 }
+
+circuit_recovery_complete() {
+  grep -q "provider circuit transition .*provider_id=codex .*circuit_state=closed" \
+    "$LOG" \
+    && grep -q "worker completed .*issue_identifier=$ISSUE_NUMBER .*provider_id=codex" \
+      "$LOG"
+}
+
 trap cleanup EXIT
 
 deadline=$((SECONDS + 2700))
@@ -204,7 +212,12 @@ while [ "$SECONDS" -lt "$deadline" ]; do
       LAST_LABELS="$FINAL_LABELS"
     fi
     case ",$FINAL_LABELS," in
-      *,status:human-review,*) STOP_STATUS="human-review"; break ;;
+      *,status:human-review,*)
+        if [ "$PHASE" != "circuit-recovery" ] || circuit_recovery_complete; then
+          STOP_STATUS="human-review"
+          break
+        fi
+        ;;
       *,status:parked,*) STOP_STATUS="parked"; break ;;
       *,status:blocked,*) STOP_STATUS="blocked"; break ;;
       *,status:drafting,*) STOP_STATUS="drafting"; break ;;

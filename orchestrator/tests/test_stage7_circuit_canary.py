@@ -185,6 +185,15 @@ def test_stage7_procedure_pins_evidence_and_unchanged_rollback(
     assert "unset SWITCHBOARD_CANARY_CODEX_BIN" in source
     assert "SECONDS + 2700" in source
     assert "OPEN_ISSUES" in source and "OPEN_PRS" in source
+    assert "circuit_recovery_complete()" in source
+    assert (
+        'if [ "$PHASE" != "circuit-recovery" ] || circuit_recovery_complete'
+        in source
+    )
+    assert (
+        "worker completed .*issue_identifier=$ISSUE_NUMBER .*provider_id=codex"
+        in source
+    )
 
     rollback_definition = load_workflow(ROLLBACK_WORKFLOW)
     rollback = Config(rollback_definition, PROJECT)
