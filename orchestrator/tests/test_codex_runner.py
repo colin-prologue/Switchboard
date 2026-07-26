@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.codex_runner import CodexRunner
-from orchestrator.types import AgentEvent, CodexConfig
+from orchestrator.types import AgentEvent, CodexConfig, FailureClass
 
 
 FIXTURE = Path(__file__).with_name("fake_codex.py")
@@ -83,6 +83,7 @@ async def test_success_normalizes_codex_jsonl(workspace: Path, monkeypatch) -> N
     assert result.session_id == "codex-thread-123"
     assert result.cost_usd == 0.0
     assert result.num_turns == 1
+    assert result.failure_class is None
     assert result.usage == {
         "input_tokens": 10,
         "cached_input_tokens": 3,
@@ -166,12 +167,12 @@ async def test_fresh_and_resume_argv_and_stdin(
 
 
 @pytest.mark.parametrize(
-    ("scenario", "expected_error"),
+    ("scenario", "expected_error", "expected_class"),
     [
-        ("failed", "codex_turn_failed"),
-        ("error", "codex_error"),
-        ("no_terminal", "port_exit"),
-        ("missing_session", "missing_session_id"),
+        ("failed", "codex_turn_failed", FailureClass.WORKER_FAILURE),
+        ("error", "codex_error", FailureClass.WORKER_FAILURE),
+        ("no_terminal", "port_exit", FailureClass.RUNNER_PROTOCOL),
+        ("missing_session", "missing_session_id", FailureClass.RUNNER_PROTOCOL),
     ],
 )
 async def test_failure_normalization(
@@ -179,6 +180,7 @@ async def test_failure_normalization(
     monkeypatch,
     scenario: str,
     expected_error: str,
+    expected_class: FailureClass,
 ) -> None:
     monkeypatch.setenv("FAKE_CODEX_SCENARIO", scenario)
     recorder = EventRecorder()
@@ -189,6 +191,54 @@ async def test_failure_normalization(
 
     assert result.status == "failed"
     assert result.error == expected_error
+    assert result.failure_class is expected_class
+
+
+@pytest.mark.parametrize(
+    ("code", "detail", "expected"),
+    [
+        ("authentication_required", "", FailureClass.PROVIDER_AUTHENTICATION),
+        ("provider_error", "Usage limit reached", FailureClass.PROVIDER_PLAN_LIMIT),
+        ("credits_exhausted", "", FailureClass.PROVIDER_CREDITS_EXHAUSTED),
+        ("provider_error", "Rate limit exceeded", FailureClass.PROVIDER_RATE_LIMIT),
+        ("service_unavailable", "", FailureClass.PROVIDER_UNAVAILABLE),
+        ("provider_error", "Rate limit policy loaded", FailureClass.WORKER_FAILURE),
+    ],
+)
+async def test_provider_failure_classification(
+    workspace: Path,
+    monkeypatch,
+    code: str,
+    detail: str,
+    expected: FailureClass,
+) -> None:
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "provider_error")
+    monkeypatch.setenv("FAKE_CODEX_ERROR_CODE", code)
+    monkeypatch.setenv("FAKE_CODEX_ERROR_DETAIL", detail)
+
+    result = await CodexRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-73"
+    )
+
+    assert result.status == "failed"
+    assert result.error == "codex_error"
+    assert result.failure_class is expected
+
+
+async def test_provider_diagnostic_does_not_enter_normalized_error(
+    workspace: Path, monkeypatch
+) -> None:
+    secret = "ghs-must-not-enter-turn-result"
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "provider_error")
+    monkeypatch.setenv("FAKE_CODEX_ERROR_CODE", "authentication_required")
+    monkeypatch.setenv("FAKE_CODEX_ERROR_DETAIL", f"Authentication required {secret}")
+
+    result = await CodexRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-73"
+    )
+
+    assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION
+    assert secret not in (result.error or "")
 
 
 async def test_malformed_line_is_reported_and_tolerated(
@@ -212,6 +262,7 @@ async def test_missing_binary_is_codex_not_found(workspace: Path) -> None:
 
     assert result.status == "failed"
     assert result.error == "codex_not_found"
+    assert result.failure_class is FailureClass.RUNNER_STARTUP
 
 
 async def test_read_and_turn_timeouts(workspace: Path, monkeypatch) -> None:
@@ -220,6 +271,7 @@ async def test_read_and_turn_timeouts(workspace: Path, monkeypatch) -> None:
         make_cfg(read_timeout_ms=100, turn_timeout_ms=5000)
     ).run_turn(workspace, "prompt", None, EventRecorder(), "issue-73")
     assert read_result.error == "response_timeout"
+    assert read_result.failure_class is FailureClass.RUNNER_TIMEOUT
 
     monkeypatch.setenv("FAKE_CODEX_SCENARIO", "turn_timeout")
     turn_result = await CodexRunner(
@@ -227,6 +279,7 @@ async def test_read_and_turn_timeouts(workspace: Path, monkeypatch) -> None:
     ).run_turn(workspace, "prompt", None, EventRecorder(), "issue-73")
     assert turn_result.status == "timed_out"
     assert turn_result.error == "turn_timeout"
+    assert turn_result.failure_class is FailureClass.RUNNER_TIMEOUT
 
 
 async def test_cancellation_kills_process_group(

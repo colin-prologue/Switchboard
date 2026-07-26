@@ -16,6 +16,7 @@ import re
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable
 
@@ -137,6 +138,22 @@ class Workspace:
 
 # --- agent runner results/events (core §4.1.6, §10.4; SPEC.md §1) -------------
 
+class FailureClass(StrEnum):
+    """Closed Stage 7 taxonomy for provider-scoped failures and refusals."""
+
+    PROVIDER_AUTHENTICATION = "provider_authentication"
+    PROVIDER_PLAN_LIMIT = "provider_plan_limit"
+    PROVIDER_CREDITS_EXHAUSTED = "provider_credits_exhausted"
+    PROVIDER_RATE_LIMIT = "provider_rate_limit"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    PROVIDER_CAPACITY = "provider_capacity"
+    ASSIGNMENT_REFUSED = "assignment_refused"
+    RUNNER_STARTUP = "runner_startup"
+    RUNNER_TIMEOUT = "runner_timeout"
+    RUNNER_PROTOCOL = "runner_protocol"
+    WORKER_FAILURE = "worker_failure"
+
+
 @dataclass
 class AgentEvent:
     """Structured event emitted upstream to the orchestrator (core §10.4)."""
@@ -154,6 +171,7 @@ class TurnResult:
     status: str                  # "succeeded" | "failed" | "timed_out"
     session_id: str | None       # claude session id (thread identity; reuse via --resume)
     error: str | None = None     # normalized category per core §10.6 when failed
+    failure_class: FailureClass | None = None
     cost_usd: float = 0.0
     usage: dict[str, int] = field(default_factory=dict)
     num_turns: int = 0           # claude-internal turn count for the invocation
