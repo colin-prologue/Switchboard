@@ -19,6 +19,9 @@ BASELINE_WORKFLOW = PROJECT / "WORKFLOW.md"
 ROLLBACK_WORKFLOW = PROJECT / "WORKFLOW.rollback-claude.md"
 LAUNCHER = REPO_ROOT / "scripts" / "run-stage7-circuit-canary.sh"
 INJECTOR = REPO_ROOT / "scripts" / "codex-circuit-canary.sh"
+NATIVE_INJECTOR_COMMAND = (
+    "/Users/colindwan/Developer/Switchboard/scripts/codex-circuit-canary.sh"
+)
 
 
 @pytest.mark.parametrize(
@@ -103,7 +106,7 @@ def test_circuit_workflow_is_isolated_and_capacity_one(monkeypatch) -> None:
     assert cfg.agent().max_concurrent_agents == 1
     assert mixed.max_concurrent_agents_by_provider == {"claude": 1, "codex": 1}
     assert mixed.weights == baseline.mixed().weights == {"claude": 100, "codex": 0}
-    assert mixed.codex.command == str(INJECTOR)
+    assert mixed.codex.command == NATIVE_INJECTOR_COMMAND
     assert "recovery probe" in definition.prompt_template
     assert "Do not merge the pull request" in definition.prompt_template
 
