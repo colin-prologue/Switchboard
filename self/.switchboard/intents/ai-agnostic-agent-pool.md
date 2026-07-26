@@ -8,9 +8,10 @@
   merged as PR #96 and the Slice 2 circuit contract merged as PR #97. The pure
   circuit policy merged as PR #98 and scheduler no-retry-burn integration
   merged as PR #99. Slice 2.3 recovery/concurrency evidence merged as PR #100.
-  Slice 4's isolated circuit-canary procedure is complete on its review branch;
-  no live checkpoint issue has been created. Claude-only production remains
-  unchanged.
+  Slice 4's isolated circuit-canary procedure merged as PR #101. Its first live
+  attempt reached a closed circuit but then parked because the canary command
+  override omitted Codex's normal workspace-write safety prefix. A corrective
+  procedure is in progress; Claude-only production remains unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
@@ -26,8 +27,11 @@
   [PR #99](https://github.com/colin-prologue/Switchboard/pull/99) at `e418580`,
   and recovery/concurrency evidence merged in
   [PR #100](https://github.com/colin-prologue/Switchboard/pull/100) at `12eee81`.
-  The current branch defines the separately reviewed, still-inert Slice 4 live
-  procedure. It does not create an issue or launch a canary.
+  PR #101 merged the separately reviewed Slice 4 live procedure. Mixed-canary
+  issue #11 is preserved at `status:parked` as rejected operational evidence.
+  The current corrective branch restores the complete Codex safety prefix and
+  gives the replacement checkpoint a distinct title; it does not mutate issue
+  #11 or launch another canary.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -43,25 +47,39 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source:** Stage 7 Slice 4 procedure branch
-  `codex/stage7-circuit-canary-procedure`, based on recovery/concurrency merge
-  `12eee81`. `orchestrator/.venv/bin/python -m pytest orchestrator/tests -q`
-  passes 444 tests in 15.63s on 2026-07-22. The 21 focused Stage 6/7 canary
-  procedure and binding tests pass in 0.80s. Both new shell scripts pass
-  `bash -n`, `git diff --check` is clean, and `scripts/verify-setup.sh` reports
-  zero failures (its sandboxed invocation cannot read the host keyring and
-  reports `gh` authentication as pending).
+- **Last verified source:** Stage 7 Slice 4 procedure merged as PR #101 at
+  `6c3cf21`, based on recovery/concurrency merge `12eee81`. Its pre-merge
+  verification passed 444 tests. On corrective branch
+  `codex/stage7-circuit-canary-recovery-fix`,
+  `orchestrator/.venv/bin/python -m pytest orchestrator/tests -q` passes 444
+  tests in 16.45s; the focused circuit-canary suite passes 7 tests in 0.85s,
+  the adjacent mixed-binding and Codex-runner suites pass 27 tests in 1.85s,
+  both canary scripts pass `bash -n`, and `git diff --check` is clean.
 - **Stage 7 Slice 4 prepared procedure:** a dedicated `100/0` mixed workflow
   uses an explicit `agent:codex` checkpoint and a workspace-local, git-excluded
   injector marker. The first adapter invocation emits one structured
   `service_unavailable` error; every later invocation delegates unchanged argv
-  and stdin to the real subscription-authenticated Codex CLI. The one-at-a-time
-  native-terminal launcher requires the typed cooldown open, no-retry-burn
-  provider wait, exactly one half-open probe, circuit close, exactly two
-  session-number-one dispatches, no parking, raw outage/recovery transcripts,
-  clean workspace, and one handoff PR. Only after that PR merges and its issue
-  closes may the launcher run a new rollback checkpoint through the unchanged
-  Claude-only workflow. Dry runs are offline. No live issue exists yet.
+  and stdin to the real subscription-authenticated Codex CLI. The corrected
+  command explicitly retains `--ask-for-approval never`, `--sandbox
+  workspace-write`, and network access before the runner appends `codex exec`.
+  The one-at-a-time native-terminal launcher requires the typed cooldown open,
+  no-retry-burn provider wait, exactly one half-open probe, circuit close,
+  exactly two session-number-one dispatches, no parking, raw outage/recovery
+  transcripts, clean workspace, and one handoff PR. Only after that PR merges
+  and its issue closes may the launcher run a new rollback checkpoint through
+  the unchanged Claude-only workflow. Dry runs are offline.
+- **Rejected Slice 4 live attempt:** mixed-canary issue
+  [#11](https://github.com/colin-prologue/switchboard-mixed-canary/issues/11)
+  opened the Codex circuit on the injected `service_unavailable`, retained the
+  issue without retry or session burn, admitted exactly one half-open probe
+  after five minutes, and closed the circuit on that probe's successful process
+  exit. The real CLI could not modify the fixture because the workflow's
+  wrapper-only command had replaced the default workspace-write flags. Three
+  subsequent ordinary sessions made no changes, after which the scheduler
+  correctly parked the issue. Preserve its clean workspace, 37 raw transcripts,
+  and launcher log; do not unpark or resume it. Once the correction merges,
+  summarize the failure on #11, close it, and use the newly titled checkpoint
+  for the complete live proof.
 - **Stage 7 Slice 2.3 recovery/concurrency evidence:** mixed-provider
   integration tests prove a Codex circuit opening does not cancel another
   in-flight Codex worker or block fresh Claude work; the in-flight Codex
@@ -236,16 +254,18 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review and merge the Stage 7 Slice 4 procedure. After
-  merge, run only `circuit-recovery` from the normal macOS Terminal, retain its
-  named evidence, and stop at human review. Merge that synthetic fixture PR and
-  confirm issue closure before running the separately named Claude-only
-  rollback phase. Do not use an existing project, real subscription exhaustion,
-  or rerun completed checkpoints.
-- **Do not dispatch:** any new mixed-canary issue until the dedicated Slice 4
-  procedure is reviewed and merged, or any mixed process against an existing
-  project until both the isolated circuit canary and Claude-only rollback drill
-  pass. Do not rerun checkpoints 1 through 5.
+- **Next single task:** review and merge the corrective Slice 4 procedure. Then
+  comment on and close rejected issue #11 without deleting its preserved
+  workspace, run only the newly titled `circuit-recovery` from the normal macOS
+  Terminal, retain its named evidence, and stop at human review. Merge that
+  synthetic fixture PR and confirm issue closure before running the separately
+  named Claude-only rollback phase. Do not use an existing project, real
+  subscription exhaustion, or rerun completed checkpoints.
+- **Do not dispatch:** another mixed-canary issue until the corrective Slice 4
+  procedure is reviewed and merged and rejected issue #11 is documented and
+  closed, or any mixed process against an existing project until both the
+  isolated circuit canary and Claude-only rollback drill pass. Do not unpark
+  issue #11 or rerun checkpoints 1 through 5.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.

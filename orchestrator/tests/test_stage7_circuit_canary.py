@@ -20,15 +20,18 @@ ROLLBACK_WORKFLOW = PROJECT / "WORKFLOW.rollback-claude.md"
 LAUNCHER = REPO_ROOT / "scripts" / "run-stage7-circuit-canary.sh"
 INJECTOR = REPO_ROOT / "scripts" / "codex-circuit-canary.sh"
 NATIVE_INJECTOR_COMMAND = (
-    "/Users/colindwan/Developer/Switchboard/scripts/codex-circuit-canary.sh"
+    "/Users/colindwan/Developer/Switchboard/scripts/codex-circuit-canary.sh "
+    "--ask-for-approval never --sandbox workspace-write "
+    "--config sandbox_workspace_write.network_access=true"
 )
 
 
 @pytest.mark.parametrize(
-    ("phase", "cli", "labels", "dispatch", "workflow"),
+    ("phase", "title", "cli", "labels", "dispatch", "workflow"),
     [
         (
             "circuit-recovery",
+            "Stage 7 circuit checkpoint: workspace-write Codex recovery",
             "mixed",
             "status:todo,gate:triage-passed,agent:codex",
             "codex",
@@ -36,6 +39,7 @@ NATIVE_INJECTOR_COMMAND = (
         ),
         (
             "rollback-claude",
+            "Stage 7 circuit checkpoint: Claude-only rollback",
             "default (flag omitted)",
             "status:todo,gate:triage-passed,provider:codex",
             "claude",
@@ -45,6 +49,7 @@ NATIVE_INJECTOR_COMMAND = (
 )
 def test_stage7_checkpoint_dry_run_is_offline_and_exact(
     phase: str,
+    title: str,
     cli: str,
     labels: str,
     dispatch: str,
@@ -70,6 +75,7 @@ def test_stage7_checkpoint_dry_run_is_offline_and_exact(
 
     assert result.returncode == 0, result.stderr
     assert not marker.exists(), "dry-run invoked gh"
+    assert f"title: {title}" in result.stdout
     assert f"cli provider: {cli}" in result.stdout
     assert f"issue labels: {labels}" in result.stdout
     assert f"expected dispatch provider: {dispatch}" in result.stdout
@@ -151,7 +157,19 @@ def test_circuit_injector_fails_once_then_delegates_with_unchanged_io(
     }
 
     second = subprocess.run(
-        [str(INJECTOR), "exec", "--ignore-user-config", "--json", "-"],
+        [
+            str(INJECTOR),
+            "--ask-for-approval",
+            "never",
+            "--sandbox",
+            "workspace-write",
+            "--config",
+            "sandbox_workspace_write.network_access=true",
+            "exec",
+            "--ignore-user-config",
+            "--json",
+            "-",
+        ],
         cwd=tmp_path,
         input="recovery prompt",
         env=env,
@@ -162,6 +180,8 @@ def test_circuit_injector_fails_once_then_delegates_with_unchanged_io(
 
     assert second.returncode == 0, second.stderr
     assert argv_file.read_text(encoding="utf-8").strip() == (
+        "--ask-for-approval never --sandbox workspace-write "
+        "--config sandbox_workspace_write.network_access=true "
         "exec --ignore-user-config --json -"
     )
     assert stdin_file.read_text(encoding="utf-8") == "recovery prompt"

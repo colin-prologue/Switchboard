@@ -106,14 +106,28 @@ scripts/run-stage7-circuit-canary.sh circuit-recovery --dry-run
 scripts/run-stage7-circuit-canary.sh rollback-claude --dry-run
 ```
 
-After the procedure merges, run only `circuit-recovery`. Its explicit
+The first live attempt, issue
+[#11](https://github.com/colin-prologue/switchboard-mixed-canary/issues/11),
+proved the typed circuit open, provider wait, sole half-open probe, and circuit
+close. It then parked without changing the fixture: the canary command override
+had replaced Codex's normal headless safety prefix, so the recovered CLI
+inherited a read-only sandbox and exhausted three ordinary sessions. Preserve
+that issue, its workspace, transcripts, and launcher log as rejected
+operational evidence. Do not remove `status:parked` or resume it.
+
+After the corrective procedure merges, add a failure-summary comment to issue
+#11 and close it without deleting its preserved workspace. Then run only
+`circuit-recovery`. The corrected launcher uses the distinct title `Stage 7
+circuit checkpoint: workspace-write Codex recovery`, so its duplicate guard
+cannot mistake the failed attempt for passing evidence. Its explicit
 `agent:codex` label keeps the checked-in `100/0` routing baseline unchanged.
-The dedicated workflow invokes `scripts/codex-circuit-canary.sh`, which writes
-one git-excluded workspace marker and emits one structured
-`service_unavailable` result. The issue remains claimed without retry or
-session burn. After the fixed five-minute cooldown, exactly one half-open probe
-delegates to the real subscription-authenticated Codex CLI and completes the
-synthetic fixture task.
+The dedicated workflow invokes `scripts/codex-circuit-canary.sh` with Codex's
+explicit `--ask-for-approval never`, `--sandbox workspace-write`, and network
+configuration. The wrapper writes one git-excluded workspace marker and emits
+one structured `service_unavailable` result. The issue remains claimed without
+retry or session burn. After the fixed five-minute cooldown, exactly one
+half-open probe delegates the complete safety prefix to the real
+subscription-authenticated Codex CLI and completes the synthetic fixture task.
 
 The launcher stops at human review and requires evidence for the cooldown open,
 provider wait, sole half-open probe, circuit close, two session-number-one

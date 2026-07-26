@@ -27,7 +27,7 @@ fail() {
 
 case "$PHASE" in
   circuit-recovery)
-    TITLE="Stage 7 circuit checkpoint: deterministic Codex recovery"
+    TITLE="Stage 7 circuit checkpoint: workspace-write Codex recovery"
     BODY_FILE="$CHECKPOINT_DIR/01-circuit-recovery.md"
     ISSUE_LABELS="status:todo,gate:triage-passed,agent:codex"
     EXPECTED_PROVIDER="codex"
@@ -44,7 +44,7 @@ case "$PHASE" in
     EXPECTED_DURABLE_PROVIDER="codex"
     WORKFLOW="$ROLLBACK_WORKFLOW"
     RUN_MODE="default-claude"
-    PREREQUISITE="Stage 7 circuit checkpoint: deterministic Codex recovery"
+    PREREQUISITE="Stage 7 circuit checkpoint: workspace-write Codex recovery"
     ;;
   *)
     printf 'usage: %s <circuit-recovery|rollback-claude> [--dry-run]\n' "$0" >&2
