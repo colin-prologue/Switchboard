@@ -58,7 +58,7 @@ agent:
 # bounded by the containment guard. OS-level subprocess sandboxing is
 # deferred (candidate ticket).
 claude:
-  command: "claude -p --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
+  command: "claude -p --model claude-opus-4-8 --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
   # max_turns 20 -> 100 (2026-07-06): implementation-scale sessions burned 20
   # CLI-internal turns in ~7-9 min and exited error_max_turns; the failure path
   # spawns a fresh session with NO --resume, so tasks needing >20 turns were
