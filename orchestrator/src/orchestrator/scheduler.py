@@ -109,6 +109,7 @@ class RunningEntry:
     circuit_probe_token: int | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     cancelled_by_reconciliation: bool = False
+    turn_succeeded: bool = False
 
 
 @dataclass
@@ -681,6 +682,14 @@ class Orchestrator:
                 # Fresh (cached) mint per turn: a session spanning the hourly
                 # installation-token expiry always injects a valid bot token.
                 agent_token = await self._agent_token(runner.turn_timeout_ms)
+                entry = self.running.get(issue.id)
+                if entry:
+                    # Reconciliation may cancel a worker whose board state
+                    # changes while the provider is still running. Once a turn
+                    # succeeds, however, let this worker finish its state
+                    # refresh and after_run hook so the success (including a
+                    # half-open probe) cannot be misclassified as abandoned.
+                    entry.turn_succeeded = False
                 result = await runner.run_turn(
                     ws.path, prompt, resume_session_id=session_id,
                     on_event=self._on_agent_event, issue_id=issue.id,
@@ -692,6 +701,8 @@ class Orchestrator:
                         result.error or result.status,
                         result.failure_class or FailureClass.WORKER_FAILURE,
                     )
+                if entry:
+                    entry.turn_succeeded = True
                 session_id = result.session_id or session_id
 
                 try:  # §16.5: re-check tracker state between turns
@@ -1011,13 +1022,26 @@ class Orchestrator:
                 # pulling a required label mid-run stops the worker.
                 if t.required_labels and not all(
                         lbl in issue.labels for lbl in t.required_labels):
-                    log("required label removed; releasing worker",
-                        issue_id=issue.id, issue_identifier=entry.identifier)
-                    self._terminate(issue.id, cleanup=False, retry=False)
+                    if entry.turn_succeeded:
+                        entry.issue = issue
+                        log("successful worker finalizing; deferring reconciliation",
+                            issue_id=issue.id,
+                            issue_identifier=entry.identifier,
+                            provider_id=entry.provider_id)
+                    else:
+                        log("required label removed; releasing worker",
+                            issue_id=issue.id, issue_identifier=entry.identifier)
+                        self._terminate(issue.id, cleanup=False, retry=False)
                 else:
                     entry.issue = issue
             else:
-                self._terminate(issue.id, cleanup=False, retry=False)
+                if entry.turn_succeeded:
+                    entry.issue = issue
+                    log("successful worker finalizing; deferring reconciliation",
+                        issue_id=issue.id, issue_identifier=entry.identifier,
+                        provider_id=entry.provider_id)
+                else:
+                    self._terminate(issue.id, cleanup=False, retry=False)
 
     def _terminate(
         self,

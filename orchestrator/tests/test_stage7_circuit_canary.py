@@ -31,7 +31,7 @@ NATIVE_INJECTOR_COMMAND = (
     [
         (
             "circuit-recovery",
-            "Stage 7 circuit checkpoint: workspace-write Codex recovery",
+            "Stage 7 circuit checkpoint: finalized Codex recovery",
             "mixed",
             "status:todo,gate:triage-passed,agent:codex",
             "codex",

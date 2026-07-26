@@ -1236,6 +1236,71 @@ async def test_half_open_runs_one_probe_then_drains_waiters_oldest_first(
     codex.release.set()
 
 
+async def test_successful_half_open_handoff_finishes_before_reconciliation(
+    tmp_path,
+    monkeypatch,
+    capfd,
+):
+    """A handoff label written by a successful probe must not race finalization.
+
+    The tracker may expose status:human-review while the worker is still in its
+    after_run hook. Reconciliation must let that already-successful worker exit
+    normally so the half-open circuit closes instead of treating the probe as
+    abandoned and reopening cooldown.
+    """
+    codex = FakeRunner()
+    codex.provider_id = "codex"
+    claude = FakeRunner()
+    claude.provider_id = "claude"
+    selector = MixedFixedRunnerSelector({"claude": claude, "codex": codex})
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=MIXED_WORKFLOW_TMPL,
+        runner=codex,
+        runner_selector=selector,
+    )
+    hook_started, hook_release = _wedged_after_run(monkeypatch)
+    now = [0.0]
+    circuit = ProviderCircuit("codex", cooldown_ms=1000, clock=lambda: now[0])
+    circuit.record_failure(FailureClass.PROVIDER_UNAVAILABLE)
+    orch.provider_circuits["codex"] = circuit
+    issue = assigned_issue(1, "codex", "in progress")
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+    orch.claimed.add(issue.id)
+    orch.provider_waiting[issue.id] = ProviderWaitEntry(
+        issue.identifier,
+        issue,
+        "codex",
+        retry_attempt=None,
+    )
+
+    now[0] = 1.0
+    await orch._resume_provider_waiters(tracker.candidates)
+    await wait_for(hook_started.is_set)
+    assert circuit.state is CircuitState.HALF_OPEN
+    assert orch.running[issue.id].turn_succeeded
+
+    handed_off = assigned_issue(1, "codex", "human review")
+    tracker.states = {issue.id: handed_off}
+    await orch._reconcile_running()
+
+    assert issue.id in orch.running
+    assert not orch.running[issue.id].task.cancelled()
+    assert circuit.state is CircuitState.HALF_OPEN
+
+    tracker.candidates = []
+    hook_release.set()
+    await wait_for(lambda: circuit.state is CircuitState.CLOSED)
+    await wait_for(lambda: issue.id not in orch.running)
+
+    err = capfd.readouterr().err
+    assert "successful worker finalizing; deferring reconciliation" in err
+    assert "worker completed" in err
+    assert "worker cancelled" not in err
+
+
 async def test_restart_outage_is_bounded_by_provider_capacity_and_refunds_batch(
     tmp_path,
     monkeypatch,
