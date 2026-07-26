@@ -152,6 +152,14 @@ abandoned probe. It does not grant a still-running provider process permission
 to ignore human or tracker cancellation, and terminal cleanup retains its
 existing reconciliation path.
 
+The isolated circuit canary additionally forbids the provider process from
+changing its own dispatch-state labels. Its agent writes a git-excluded ready
+marker after the pushed PR exists and returns normally. A canary-specific
+`after_run` hook performs the handoff only when the marker and the raw terminal
+`turn.completed` record agree and the clean pushed branch/PR invariants pass.
+This is an evidence-fixture protocol, not a new production tracker-write
+responsibility for the scheduler.
+
 ### Shutdown and restart
 
 Circuit and provider-wait state are intentionally process-local. Shutdown does
@@ -214,7 +222,7 @@ Implementation is acceptable only when tests prove:
    session-cap parking, Claude-only launch, and immediate Claude-only rollback
    remain unchanged.
 10. Circuit logs expose only stable fields and no credentials, prompts, model
-output, balances, or raw diagnostics.
+    output, balances, or raw diagnostics.
 11. A successful half-open worker that exposes a nonterminal handoff while
 finalizing is not cancelled or treated as an abandoned probe; the same state
 change still cancels a provider turn that has not returned success.
