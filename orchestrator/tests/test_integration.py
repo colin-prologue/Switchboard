@@ -625,6 +625,39 @@ async def test_active_to_active_state_change_ends_session(tmp_path, monkeypatch)
     assert runner.turns[0][1] is None  # and that turn was a fresh session
 
 
+async def test_next_turn_token_refresh_remains_reconcilable(tmp_path, monkeypatch):
+    """A prior success cannot shield a worker preparing its next provider turn."""
+    tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 2")
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+    token_calls = 0
+    token_started = asyncio.Event()
+    token_release = asyncio.Event()
+
+    async def delayed_second_token(_turn_timeout_ms):
+        nonlocal token_calls
+        token_calls += 1
+        if token_calls == 2:
+            token_started.set()
+            await token_release.wait()
+        return "test-token"
+
+    monkeypatch.setattr(orch, "_agent_token", delayed_second_token)
+    issue = make_issue(1, "in progress")
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+
+    await orch._tick()
+    await wait_for(token_started.is_set)
+    assert not orch.running[issue.id].turn_succeeded
+
+    tracker.states = {issue.id: make_issue(1, "human review")}
+    await orch._reconcile_running()
+
+    assert issue.id not in orch.running
+    token_release.set()
+    await wait_for(lambda: issue.id not in orch.claimed)
+
+
 def _wedged_after_run(monkeypatch):
     """Patch WorkspaceManager.run_after_run with a hook that blocks until
     released, standing in for a wedged after_run script (which the real
@@ -1234,6 +1267,73 @@ async def test_half_open_runs_one_probe_then_drains_waiters_oldest_first(
     assert set(orch.running) == {issues[1].id, issues[2].id}
     assert all(orch.running[issue.id].retry_attempt == 7 for issue in issues[1:])
     codex.release.set()
+
+
+async def test_successful_half_open_handoff_finishes_before_reconciliation(
+    tmp_path,
+    monkeypatch,
+    capfd,
+):
+    """A handoff label written by a successful probe must not race finalization.
+
+    The tracker may expose status:human-review while the worker is still in its
+    after_run hook. Reconciliation must let that already-successful worker exit
+    normally so the half-open circuit closes instead of treating the probe as
+    abandoned and reopening cooldown.
+    """
+    codex = FakeRunner()
+    codex.provider_id = "codex"
+    claude = FakeRunner()
+    claude.provider_id = "claude"
+    selector = MixedFixedRunnerSelector({"claude": claude, "codex": codex})
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=MIXED_WORKFLOW_TMPL,
+        runner=codex,
+        runner_selector=selector,
+    )
+    hook_started, hook_release = _wedged_after_run(monkeypatch)
+    now = [0.0]
+    circuit = ProviderCircuit("codex", cooldown_ms=1000, clock=lambda: now[0])
+    circuit.record_failure(FailureClass.PROVIDER_UNAVAILABLE)
+    orch.provider_circuits["codex"] = circuit
+    issue = assigned_issue(1, "codex", "in progress")
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+    orch.claimed.add(issue.id)
+    orch.provider_waiting[issue.id] = ProviderWaitEntry(
+        issue.identifier,
+        issue,
+        "codex",
+        retry_attempt=None,
+    )
+
+    now[0] = 1.0
+    await orch._resume_provider_waiters(tracker.candidates)
+    await wait_for(hook_started.is_set)
+    assert circuit.state is CircuitState.HALF_OPEN
+    assert orch.running[issue.id].turn_succeeded
+    orch.running[issue.id].stall_timeout_ms = 1
+    orch.running[issue.id].last_event_at = datetime.now(UTC) - timedelta(hours=1)
+
+    handed_off = assigned_issue(1, "codex", "human review")
+    tracker.states = {issue.id: handed_off}
+    await orch._reconcile_running()
+
+    assert issue.id in orch.running
+    assert not orch.running[issue.id].task.cancelled()
+    assert circuit.state is CircuitState.HALF_OPEN
+
+    tracker.candidates = []
+    hook_release.set()
+    await wait_for(lambda: circuit.state is CircuitState.CLOSED)
+    await wait_for(lambda: issue.id not in orch.running)
+
+    err = capfd.readouterr().err
+    assert "successful worker finalizing; deferring reconciliation" in err
+    assert "worker completed" in err
+    assert "worker cancelled" not in err
 
 
 async def test_restart_outage_is_bounded_by_provider_capacity_and_refunds_batch(

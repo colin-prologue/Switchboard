@@ -115,14 +115,28 @@ inherited a read-only sandbox and exhausted three ordinary sessions. Preserve
 that issue, its workspace, transcripts, and launcher log as rejected
 operational evidence. Do not remove `status:parked` or resume it.
 
-After the corrective procedure merges, add a failure-summary comment to issue
-#11 and close it without deleting its preserved workspace. Then run only
-`circuit-recovery`. The corrected launcher uses the distinct title `Stage 7
-circuit checkpoint: workspace-write Codex recovery`, so its duplicate guard
-cannot mistake the failed attempt for passing evidence. Its explicit
-`agent:codex` label keeps the checked-in `100/0` routing baseline unchanged.
-The dedicated workflow invokes `scripts/codex-circuit-canary.sh` with Codex's
-explicit `--ask-for-approval never`, `--sandbox workspace-write`, and network
+Issue #11 was documented and closed as rejected evidence after the command fix
+merged in Switchboard PR #102. The second live attempt, issue
+[#12](https://github.com/colin-prologue/switchboard-mixed-canary/issues/12),
+proved the corrected workspace-write recovery: Codex changed only the fixture,
+passed all 13 tests, committed and pushed `8799707`, opened
+[PR #13](https://github.com/colin-prologue/switchboard-mixed-canary/pull/13),
+and moved the issue to `status:human-review`. Tracker reconciliation observed
+that handoff while the successful half-open worker was still in `after_run`,
+cancelled it, and reopened the circuit as an abandoned probe. The launcher
+therefore could not reach its circuit-close stop condition and was stopped
+manually. Preserve issue #12, PR #13, its workspace, transcripts, and launcher
+log as rejected race evidence. Do not merge PR #13 or resume issue #12.
+
+After the handoff-finalization correction merges, close PR #13 without merging,
+add a failure-summary comment to issue #12, and close it without deleting its
+preserved workspace. Then run only `circuit-recovery`. The corrected launcher
+uses the distinct title `Stage 7 circuit checkpoint: finalized Codex recovery`,
+so its duplicate guard cannot mistake either failed attempt for passing
+evidence. Its explicit `agent:codex` label keeps the checked-in `100/0` routing
+baseline unchanged. The dedicated workflow invokes
+`scripts/codex-circuit-canary.sh` with Codex's explicit
+`--ask-for-approval never`, `--sandbox workspace-write`, and network
 configuration. The wrapper writes one git-excluded workspace marker and emits
 one structured `service_unavailable` result. The issue remains claimed without
 retry or session burn. After the fixed five-minute cooldown, exactly one

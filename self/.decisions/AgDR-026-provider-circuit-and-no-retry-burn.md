@@ -134,6 +134,24 @@ A dispatch blocked by an open circuit uses `outcome=refused` and the circuit's
 stored `failure_class`. Logs contain no prompt, model result, credential,
 subscription balance, or raw provider diagnostic.
 
+### Successful handoff finalization
+
+Tracker reconciliation continues to cancel a worker immediately when its issue
+becomes terminal, non-active, or ineligible while a provider turn is still
+running. After a provider turn has returned success, reconciliation defers a
+nonterminal handoff or required-label release until the worker finishes its
+state refresh and `after_run` hook. The worker then records its normal success
+before releasing the claim. Provider stall detection does not apply during
+this interval because `after_run` has its own independent bounded timeout.
+Before awaiting credentials for any subsequent provider turn, the worker
+clears the success state and becomes immediately reconcilable again.
+
+This distinction prevents an agent's successful `status:human-review` handoff
+from racing worker finalization and turning a healthy half-open probe into an
+abandoned probe. It does not grant a still-running provider process permission
+to ignore human or tracker cancellation, and terminal cleanup retains its
+existing reconciliation path.
+
 ### Shutdown and restart
 
 Circuit and provider-wait state are intentionally process-local. Shutdown does
@@ -196,7 +214,10 @@ Implementation is acceptable only when tests prove:
    session-cap parking, Claude-only launch, and immediate Claude-only rollback
    remain unchanged.
 10. Circuit logs expose only stable fields and no credentials, prompts, model
-   output, balances, or raw diagnostics.
+output, balances, or raw diagnostics.
+11. A successful half-open worker that exposes a nonterminal handoff while
+finalizing is not cancelled or treated as an abandoned probe; the same state
+change still cancels a provider turn that has not returned success.
 
 ## Rejected options
 
