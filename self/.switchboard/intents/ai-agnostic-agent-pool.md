@@ -52,8 +52,8 @@
 - **Last verified source:** Stage 7 workspace-write correction merged as PR
   #102 at `65b68fc`; its full suite passed 444 tests. On
   `codex/stage7-handoff-finalization-race`, the focused live-shape
-  reconciliation tests pass 4 tests and the full integration suite passes 47
-  tests. The full orchestrator suite passes 445 tests in 17.52s, the focused
+  reconciliation tests pass 4 tests and the full integration suite passes 48
+  tests. The full orchestrator suite passes 446 tests in 16.64s, the focused
   circuit-canary procedure suite passes 7 tests in 0.82s, both canary scripts
   pass `bash -n`, the renamed dry run performs no GitHub writes or process
   launch, and `git diff --check` is clean.

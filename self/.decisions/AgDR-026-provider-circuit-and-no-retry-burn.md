@@ -141,7 +141,10 @@ becomes terminal, non-active, or ineligible while a provider turn is still
 running. After a provider turn has returned success, reconciliation defers a
 nonterminal handoff or required-label release until the worker finishes its
 state refresh and `after_run` hook. The worker then records its normal success
-before releasing the claim.
+before releasing the claim. Provider stall detection does not apply during
+this interval because `after_run` has its own independent bounded timeout.
+Before awaiting credentials for any subsequent provider turn, the worker
+clears the success state and becomes immediately reconcilable again.
 
 This distinction prevents an agent's successful `status:human-review` handoff
 from racing worker finalization and turning a healthy half-open probe into an

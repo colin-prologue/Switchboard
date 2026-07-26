@@ -625,6 +625,39 @@ async def test_active_to_active_state_change_ends_session(tmp_path, monkeypatch)
     assert runner.turns[0][1] is None  # and that turn was a fresh session
 
 
+async def test_next_turn_token_refresh_remains_reconcilable(tmp_path, monkeypatch):
+    """A prior success cannot shield a worker preparing its next provider turn."""
+    tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 2")
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+    token_calls = 0
+    token_started = asyncio.Event()
+    token_release = asyncio.Event()
+
+    async def delayed_second_token(_turn_timeout_ms):
+        nonlocal token_calls
+        token_calls += 1
+        if token_calls == 2:
+            token_started.set()
+            await token_release.wait()
+        return "test-token"
+
+    monkeypatch.setattr(orch, "_agent_token", delayed_second_token)
+    issue = make_issue(1, "in progress")
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+
+    await orch._tick()
+    await wait_for(token_started.is_set)
+    assert not orch.running[issue.id].turn_succeeded
+
+    tracker.states = {issue.id: make_issue(1, "human review")}
+    await orch._reconcile_running()
+
+    assert issue.id not in orch.running
+    token_release.set()
+    await wait_for(lambda: issue.id not in orch.claimed)
+
+
 def _wedged_after_run(monkeypatch):
     """Patch WorkspaceManager.run_after_run with a hook that blocks until
     released, standing in for a wedged after_run script (which the real
@@ -1281,6 +1314,8 @@ async def test_successful_half_open_handoff_finishes_before_reconciliation(
     await wait_for(hook_started.is_set)
     assert circuit.state is CircuitState.HALF_OPEN
     assert orch.running[issue.id].turn_succeeded
+    orch.running[issue.id].stall_timeout_ms = 1
+    orch.running[issue.id].last_event_at = datetime.now(UTC) - timedelta(hours=1)
 
     handed_off = assigned_issue(1, "codex", "human review")
     tracker.states = {issue.id: handed_off}

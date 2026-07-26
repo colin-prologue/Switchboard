@@ -679,17 +679,15 @@ class Orchestrator:
                     prompt = render_prompt(defn.prompt_template, issue, attempt)
                 else:
                     prompt = CONTINUATION_PROMPT  # §7.1: don't resend the task prompt
+                entry = self.running.get(issue.id)
+                if entry:
+                    # Preparing another turn is active work again, including
+                    # time spent awaiting a refreshed credential. Keep it
+                    # cancellable until that provider turn returns success.
+                    entry.turn_succeeded = False
                 # Fresh (cached) mint per turn: a session spanning the hourly
                 # installation-token expiry always injects a valid bot token.
                 agent_token = await self._agent_token(runner.turn_timeout_ms)
-                entry = self.running.get(issue.id)
-                if entry:
-                    # Reconciliation may cancel a worker whose board state
-                    # changes while the provider is still running. Once a turn
-                    # succeeds, however, let this worker finish its state
-                    # refresh and after_run hook so the success (including a
-                    # half-open probe) cannot be misclassified as abandoned.
-                    entry.turn_succeeded = False
                 result = await runner.run_turn(
                     ws.path, prompt, resume_session_id=session_id,
                     on_event=self._on_agent_event, issue_id=issue.id,
@@ -702,6 +700,9 @@ class Orchestrator:
                         result.failure_class or FailureClass.WORKER_FAILURE,
                     )
                 if entry:
+                    # Let this worker finish its state refresh and after_run
+                    # hook so the success (including a half-open probe) cannot
+                    # be misclassified as abandoned.
                     entry.turn_succeeded = True
                 session_id = result.session_id or session_id
 
@@ -986,7 +987,11 @@ class Orchestrator:
         # Part A: stall detection
         now = datetime.now(timezone.utc)
         for issue_id, entry in list(self.running.items()):
-            if entry.stall_timeout_ms <= 0:
+            # A provider turn that already returned success is no longer
+            # stalled provider work. Its after_run hook has an independent,
+            # bounded timeout and must finish so success/probe recovery is
+            # recorded instead of being reclassified as cancellation.
+            if entry.turn_succeeded or entry.stall_timeout_ms <= 0:
                 continue
             anchor = entry.last_event_at or entry.started_at
             if (now - anchor).total_seconds() * 1000 > entry.stall_timeout_ms:
