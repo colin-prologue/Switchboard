@@ -92,3 +92,40 @@ Do not rerun checkpoint 5. The dedicated workflow remains inert evidence; the
 normal `100/0` workflow remains the only mixed-canary baseline. No existing
 project is authorized to launch mixed mode until the Stage 7 observability gate
 is reviewed and completed.
+
+## Stage 7 circuit checkpoint procedure
+
+The Stage 7 procedure is separate from completed checkpoints 1 through 5. It
+must merge before any new issue is created, and each phase must run from the
+normal macOS Terminal app with every other Switchboard orchestrator stopped.
+
+Preview either phase without GitHub writes or a process launch:
+
+```bash
+scripts/run-stage7-circuit-canary.sh circuit-recovery --dry-run
+scripts/run-stage7-circuit-canary.sh rollback-claude --dry-run
+```
+
+After the procedure merges, run only `circuit-recovery`. Its explicit
+`agent:codex` label keeps the checked-in `100/0` routing baseline unchanged.
+The dedicated workflow invokes `scripts/codex-circuit-canary.sh`, which writes
+one git-excluded workspace marker and emits one structured
+`service_unavailable` result. The issue remains claimed without retry or
+session burn. After the fixed five-minute cooldown, exactly one half-open probe
+delegates to the real subscription-authenticated Codex CLI and completes the
+synthetic fixture task.
+
+The launcher stops at human review and requires evidence for the cooldown open,
+provider wait, sole half-open probe, circuit close, two session-number-one
+dispatches, retained raw transcripts, clean workspace, and one open handoff PR.
+Review and merge that fixture PR and confirm its issue closes before running
+`rollback-claude`.
+
+The rollback phase reuses the unchanged `WORKFLOW.rollback-claude.md` and the
+default CLI mode. Its new issue deliberately starts with `provider:codex` as
+audit history; the launcher requires a Claude dispatch and rejects any rewrite
+to `provider:claude`. Merge its fixture PR and confirm issue closure before
+recording the Stage 7 live checkpoint complete.
+
+Do not run both phases together, shorten the circuit cooldown, induce real
+subscription exhaustion, or use an existing project for either phase.
