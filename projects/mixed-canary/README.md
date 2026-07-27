@@ -128,20 +128,41 @@ therefore could not reach its circuit-close stop condition and was stopped
 manually. Preserve issue #12, PR #13, its workspace, transcripts, and launcher
 log as rejected race evidence. Do not merge PR #13 or resume issue #12.
 
-After the handoff-finalization correction merges, close PR #13 without merging,
-add a failure-summary comment to issue #12, and close it without deleting its
+PR #103 corrected successful-worker finalization, after which issue #12 and PR
+#13 were documented and closed without merging. The third live attempt, issue
+[#14](https://github.com/colin-prologue/switchboard-mixed-canary/issues/14),
+again completed the fixture, passed all 13 tests, pushed `5bfaf8c`, opened
+[PR #15](https://github.com/colin-prologue/switchboard-mixed-canary/pull/15),
+and then cancelled before circuit close. Its transcript established the exact
+remaining boundary: the agent changed `status:human-review` before the Codex
+CLI emitted `turn.completed`, so reconciliation correctly cancelled a provider
+turn that was still active. PR #103 protects the later `after_run` interval and
+remains valid, but could not authorize a pre-completion state change. Preserve
+issue #14, PR #15, its workspace, transcripts, and launcher log as rejected
+contract evidence. Do not merge PR #15 or resume issue #14.
+
+After the terminal-handoff correction merges, close PR #15 without merging, add
+a failure-summary comment to issue #14, and close it without deleting its
 preserved workspace. Then run only `circuit-recovery`. The corrected launcher
-uses the distinct title `Stage 7 circuit checkpoint: finalized Codex recovery`,
-so its duplicate guard cannot mistake either failed attempt for passing
+uses the distinct title `Stage 7 circuit checkpoint: terminal Codex recovery`,
+so its duplicate guard cannot mistake any rejected attempt for passing
 evidence. Its explicit `agent:codex` label keeps the checked-in `100/0` routing
 baseline unchanged. The dedicated workflow invokes
 `scripts/codex-circuit-canary.sh` with Codex's explicit
 `--ask-for-approval never`, `--sandbox workspace-write`, and network
-configuration. The wrapper writes one git-excluded workspace marker and emits
-one structured `service_unavailable` result. The issue remains claimed without
+configuration. The wrapper writes one git-excluded outage marker and emits one
+structured `service_unavailable` result. The issue remains claimed without
 retry or session burn. After the fixed five-minute cooldown, exactly one
 half-open probe delegates the complete safety prefix to the real
-subscription-authenticated Codex CLI and completes the synthetic fixture task.
+subscription-authenticated Codex CLI and completes the synthetic fixture task
+in the evidence workflow's single allowed scheduler turn. It then writes
+`.run/stage7-handoff-ready` instead of changing labels. The one-turn ceiling
+enters `after_run` immediately instead of launching a continuation while the
+issue remains active. The canary-specific hook requires that marker, a latest
+transcript ending in `turn.completed`, a clean pushed branch, a closing PR
+body, and exactly one open PR before it owns the `status:human-review`
+transition. Cancelled or incomplete turns retain the marker and cannot hand
+off.
 
 The launcher stops at human review and requires evidence for the cooldown open,
 provider wait, sole half-open probe, circuit close, two session-number-one

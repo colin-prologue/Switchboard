@@ -12,8 +12,11 @@ and completes this issue without burning retry or session allowance.
 - Add focused unittest coverage in `tests/test_greeting.py`.
 - `python3 -m unittest discover -s tests -v` passes.
 - Commit and push only the scoped fixture change.
-- Open a pull request whose body closes this issue when merged, and move this
-  issue to `status:human-review`. Do not merge it.
+- Open a pull request whose body closes this issue when merged.
+- Write the git-excluded `.run/stage7-handoff-ready` marker, then return
+  success without changing issue labels. The canary hook owns the
+  `status:human-review` transition after terminal Codex completion.
+- Do not merge it.
 
 ## Non-goals
 

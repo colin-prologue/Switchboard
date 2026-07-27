@@ -27,7 +27,7 @@ fail() {
 
 case "$PHASE" in
   circuit-recovery)
-    TITLE="Stage 7 circuit checkpoint: finalized Codex recovery"
+    TITLE="Stage 7 circuit checkpoint: terminal Codex recovery"
     BODY_FILE="$CHECKPOINT_DIR/01-circuit-recovery.md"
     ISSUE_LABELS="status:todo,gate:triage-passed,agent:codex"
     EXPECTED_PROVIDER="codex"
@@ -44,7 +44,7 @@ case "$PHASE" in
     EXPECTED_DURABLE_PROVIDER="codex"
     WORKFLOW="$ROLLBACK_WORKFLOW"
     RUN_MODE="default-claude"
-    PREREQUISITE="Stage 7 circuit checkpoint: finalized Codex recovery"
+    PREREQUISITE="Stage 7 circuit checkpoint: terminal Codex recovery"
     ;;
   *)
     printf 'usage: %s <circuit-recovery|rollback-claude> [--dry-run]\n' "$0" >&2
@@ -116,6 +116,7 @@ set -a
 set +a
 export SB_HOME
 unset SWITCHBOARD_CANARY_CODEX_BIN
+unset SWITCHBOARD_CANARY_BASE_AFTER_RUN SWITCHBOARD_CANARY_GH_BIN
 
 for key in SB_APP_ID SB_APP_INSTALLATION_ID SB_APP_PRIVATE_KEY_FILE \
            SB_APP_BOT_LOGIN SB_APP_BOT_USER_ID; do
@@ -274,6 +275,15 @@ if [ "$PHASE" = "circuit-recovery" ]; then
     || fail "log does not prove circuit recovery"
   [ -f "$WORKSPACE/.run/stage7-circuit-failure-injected" ] \
     || fail "deterministic failure marker is missing"
+  [ ! -e "$WORKSPACE/.run/stage7-handoff-ready" ] \
+    || fail "terminal handoff marker was not consumed"
+  LATEST_CODEX_TRANSCRIPT="$(find "$WORKSPACE/.run/transcripts" -maxdepth 1 \
+    -type f -name 'codex-*.jsonl' -print | sort | tail -n 1)"
+  [ -n "$LATEST_CODEX_TRANSCRIPT" ] \
+    || fail "terminal recovery transcript is missing"
+  tail -n 1 "$LATEST_CODEX_TRANSCRIPT" \
+    | grep -Eq '"type"[[:space:]]*:[[:space:]]*"turn\.completed"' \
+    || fail "recovery transcript lacks terminal Codex success"
   DISPATCH_COUNT="$(grep -c "dispatched .*issue_identifier=$ISSUE_NUMBER .*provider_id=codex" "$LOG" || true)"
   [ "$DISPATCH_COUNT" = "2" ] \
     || fail "expected outage and probe dispatch only, found $DISPATCH_COUNT"

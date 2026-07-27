@@ -21,12 +21,15 @@ hooks:
   before_run: |
     "$SB_HOME/hooks/before_run.sh"
   after_run: |
-    "$SB_HOME/hooks/after_run.sh"
+    "$SB_HOME/scripts/stage7-circuit-after-run.sh"
   timeout_ms: 120000
 
 agent:
   max_concurrent_agents: 1
-  max_turns: 12
+  # This evidence workflow must enter after_run immediately after the single
+  # half-open recovery turn so the terminal handoff marker cannot trigger
+  # generic continuation turns while the synthetic issue remains active.
+  max_turns: 1
   max_retry_backoff_ms: 300000
   max_sessions_per_issue: 3
   max_concurrent_agents_by_provider:
@@ -68,8 +71,10 @@ implement only its acceptance criteria, and run:
 python3 -m unittest discover -s tests -v
 ```
 
-When the criteria pass, commit the scoped change, push the current branch, open
-a pull request whose body closes the issue, and move the issue to
-`status:human-review`. Do not merge the pull request. If blocked, leave the
-issue active with a clear comment instead of weakening the sandbox or expanding
-scope.
+When the criteria pass, commit the scoped change, push the current branch, and
+open a pull request whose body closes the issue. Then write the git-excluded
+`.run/stage7-handoff-ready` marker and return success without changing any
+issue labels: the canary's `after_run` hook owns the `status:human-review`
+transition after terminal Codex completion. Do not merge the pull request. If
+blocked, leave the issue active with a clear comment instead of weakening the
+sandbox or expanding scope.

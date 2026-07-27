@@ -9,10 +9,11 @@
   circuit policy merged as PR #98 and scheduler no-retry-burn integration
   merged as PR #99. Slice 2.3 recovery/concurrency evidence merged as PR #100.
   Slice 4's isolated circuit-canary procedure merged as PR #101 and its
-  workspace-write correction merged as PR #102. Two rejected live attempts
-  exposed command-prefix and successful-handoff finalization defects without
-  reaching the checkpoint gate. A scheduler correction is in progress;
-  Claude-only production remains unchanged.
+  workspace-write correction merged as PR #102. Successful-finalization
+  hardening merged as PR #103. Three rejected live attempts exposed the command
+  prefix, post-return finalization, and pre-return self-handoff boundaries
+  without reaching the checkpoint gate. A terminal-marker handoff correction
+  is in progress; Claude-only production remains unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
@@ -28,12 +29,13 @@
   [PR #99](https://github.com/colin-prologue/Switchboard/pull/99) at `e418580`,
   and recovery/concurrency evidence merged in
   [PR #100](https://github.com/colin-prologue/Switchboard/pull/100) at `12eee81`.
-  PR #101 merged the separately reviewed Slice 4 live procedure and PR #102
-  merged its complete Codex safety prefix at `65b68fc`. Mixed-canary issue #11
-  is closed with `status:parked` preserved. Issue #12 and its unmerged PR #13
-  are preserved as rejected handoff-race evidence. The current branch lets an
-  already-successful worker finish tracker refresh and `after_run` before
-  nonterminal reconciliation can cancel it; it does not launch another canary.
+  PR #101 merged the separately reviewed Slice 4 live procedure, PR #102 merged
+  its complete Codex safety prefix at `65b68fc`, and PR #103 merged successful
+  finalization hardening at `2e5c0da`. Issues #11 and #12 are closed as rejected
+  evidence. Issue #14 and unmerged PR #15 are preserved as rejected
+  pre-completion handoff evidence. The current branch replaces agent-owned
+  status mutation with a terminal-transcript-gated `after_run` handoff; it does
+  not launch another canary.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -49,14 +51,14 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source:** Stage 7 workspace-write correction merged as PR
-  #102 at `65b68fc`; its full suite passed 444 tests. On
-  `codex/stage7-handoff-finalization-race`, the focused live-shape
-  reconciliation tests pass 4 tests and the full integration suite passes 48
-  tests. The full orchestrator suite passes 446 tests in 16.64s, the focused
-  circuit-canary procedure suite passes 7 tests in 0.82s, both canary scripts
-  pass `bash -n`, the renamed dry run performs no GitHub writes or process
-  launch, and `git diff --check` is clean.
+- **Last verified source:** Stage 7 finalization hardening merged as PR #103 at
+  `2e5c0da`; its full suite passed 446 tests. On
+  `codex/stage7-terminal-handoff-marker`, 11 focused circuit-canary tests and
+  the two adjacent live-shape finalization regressions pass. The full
+  orchestrator suite passes 450 tests in 17.99s; all three canary scripts pass
+  `bash -n`, the renamed dry run performs no GitHub writes or process launch,
+  `git diff --check` is clean, and `scripts/verify-setup.sh` reports zero
+  failures (its sandboxed check reports host `gh` authentication as pending).
 - **Stage 7 Slice 4 prepared procedure:** a dedicated `100/0` mixed workflow
   uses an explicit `agent:codex` checkpoint and a workspace-local, git-excluded
   injector marker. The first adapter invocation emits one structured
@@ -69,10 +71,12 @@
   exactly two session-number-one dispatches, no parking, raw outage/recovery
   transcripts, clean workspace, and one handoff PR. Only after that PR merges
   and its issue closes may the launcher run a new rollback checkpoint through
-  the unchanged Claude-only workflow. A successful provider turn now remains
-  authoritative through state refresh and `after_run`, so an agent's
-  nonterminal handoff cannot race circuit success recording. Dry runs are
-  offline.
+  the unchanged Claude-only workflow. The agent writes a git-excluded ready
+  marker instead of changing labels. The evidence workflow's one-turn ceiling
+  enters the canary-specific `after_run` hook immediately; the hook requires a
+  terminal `turn.completed` transcript plus clean pushed branch and PR
+  invariants before moving the issue to human review. Cancelled or incomplete
+  turns cannot hand off. Dry runs are offline.
 - **Rejected Slice 4 live attempt:** mixed-canary issue
   [#11](https://github.com/colin-prologue/switchboard-mixed-canary/issues/11)
   opened the Codex circuit on the injected `service_unavailable`, retained the
@@ -98,7 +102,22 @@
   because its required circuit-close and worker-completed records could never
   appear. Preserve the issue, PR, clean workspace, two raw transcripts, and
   `/private/tmp/switchboard-stage7-circuit-recovery.Kr7fFP/orchestrator-20260726T202935Z.log`.
-  Do not merge PR #13 or resume issue #12.
+  PR #103 corrected successful post-return finalization; #12 now carries the
+  failure summary and is closed as `not planned`, and PR #13 is closed unmerged.
+  Do not resume #12 or reopen/merge #13.
+- **Rejected Slice 4 pre-completion handoff attempt:** mixed-canary issue
+  [#14](https://github.com/colin-prologue/switchboard-mixed-canary/issues/14)
+  again reproduced the typed cooldown and exactly one half-open probe. Codex
+  changed only the fixture files, passed all 13 tests, pushed `5bfaf8c`, and
+  opened clean unmerged
+  [PR #15](https://github.com/colin-prologue/switchboard-mixed-canary/pull/15).
+  It then changed `status:human-review` before its raw transcript emitted
+  `turn.completed`; reconciliation correctly cancelled the still-active
+  provider turn and reopened cooldown. This proves PR #103's post-return guard
+  is valid but insufficient for an agent that mutates its own dispatch state.
+  Preserve issue #14, PR #15, clean workspace, two raw transcripts, and
+  `/private/tmp/switchboard-stage7-circuit-recovery.WU0fWR/orchestrator-20260726T224344Z.log`.
+  Do not merge PR #15 or resume issue #14.
 - **Stage 7 Slice 2.3 recovery/concurrency evidence:** mixed-provider
   integration tests prove a Codex circuit opening does not cancel another
   in-flight Codex worker or block fresh Claude work; the in-flight Codex
@@ -273,18 +292,18 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review and merge the handoff-finalization correction.
-  Then close PR #13 without merging, comment on and close rejected issue #12
+- **Next single task:** review and merge the terminal-marker handoff correction.
+  Then close PR #15 without merging, comment on and close rejected issue #14
   without deleting its preserved workspace, and run only the newly titled
   `circuit-recovery` from the normal macOS Terminal. Retain its named evidence
   and stop at human review. Merge that passing synthetic fixture PR and confirm
   issue closure before running the separately named Claude-only rollback phase.
-- **Do not dispatch:** another mixed-canary issue until the
-  handoff-finalization correction is reviewed and merged and rejected issue
-  #12/PR #13 are documented and closed, or any mixed process against an
-  existing project until both the isolated circuit canary and Claude-only
-  rollback drill pass. Do not resume issues #11 or #12, merge PR #13, or rerun
-  checkpoints 1 through 5.
+- **Do not dispatch:** another mixed-canary issue until the terminal-marker
+  correction is reviewed and merged and rejected issue #14/PR #15 are
+  documented and closed, or any mixed process against an existing project
+  until both the isolated circuit canary and Claude-only rollback drill pass.
+  Do not resume issues #11, #12, or #14; merge PR #15; or rerun checkpoints 1
+  through 5.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
