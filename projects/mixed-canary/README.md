@@ -89,9 +89,9 @@ passed eleven tests, and stopped at `status:human-review`. PR #10 merged as
 `14fe89a`, closed issue #9 automatically, and its branch was deleted.
 
 Do not rerun checkpoint 5. The dedicated workflow remains inert evidence; the
-normal `100/0` workflow remains the only mixed-canary baseline. No existing
-project is authorized to launch mixed mode until the Stage 7 observability gate
-is reviewed and completed.
+normal `100/0` workflow remains the only mixed-canary baseline. The Stage 7
+observability gate is complete, but no existing project is authorized to launch
+mixed mode without a separate reviewed pilot decision.
 
 ## Stage 7 circuit checkpoint procedure
 
@@ -141,13 +141,15 @@ remains valid, but could not authorize a pre-completion state change. Preserve
 issue #14, PR #15, its workspace, transcripts, and launcher log as rejected
 contract evidence. Do not merge PR #15 or resume issue #14.
 
-After the terminal-handoff correction merges, close PR #15 without merging, add
-a failure-summary comment to issue #14, and close it without deleting its
-preserved workspace. Then run only `circuit-recovery`. The corrected launcher
-uses the distinct title `Stage 7 circuit checkpoint: terminal Codex recovery`,
-so its duplicate guard cannot mistake any rejected attempt for passing
-evidence. Its explicit `agent:codex` label keeps the checked-in `100/0` routing
-baseline unchanged. The dedicated workflow invokes
+Switchboard PR #104 merged the terminal-handoff correction at `5cd0b9a`.
+PR #15 was then closed unmerged, and issue #14 received its failure summary and
+closed as rejected evidence without deleting the preserved workspace.
+
+The passing recovery checkpoint used the distinct title
+`Stage 7 circuit checkpoint: terminal Codex recovery`, so its duplicate guard
+could not mistake any rejected attempt for passing evidence. Its explicit
+`agent:codex` label kept the checked-in `100/0` routing baseline unchanged. The
+dedicated workflow invoked
 `scripts/codex-circuit-canary.sh` with Codex's explicit
 `--ask-for-approval never`, `--sandbox workspace-write`, and network
 configuration. The wrapper writes one git-excluded outage marker and emits one
@@ -164,17 +166,29 @@ body, and exactly one open PR before it owns the `status:human-review`
 transition. Cancelled or incomplete turns retain the marker and cannot hand
 off.
 
-The launcher stops at human review and requires evidence for the cooldown open,
-provider wait, sole half-open probe, circuit close, two session-number-one
-dispatches, retained raw transcripts, clean workspace, and one open handoff PR.
-Review and merge that fixture PR and confirm its issue closes before running
-`rollback-claude`.
+Live issue
+[#16](https://github.com/colin-prologue/switchboard-mixed-canary/issues/16)
+satisfied every launcher invariant: typed cooldown open, provider wait, exactly
+one half-open probe, circuit close, two session-number-one dispatches, retained
+raw transcripts, terminal `turn.completed`, a consumed handoff marker, clean
+workspace, and one open handoff PR. Its 13-test fixture
+[PR #17](https://github.com/colin-prologue/switchboard-mixed-canary/pull/17)
+merged as `b110de1` and closed the issue. Preserve workspace `16` and
+`/private/tmp/switchboard-stage7-circuit-recovery.cuulYq/orchestrator-20260727T005405Z.log`
+as the accepted recovery evidence.
 
-The rollback phase reuses the unchanged `WORKFLOW.rollback-claude.md` and the
-default CLI mode. Its new issue deliberately starts with `provider:codex` as
-audit history; the launcher requires a Claude dispatch and rejects any rewrite
-to `provider:claude`. Merge its fixture PR and confirm issue closure before
-recording the Stage 7 live checkpoint complete.
+The rollback phase reused the unchanged `WORKFLOW.rollback-claude.md` and
+default CLI mode. Issue
+[#18](https://github.com/colin-prologue/switchboard-mixed-canary/issues/18)
+retained `provider:codex` as audit history while the log recorded
+`provider_id=claude`; all 15 tests passed and
+[PR #19](https://github.com/colin-prologue/switchboard-mixed-canary/pull/19)
+merged as `e2694d2`, closing the issue. Its final `worker cancelled` follows the
+launcher's intentional `shutdown requested` after the human-review stop gate,
+not a provider failure. Preserve workspace `18` and
+`/private/tmp/switchboard-stage7-rollback-claude.AE4Ehl/orchestrator-20260727T010518Z.log`
+as accepted rollback evidence.
 
-Do not run both phases together, shorten the circuit cooldown, induce real
-subscription exhaustion, or use an existing project for either phase.
+Stage 7 is complete. Do not rerun either phase, shorten the circuit cooldown,
+induce real subscription exhaustion, or use an existing project without a
+separately reviewed pilot plan.
