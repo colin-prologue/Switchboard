@@ -19,7 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from orchestrator.runner import ClaudeRunner
-from orchestrator.types import AgentEvent, ClaudeConfig, FailureClass
+from orchestrator.types import AgentEvent, ClaudeConfig, Continuation, FailureClass
 
 FIXTURE = str(Path(__file__).resolve().parent / "fake_claude.py")
 
@@ -124,7 +124,9 @@ async def test_max_turns_and_budget_without_resume(workspace: Path, monkeypatch,
     assert "--resume" not in joined
 
 
-async def test_error_result_subtype(workspace: Path, monkeypatch):
+async def test_error_max_turns_is_incomplete_resume(workspace: Path, monkeypatch):
+    """issue #47: `error_max_turns` WITH a session id is a benign early stop,
+    not a failure — status `incomplete`, resume the same session next turn."""
     monkeypatch.setenv("FAKE_SCENARIO", "error_max_turns")
     cfg = make_cfg()
     runner = ClaudeRunner(cfg)
@@ -132,9 +134,28 @@ async def test_error_result_subtype(workspace: Path, monkeypatch):
 
     result = await runner.run_turn(workspace, "prompt", None, recorder, "issue-1")
 
-    assert result.status == "failed"
-    assert result.error == "error_max_turns"
+    assert result.status == "incomplete"
+    assert result.continuation is Continuation.RESUME_SESSION
     assert result.session_id == "sess-err"
+    assert result.failure_class is None
+    assert "turn_incomplete" in recorder.names
+    assert "turn_failed" not in recorder.names
+
+
+async def test_error_max_turns_without_session_is_failure(workspace: Path, monkeypatch):
+    """issue #47 defensive: `error_max_turns` with NO session id ever learned
+    has nothing to resume, so it stays a failure — not `incomplete`."""
+    monkeypatch.setenv("FAKE_SCENARIO", "error_max_turns_no_session")
+    cfg = make_cfg()
+    runner = ClaudeRunner(cfg)
+    recorder = EventRecorder()
+
+    result = await runner.run_turn(workspace, "prompt", None, recorder, "issue-1")
+
+    assert result.status == "failed"
+    assert result.continuation is None
+    assert result.session_id is None
+    assert result.error == "error_max_turns"
     assert result.failure_class is FailureClass.WORKER_FAILURE
     assert "turn_failed" in recorder.names
 
@@ -267,6 +288,8 @@ async def test_provider_diagnostic_does_not_enter_normalized_error(
 async def test_model_result_text_cannot_create_provider_failure_class(
     workspace: Path, monkeypatch
 ) -> None:
+    # error_max_turns now resolves to `incomplete` (issue #47): model result
+    # text on a benign early stop must not leak a provider failure class.
     monkeypatch.setenv("FAKE_SCENARIO", "error_max_turns")
     monkeypatch.setenv(
         "FAKE_CLAUDE_RESULT_TEXT",
@@ -277,8 +300,8 @@ async def test_model_result_text_cannot_create_provider_failure_class(
         workspace, "prompt", None, EventRecorder(), "issue-1"
     )
 
-    assert result.error == "error_max_turns"
-    assert result.failure_class is FailureClass.WORKER_FAILURE
+    assert result.status == "incomplete"
+    assert result.failure_class is None
 
 
 async def test_prompt_delivered_via_stdin(workspace: Path, monkeypatch, tmp_path: Path):
@@ -362,7 +385,8 @@ async def test_cancellation_kills_process_group(workspace: Path, monkeypatch, tm
 
 async def test_error_scenario_exits_nonzero_result_still_parsed(workspace: Path, monkeypatch):
     """The real CLI exits nonzero on error result subtypes; the parsed result
-    line must win over the exit code (no port_exit/claude_not_found remap)."""
+    line must win over the exit code (no port_exit/claude_not_found remap).
+    error_max_turns parses to `incomplete` (issue #47), still not a port_exit."""
     monkeypatch.setenv("FAKE_SCENARIO", "error_max_turns")
     cfg = make_cfg()
     runner = ClaudeRunner(cfg)
@@ -370,7 +394,7 @@ async def test_error_scenario_exits_nonzero_result_still_parsed(workspace: Path,
 
     result = await runner.run_turn(workspace, "prompt", None, recorder, "issue-1")
 
-    assert result.status == "failed"
+    assert result.status == "incomplete"
     assert result.error == "error_max_turns"
 
 

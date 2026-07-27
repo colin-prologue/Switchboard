@@ -80,6 +80,10 @@ def main() -> None:
         return
 
     if scenario == "error_max_turns":
+        # OBS-023 conformance (issue #47): the real CLI emits its session id on
+        # init and preserves it on the `error_max_turns` result, so the runner
+        # can resume. The fake models the same — a valid session id rides the
+        # early-stop result — which is what makes this the `incomplete` case.
         record_stdin()
         emit({"type": "system", "subtype": "init", "session_id": "sess-err"})
         payload = result_line("error_max_turns", session_id="sess-err")
@@ -87,6 +91,16 @@ def main() -> None:
             payload["result"] = result_text
         emit(payload)
         sys.exit(1)  # real CLI exits nonzero on error result subtypes
+
+    if scenario == "error_max_turns_no_session":
+        # Defensive path (issue #47): `error_max_turns` with NO session id ever
+        # learned (no init line, no session_id on the result). Nothing to
+        # resume, so this stays a failure, not `incomplete`.
+        record_stdin()
+        payload = result_line("error_max_turns")
+        payload.pop("session_id")
+        emit(payload)
+        sys.exit(1)
 
     if scenario == "provider_error":
         record_stdin()

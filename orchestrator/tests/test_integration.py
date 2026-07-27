@@ -40,6 +40,7 @@ from orchestrator.scheduler import (
 )
 from orchestrator.types import (
     BlockerRef,
+    Continuation,
     FailureClass,
     Issue,
     TrackerError,
@@ -196,6 +197,34 @@ class FakeRunner:
         return TurnResult(status="succeeded", session_id=f"sess-{len(self.turns)}",
                           cost_usd=0.01, usage={"input_tokens": 1, "output_tokens": 1},
                           num_turns=1)
+
+
+class ScriptedRunner:
+    """Runner whose per-turn TurnResult is produced by a `factory(n, resume)`
+    callback (n is the 1-based turn index). Optionally blocks on a given turn
+    (`hold_on_turn`) until `release` is set, so tests can inspect the
+    scheduler's mid-continuation state (issue #47)."""
+
+    provider_id = "fake"
+
+    def __init__(self, factory, hold_on_turn: int | None = None):
+        self.turn_timeout_ms = 5000
+        self.stall_timeout_ms = 0
+        self.max_budget_usd: float | None = None
+        self.factory = factory
+        self.hold_on_turn = hold_on_turn
+        self.release = asyncio.Event()
+        self.turns: list[tuple[str, str | None, str]] = []
+        self.tokens: list[str | None] = []
+
+    async def run_turn(self, workspace, prompt, resume_session_id, on_event,
+                       issue_id, agent_token=None):
+        n = len(self.turns) + 1
+        self.turns.append((issue_id, resume_session_id, prompt))
+        self.tokens.append(agent_token)
+        if self.hold_on_turn == n:
+            await self.release.wait()
+        return self.factory(n, resume_session_id)
 
 
 class FixedRunnerSelector:
@@ -868,6 +897,167 @@ async def test_budget_ceiling_ends_session_normally(tmp_path, monkeypatch, capfd
     assert "cost_usd=0.03" in err
     assert "worker completed" in err
     assert "worker failed" not in err
+
+
+async def test_incomplete_turn_resumes_same_session_with_continuation_prompt(
+    tmp_path, monkeypatch, capfd
+):
+    """issue #47: a turn returning `incomplete` + RESUME_SESSION continues the
+    SAME session via --resume with CONTINUATION_PROMPT (not the task prompt),
+    counting one orchestrator turn — not a failure. Scripts incomplete -> success."""
+    tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 2")
+
+    def factory(n, resume):
+        if n == 1:
+            return TurnResult(status="incomplete", session_id="inc-1",
+                              continuation=Continuation.RESUME_SESSION, cost_usd=0.01)
+        return TurnResult(status="succeeded", session_id="done-2", cost_usd=0.01)
+
+    runner = ScriptedRunner(factory)
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, tmpl, runner=runner)
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+
+    assert len(runner.turns) == 2
+    assert runner.turns[0][1] is None                 # turn 1: fresh session
+    assert runner.turns[0][2] == "Work 1: Issue 1"    # ... rendered task prompt
+    assert runner.turns[1][1] == "inc-1"              # turn 2 resumes the incomplete session
+    assert runner.turns[1][2] == CONTINUATION_PROMPT  # ... with continuation, not task, prompt
+    err = capfd.readouterr().err
+    assert "worker completed" in err
+    assert "worker failed" not in err
+
+
+async def test_incomplete_leaves_turn_succeeded_false_and_cancellable(
+    tmp_path, monkeypatch
+):
+    """issue #47 / #61 boundary: an `incomplete` turn must NOT set
+    turn_succeeded (worker still active and cancellable, not a terminal
+    handoff). Holds inside turn 2 to inspect mid-continuation state, then
+    proves a terminal reconcile still cancels the worker."""
+    tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 5")
+
+    def factory(n, resume):
+        return TurnResult(status="incomplete", session_id=f"inc-{n}",
+                          continuation=Continuation.RESUME_SESSION, cost_usd=0.0)
+
+    runner = ScriptedRunner(factory, hold_on_turn=2)
+    orch, tracker, _, ws_root = _build_harness(tmp_path, monkeypatch, tmpl, runner=runner)
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}
+
+    await orch._tick()
+    # Worker is blocked inside turn 2 (turn 1 already returned incomplete).
+    await wait_for(lambda: len(runner.turns) == 2)
+    entry = orch.running["node-1"]
+    assert entry.turn_succeeded is False              # incomplete is not a terminal success
+    assert runner.turns[1][1] == "inc-1"              # turn 2 resumed the incomplete session
+
+    # Still cancellable: a terminal state reconcile takes authority immediately.
+    tracker.states = {"node-1": make_issue(1, "closed")}
+    await orch._reconcile_running()
+    assert "node-1" not in orch.running
+    runner.release.set()
+    await wait_for(lambda: "node-1" not in orch.claimed)
+
+
+async def test_incomplete_streak_terminates_at_max_turns(tmp_path, monkeypatch, capfd):
+    """issue #47: a run of `incomplete` turns still terminates the session at
+    agent.max_turns — each continuation consumes one orchestrator turn."""
+    tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 3")
+
+    def factory(n, resume):
+        return TurnResult(status="incomplete", session_id=f"inc-{n}",
+                          continuation=Continuation.RESUME_SESSION, cost_usd=0.0)
+
+    runner = ScriptedRunner(factory)
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, tmpl, runner=runner)
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+
+    assert len(runner.turns) == 3                     # bounded by agent.max_turns, not unbounded
+    assert runner.turns[2][1] == "inc-2"              # each turn resumed the previous session
+    err = capfd.readouterr().err
+    assert "worker completed" in err
+    assert "worker failed" not in err
+
+
+async def test_incomplete_streak_terminates_at_budget_ceiling(tmp_path, monkeypatch, capfd):
+    """issue #47: continuation resets no budget — a run of `incomplete` turns at
+    $0.01 each still trips the $0.025 cumulative ceiling after turn 3, well
+    before agent.max_turns (10)."""
+    tmpl = (WORKFLOW_TMPL
+            .replace("max_turns: 1", "max_turns: 10")
+            .replace('command: "unused-by-fake-runner"',
+                     'command: "unused-by-fake-runner"\n  max_budget_usd: 0.025'))
+
+    def factory(n, resume):
+        return TurnResult(status="incomplete", session_id=f"inc-{n}",
+                          continuation=Continuation.RESUME_SESSION, cost_usd=0.01)
+
+    runner = ScriptedRunner(factory)
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, tmpl, runner=runner)
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+
+    assert len(runner.turns) == 3                     # ceiling (0.03 >= 0.025), not max_turns
+    err = capfd.readouterr().err
+    assert "worker budget ceiling reached" in err
+    assert "cost_usd=0.03" in err
+    assert "worker completed" in err
+    assert "worker failed" not in err
+
+
+async def test_incomplete_without_continuation_is_failure(tmp_path, monkeypatch):
+    """issue #47 defensive: an `incomplete` result the scheduler can't continue
+    (no resumable session) falls back to today's failure/backoff semantics."""
+    def factory(n, resume):
+        return TurnResult(status="incomplete", session_id=None,
+                          continuation=Continuation.RESUME_SESSION,
+                          error="error_max_turns")
+
+    runner = ScriptedRunner(factory)
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, runner=runner)
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1)}
+
+    await orch._tick()
+    await wait_for(lambda: "node-1" in orch.retry_attempts)
+    assert orch.retry_attempts["node-1"].attempt == 1
+
+
+@pytest.mark.parametrize("status", ["failed", "timed_out"])
+async def test_non_incomplete_statuses_keep_failure_semantics(
+    tmp_path, monkeypatch, status
+):
+    """issue #47 regression pin: every non-succeeded, non-incomplete status
+    still fails and schedules a retry — the new branch narrows nothing else."""
+    def factory(n, resume):
+        return TurnResult(status=status, session_id=None, error="boom")
+
+    runner = ScriptedRunner(factory)
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, runner=runner)
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1)}
+
+    await orch._tick()
+    await wait_for(lambda: "node-1" in orch.retry_attempts)
+    assert orch.retry_attempts["node-1"].attempt == 1
 
 
 async def test_maybe_reload_detects_real_mtime_change(harness):

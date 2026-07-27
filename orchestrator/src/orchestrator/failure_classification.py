@@ -69,6 +69,16 @@ _TEXT_PATTERNS: tuple[tuple[FailureClass, tuple[re.Pattern[str], ...]], ...] = (
             re.compile(r"\b(?:provider|service) (?:is )?(?:temporarily )?unavailable\b"),
         ),
     ),
+    # issue #47: Codex `turn.failed` carries only `error.message` (no `code`),
+    # so context exhaustion is matched on text here, never via `_CODEX_CODES`.
+    # Real message: "Codex ran out of room in the model's context window.
+    # Start a new thread or clear earlier history before retrying."
+    (
+        FailureClass.PROVIDER_CONTEXT_EXHAUSTED,
+        (
+            re.compile(r"\bran out of room in the model's context window\b"),
+        ),
+    ),
 )
 
 

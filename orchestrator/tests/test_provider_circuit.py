@@ -96,6 +96,22 @@ def test_non_provider_failures_do_not_open_closed_circuit(
     assert circuit.acquire_dispatch().allowed
 
 
+def test_context_exhausted_is_not_a_circuit_trigger() -> None:
+    # issue #47: PROVIDER_CONTEXT_EXHAUSTED is task-shaped, not provider-health-
+    # shaped, so it must never open or influence the circuit.
+    assert not ProviderCircuit.is_circuit_failure(
+        FailureClass.PROVIDER_CONTEXT_EXHAUSTED
+    )
+    assert FailureClass.PROVIDER_CONTEXT_EXHAUSTED not in CIRCUIT_FAILURE_CLASSES
+
+    circuit = ProviderCircuit("codex")
+    assert (
+        circuit.record_failure(FailureClass.PROVIDER_CONTEXT_EXHAUSTED) is None
+    )
+    assert circuit.state is CircuitState.CLOSED
+    assert circuit.acquire_dispatch().allowed
+
+
 def test_success_closes_latched_circuit_from_already_running_worker() -> None:
     circuit = ProviderCircuit("codex")
     circuit.record_failure(FailureClass.PROVIDER_PLAN_LIMIT)
