@@ -29,7 +29,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .failure_classification import classify_claude_failure
-from .types import AgentEvent, ClaudeConfig, EventCallback, FailureClass, TurnResult
+from .types import (
+    AgentEvent,
+    ClaudeConfig,
+    Continuation,
+    EventCallback,
+    FailureClass,
+    TurnResult,
+)
 
 MAX_LINE_BYTES = 10 * 1024 * 1024  # core §10.1
 STDERR_TAIL_CHARS = 500
@@ -365,6 +372,32 @@ class ClaudeRunner:
                         result = TurnResult(
                             status="succeeded",
                             session_id=session_id,
+                            cost_usd=cost_usd,
+                            usage=usage,
+                            num_turns=num_turns,
+                        )
+                    elif subtype == "error_max_turns" and session_id is not None:
+                        # issue #47: `--max-turns` exhaustion is a benign early
+                        # stop, not a failure. The conversation is intact, so
+                        # the recovery is to resume this same session next turn.
+                        # (A missing session id — never initialized — falls
+                        # through to the failure branch below, defensively.)
+                        emit(
+                            "turn_incomplete",
+                            {
+                                "subtype": subtype,
+                                "total_cost_usd": cost_usd,
+                                "num_turns": num_turns,
+                                "permission_denials": denials,
+                            },
+                            pid,
+                            usage=usage,
+                        )
+                        result = TurnResult(
+                            status="incomplete",
+                            session_id=session_id,
+                            error=subtype,
+                            continuation=Continuation.RESUME_SESSION,
                             cost_usd=cost_usd,
                             usage=usage,
                             num_turns=num_turns,

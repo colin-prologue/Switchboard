@@ -44,6 +44,7 @@ from .tracker import GitHubTracker
 from .transitions import load_requires_marker
 from .types import (
     AgentEvent,
+    Continuation,
     FailureClass,
     Issue,
     RetryEntry,
@@ -694,17 +695,37 @@ class Orchestrator:
                     agent_token=agent_token)
                 cumulative_cost += result.cost_usd
                 entry = self.running.get(issue.id)
-                if result.status != "succeeded":
+                if result.status == "incomplete":
+                    # issue #47: a benign early stop (a provider resource
+                    # ceiling, not a failure). Continue the SAME session next
+                    # turn per result.continuation — CONTINUATION_PROMPT, not
+                    # the task prompt (turn_number > 1 below). It counts as one
+                    # orchestrator turn and does NOT inflate failure/retry
+                    # accounting. Leave turn_succeeded False: the worker is
+                    # still active and cancellable, and this is NOT the terminal
+                    # handoff success #61 keys on.
+                    resume_id = result.session_id or session_id
+                    if result.continuation is not Continuation.RESUME_SESSION \
+                            or resume_id is None:
+                        # No recovery available (e.g. no session to resume):
+                        # fall back to today's failure semantics.
+                        raise WorkerFailure(
+                            result.error or result.status,
+                            result.failure_class or FailureClass.WORKER_FAILURE,
+                        )
+                    session_id = resume_id
+                elif result.status != "succeeded":
                     raise WorkerFailure(
                         result.error or result.status,
                         result.failure_class or FailureClass.WORKER_FAILURE,
                     )
-                if entry:
-                    # Let this worker finish its state refresh and after_run
-                    # hook so the success (including a half-open probe) cannot
-                    # be misclassified as abandoned.
-                    entry.turn_succeeded = True
-                session_id = result.session_id or session_id
+                else:
+                    if entry:
+                        # Let this worker finish its state refresh and after_run
+                        # hook so the success (including a half-open probe)
+                        # cannot be misclassified as abandoned.
+                        entry.turn_succeeded = True
+                    session_id = result.session_id or session_id
 
                 try:  # §16.5: re-check tracker state between turns
                     refreshed = await tracker.fetch_issue_states_by_ids([issue.id])

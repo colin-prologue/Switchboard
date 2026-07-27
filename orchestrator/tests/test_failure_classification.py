@@ -63,3 +63,26 @@ def test_unknown_code_does_not_inherit_a_class_from_its_name() -> None:
         classify_codex_failure(code="maybe_rate_limit_related")
         is FailureClass.WORKER_FAILURE
     )
+
+
+# issue #47: real `codex exec --json` turn.failed carries only error.message
+# (no `code`), so context exhaustion is matched on text via _TEXT_PATTERNS.
+CODEX_CONTEXT_EXHAUSTED_MESSAGE = (
+    "Codex ran out of room in the model's context window. "
+    "Start a new thread or clear earlier history before retrying."
+)
+
+
+def test_codex_context_exhaustion_message_classified_via_text() -> None:
+    # code=None mirrors real Codex output (no documented `code` field): the
+    # match must come from the message text, not _CODEX_CODES.
+    assert (
+        classify_codex_failure(code=None, detail=CODEX_CONTEXT_EXHAUSTED_MESSAGE)
+        is FailureClass.PROVIDER_CONTEXT_EXHAUSTED
+    )
+    # Claude shares _TEXT_PATTERNS but never emits this Codex-specific string;
+    # the classifier is provider-neutral, so it still resolves the same class.
+    assert (
+        classify_claude_failure(detail=CODEX_CONTEXT_EXHAUSTED_MESSAGE)
+        is FailureClass.PROVIDER_CONTEXT_EXHAUSTED
+    )

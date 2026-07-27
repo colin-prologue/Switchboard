@@ -147,6 +147,7 @@ class FailureClass(StrEnum):
     PROVIDER_RATE_LIMIT = "provider_rate_limit"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     PROVIDER_CAPACITY = "provider_capacity"
+    PROVIDER_CONTEXT_EXHAUSTED = "provider_context_exhausted"
     ASSIGNMENT_REFUSED = "assignment_refused"
     RUNNER_STARTUP = "runner_startup"
     RUNNER_TIMEOUT = "runner_timeout"
@@ -154,11 +155,24 @@ class FailureClass(StrEnum):
     WORKER_FAILURE = "worker_failure"
 
 
+class Continuation(StrEnum):
+    """How a benign `incomplete` turn continues on the next turn (issue #47).
+
+    Runner-owned, because only the adapter knows whether its session survives
+    an early stop. Claude's `--max-turns` exhaustion leaves the conversation
+    intact, so the recovery is to resume the same session id. Codex context
+    exhaustion has no known headless recovery and therefore stays a failure —
+    it deliberately gets no `Continuation` member.
+    """
+
+    RESUME_SESSION = "resume_session"   # continue the same session id next turn
+
+
 @dataclass
 class AgentEvent:
     """Structured event emitted upstream to the orchestrator (core §10.4)."""
-    event: str                   # session_started | turn_completed | turn_failed |
-                                 # startup_failed | notification | malformed
+    event: str                   # session_started | turn_completed | turn_incomplete |
+                                 # turn_failed | startup_failed | notification | malformed
     timestamp: datetime
     pid: int | None = None
     usage: dict[str, int] | None = None
@@ -167,14 +181,30 @@ class AgentEvent:
 
 @dataclass
 class TurnResult:
-    """Outcome of one `claude -p` invocation (one logical turn, SPEC.md §1)."""
-    status: str                  # "succeeded" | "failed" | "timed_out"
-    session_id: str | None       # claude session id (thread identity; reuse via --resume)
+    """Outcome of one provider-neutral worker turn (SPEC.md §1, issue #47).
+
+    A turn is one adapter invocation (a `claude -p` or `codex exec` run).
+    `status` is the neutral outcome shared by both runners:
+
+    - "succeeded"  — the turn completed its work.
+    - "incomplete" — the turn ended early and BENIGNLY: the provider stopped
+      at a resource ceiling, not because the work failed. Work is unfinished
+      and continues on the next turn per `continuation`. This is NOT a failure
+      and must not inflate failure/retry accounting.
+    - "failed"     — the turn failed; see `failure_class`.
+    - "timed_out"  — the turn exceeded its timeout (a failure).
+
+    `continuation` is populated only for "incomplete" and is runner-owned,
+    because only the adapter knows whether its session survives the early stop.
+    """
+    status: str                  # "succeeded" | "incomplete" | "failed" | "timed_out"
+    session_id: str | None       # provider session id (thread identity; reuse via --resume)
     error: str | None = None     # normalized category per core §10.6 when failed
     failure_class: FailureClass | None = None
+    continuation: Continuation | None = None  # set only when status == "incomplete"
     cost_usd: float = 0.0
     usage: dict[str, int] = field(default_factory=dict)
-    num_turns: int = 0           # claude-internal turn count for the invocation
+    num_turns: int = 0           # provider-internal turn count for the invocation
 
 
 EventCallback = Callable[[str, AgentEvent], None]  # (issue_id, event) -> None
