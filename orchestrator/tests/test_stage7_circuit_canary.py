@@ -111,6 +111,7 @@ def test_circuit_workflow_is_isolated_and_capacity_one(monkeypatch) -> None:
 
     assert cfg.tracker().repo == "colin-prologue/switchboard-mixed-canary"
     assert cfg.agent().max_concurrent_agents == 1
+    assert cfg.agent().max_turns == 1
     assert mixed.max_concurrent_agents_by_provider == {"claude": 1, "codex": 1}
     assert mixed.weights == baseline.mixed().weights == {"claude": 100, "codex": 0}
     assert mixed.codex.command == NATIVE_INJECTOR_COMMAND

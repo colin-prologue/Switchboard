@@ -154,12 +154,15 @@ configuration. The wrapper writes one git-excluded outage marker and emits one
 structured `service_unavailable` result. The issue remains claimed without
 retry or session burn. After the fixed five-minute cooldown, exactly one
 half-open probe delegates the complete safety prefix to the real
-subscription-authenticated Codex CLI and completes the synthetic fixture task.
-It then writes `.run/stage7-handoff-ready` instead of changing labels. The
-canary-specific `after_run` hook requires that marker, a latest transcript
-ending in `turn.completed`, a clean pushed branch, a closing PR body, and
-exactly one open PR before it owns the `status:human-review` transition.
-Cancelled or incomplete turns retain the marker and cannot hand off.
+subscription-authenticated Codex CLI and completes the synthetic fixture task
+in the evidence workflow's single allowed scheduler turn. It then writes
+`.run/stage7-handoff-ready` instead of changing labels. The one-turn ceiling
+enters `after_run` immediately instead of launching a continuation while the
+issue remains active. The canary-specific hook requires that marker, a latest
+transcript ending in `turn.completed`, a clean pushed branch, a closing PR
+body, and exactly one open PR before it owns the `status:human-review`
+transition. Cancelled or incomplete turns retain the marker and cannot hand
+off.
 
 The launcher stops at human review and requires evidence for the cooldown open,
 provider wait, sole half-open probe, circuit close, two session-number-one

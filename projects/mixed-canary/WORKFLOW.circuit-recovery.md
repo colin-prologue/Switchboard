@@ -26,7 +26,10 @@ hooks:
 
 agent:
   max_concurrent_agents: 1
-  max_turns: 12
+  # This evidence workflow must enter after_run immediately after the single
+  # half-open recovery turn so the terminal handoff marker cannot trigger
+  # generic continuation turns while the synthetic issue remains active.
+  max_turns: 1
   max_retry_backoff_ms: 300000
   max_sessions_per_issue: 3
   max_concurrent_agents_by_provider:

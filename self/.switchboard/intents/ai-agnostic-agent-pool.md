@@ -72,10 +72,11 @@
   transcripts, clean workspace, and one handoff PR. Only after that PR merges
   and its issue closes may the launcher run a new rollback checkpoint through
   the unchanged Claude-only workflow. The agent writes a git-excluded ready
-  marker instead of changing labels; the canary-specific `after_run` hook
-  requires a terminal `turn.completed` transcript plus clean pushed branch and
-  PR invariants before moving the issue to human review. Cancelled or
-  incomplete turns cannot hand off. Dry runs are offline.
+  marker instead of changing labels. The evidence workflow's one-turn ceiling
+  enters the canary-specific `after_run` hook immediately; the hook requires a
+  terminal `turn.completed` transcript plus clean pushed branch and PR
+  invariants before moving the issue to human review. Cancelled or incomplete
+  turns cannot hand off. Dry runs are offline.
 - **Rejected Slice 4 live attempt:** mixed-canary issue
   [#11](https://github.com/colin-prologue/switchboard-mixed-canary/issues/11)
   opened the Codex circuit on the injected `service_unavailable`, retained the
