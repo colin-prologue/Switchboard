@@ -14,12 +14,61 @@ set -euo pipefail
 
 ISSUE="$(basename "$PWD")"
 BRANCH="switchboard/issue-$ISSUE"
+REMOTE_REF="origin/$SB_BASE_BRANCH"
+STALENESS_FILE="$PWD/.sb-staleness"
+
+# .sb-staleness is workspace-local surfacing (issue #57): agents read it on
+# turn 1, but it must never land in a PR. Exclude it in the clone's own
+# .git/info/exclude (a per-clone ignore that isn't itself committed).
+ensure_staleness_excluded() {
+  local exclude=".git/info/exclude"
+  [ -f "$exclude" ] || return 0
+  grep -qxF ".sb-staleness" "$exclude" || echo ".sb-staleness" >> "$exclude"
+}
+
+# write_staleness <reason> — record why the ff-update was skipped/refused so the
+# dispatched session can see it was built against a non-fresh HEAD. behind-count
+# is derived, never hard-coded (matches the test's own derivation).
+write_staleness() {
+  local reason="$1" behind
+  behind="$(git rev-list --count "HEAD..$REMOTE_REF")"
+  {
+    echo "reason=$reason"
+    echo "behind-count=$behind"
+    echo "workspace-head=$(git rev-parse HEAD)"
+    echo "origin-head=$(git rev-parse "$REMOTE_REF")"
+  } > "$STALENESS_FILE"
+  echo "[before_run] STALE reason=$reason behind=$behind (see .sb-staleness)"
+}
 
 git fetch origin "$SB_BASE_BRANCH"
+
+ensure_staleness_excluded
 
 if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
   echo "[before_run] reusing existing branch $BRANCH"
   git checkout "$BRANCH"
+
+  # Freshness (issue #57 / §9.3): a reused branch that never commits (e.g. a
+  # triage verifier) stays pinned at origin-of-first-clone unless we ff it to
+  # the freshly-fetched origin/base. The prechecks below — NOT ff-only's exit
+  # status — are what keep HEAD from moving under local state: ff-only succeeds
+  # on a dirty tree whose edits don't overlap the update, and its guard is
+  # per-file, so it is not a safe dirty/divergence detector on its own.
+  if [ -n "$(git status --porcelain)" ]; then
+    # Dirty gate: local edits present ⇒ never merge. HEAD stays put (§9.3).
+    write_staleness dirty
+  elif git merge-base --is-ancestor "$REMOTE_REF" HEAD; then
+    # origin/base is an ancestor of HEAD ⇒ fresh or ahead-only. Not stale.
+    rm -f "$STALENESS_FILE"
+  elif git merge-base --is-ancestor HEAD "$REMOTE_REF"; then
+    # HEAD is an ancestor of origin/base ⇒ behind-only, clean ⇒ guaranteed ff.
+    git merge --ff-only "$REMOTE_REF"
+    rm -f "$STALENESS_FILE"
+  else
+    # Neither is an ancestor ⇒ diverged. Refuse to move HEAD (§9.3).
+    write_staleness diverged
+  fi
 else
   echo "[before_run] creating $BRANCH from origin/$SB_BASE_BRANCH"
   git checkout -B "$BRANCH" "origin/$SB_BASE_BRANCH"
