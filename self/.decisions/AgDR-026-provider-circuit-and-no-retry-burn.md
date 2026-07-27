@@ -226,8 +226,28 @@ Implementation is acceptable only when tests prove:
 10. Circuit logs expose only stable fields and no credentials, prompts, model
     output, balances, or raw diagnostics.
 11. A successful half-open worker that exposes a nonterminal handoff while
-finalizing is not cancelled or treated as an abandoned probe; the same state
-change still cancels a provider turn that has not returned success.
+    finalizing is not cancelled or treated as an abandoned probe; the same
+    state change still cancels a provider turn that has not returned success.
+
+## Live verification
+
+The isolated gate passed on 2026-07-27 after the terminal-handoff correction
+merged in Switchboard PR #104 at `5cd0b9a`.
+
+- Mixed-canary issue #16 emitted one typed `provider_unavailable` failure,
+  entered the fixed 300-second cooldown without retry or session burn, admitted
+  exactly one half-open Codex probe, and closed the circuit on its successful
+  terminal turn. Both dispatches remained `session_number=1`; the ready marker
+  was consumed only after a final `turn.completed` transcript and clean
+  pushed-PR invariants. Its 13-test PR #17 merged as `b110de1` and closed the
+  issue.
+- Mixed-canary issue #18 repeated the unchanged default Claude-only rollback.
+  The process dispatched `provider_id=claude` while retaining the durable
+  `provider:codex` audit label, passed all 15 tests, and opened a clean handoff
+  PR. PR #19 merged as `e2694d2` and closed the issue.
+- Three earlier issues remain preserved as rejected operational evidence for
+  the missing command prefix, post-return finalization race, and pre-return
+  self-handoff race. No existing project or real subscription outage was used.
 
 ## Rejected options
 
@@ -260,8 +280,10 @@ change still cancels a provider turn that has not returned success.
 Only typed provider-availability failure paths change. Healthy Claude-only,
 Codex-only, and mixed workers execute through the same selection, workspace,
 turn, continuation, capacity, and handoff paths. Project bindings and routing
-weights do not change. Mixed execution against existing projects remains
-prohibited until the isolated circuit canary and rollback drill pass.
+weights do not change. Passing the isolated circuit canary and rollback drill
+satisfies this decision's live gate; it does not itself authorize mixed
+execution against an existing project, which requires a separate reviewed
+pilot decision.
 
 ## Weakest point
 

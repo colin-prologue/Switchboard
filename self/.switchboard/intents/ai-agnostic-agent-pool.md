@@ -12,15 +12,17 @@
   workspace-write correction merged as PR #102. Successful-finalization
   hardening merged as PR #103. Three rejected live attempts exposed the command
   prefix, post-return finalization, and pre-return self-handoff boundaries
-  without reaching the checkpoint gate. A terminal-marker handoff correction
-  is in progress; Claude-only production remains unchanged.
+  before PR #104 closed the terminal boundary. The isolated Codex circuit
+  recovery and unchanged Claude-only rollback then passed and merged their
+  synthetic handoffs. Stage 7 is complete; Claude-only production remains
+  unchanged.
 - **Decision:** Codex starts with ChatGPT subscription authentication. API-key
   billing is deferred until production throughput or reliability requires it
   (AgDR-016).
 
 ## Resume here
 
-- **Current stage:** Stage 7 Slice 2 implementation, slice 4 of 4. Accepted
+- **Current stage:** Stage 7 operational hardening is complete. Accepted
   [AgDR-026](../../.decisions/AgDR-026-provider-circuit-and-no-retry-burn.md)
   merged in [PR #97](https://github.com/colin-prologue/Switchboard/pull/97) at
   `5d1cf05`, the scheduler-independent circuit policy merged in
@@ -30,12 +32,12 @@
   and recovery/concurrency evidence merged in
   [PR #100](https://github.com/colin-prologue/Switchboard/pull/100) at `12eee81`.
   PR #101 merged the separately reviewed Slice 4 live procedure, PR #102 merged
-  its complete Codex safety prefix at `65b68fc`, and PR #103 merged successful
-  finalization hardening at `2e5c0da`. Issues #11 and #12 are closed as rejected
-  evidence. Issue #14 and unmerged PR #15 are preserved as rejected
-  pre-completion handoff evidence. The current branch replaces agent-owned
-  status mutation with a terminal-transcript-gated `after_run` handoff; it does
-  not launch another canary.
+  its complete Codex safety prefix at `65b68fc`, PR #103 merged successful
+  finalization hardening at `2e5c0da`, and PR #104 merged the terminal-marker
+  handoff at `5cd0b9a`. Issues #11, #12, and #14 plus PRs #13 and #15 are closed
+  as rejected evidence. Passing recovery issue #16 merged PR #17 as `b110de1`;
+  passing rollback issue #18 merged PR #19 as `e2694d2`. Both issues closed
+  automatically and both worker branches were deleted.
 - **Production mode:** Claude-only by default. Existing commands, workflows,
   and project bindings do not pass `--provider codex` or `--provider mixed`
   and remain unchanged.
@@ -51,15 +53,13 @@
   support, any mixed-process launch against an existing production repository,
   and any automatic Codex routing weight above zero outside the dedicated inert
   evidence workflow. The completed checkpoint issues must not be rerun.
-- **Last verified source:** Stage 7 finalization hardening merged as PR #103 at
-  `2e5c0da`; its full suite passed 446 tests. On
-  `codex/stage7-terminal-handoff-marker`, 11 focused circuit-canary tests and
-  the two adjacent live-shape finalization regressions pass. The full
-  orchestrator suite passes 450 tests in 17.99s; all three canary scripts pass
-  `bash -n`, the renamed dry run performs no GitHub writes or process launch,
-  `git diff --check` is clean, and `scripts/verify-setup.sh` reports zero
-  failures (its sandboxed check reports host `gh` authentication as pending).
-- **Stage 7 Slice 4 prepared procedure:** a dedicated `100/0` mixed workflow
+- **Last verified source:** Stage 7 terminal-marker hardening merged as PR #104
+  at `5cd0b9a`. Its focused circuit-canary suite passed 11 tests, two adjacent
+  live-shape finalization regressions passed, and the full orchestrator suite
+  passed 450 tests. All three canary scripts passed `bash -n`; both phase dry
+  runs were inert. The accepted live recovery fixture passed 13 tests and the
+  accepted rollback fixture passed 15 tests.
+- **Stage 7 Slice 4 live evidence:** a dedicated `100/0` mixed workflow
   uses an explicit `agent:codex` checkpoint and a workspace-local, git-excluded
   injector marker. The first adapter invocation emits one structured
   `service_unavailable` error; every later invocation delegates unchanged argv
@@ -69,14 +69,24 @@
   The one-at-a-time native-terminal launcher requires the typed cooldown open,
   no-retry-burn provider wait, exactly one half-open probe, circuit close,
   exactly two session-number-one dispatches, no parking, raw outage/recovery
-  transcripts, clean workspace, and one handoff PR. Only after that PR merges
-  and its issue closes may the launcher run a new rollback checkpoint through
-  the unchanged Claude-only workflow. The agent writes a git-excluded ready
-  marker instead of changing labels. The evidence workflow's one-turn ceiling
-  enters the canary-specific `after_run` hook immediately; the hook requires a
-  terminal `turn.completed` transcript plus clean pushed branch and PR
-  invariants before moving the issue to human review. Cancelled or incomplete
-  turns cannot hand off. Dry runs are offline.
+  transcripts, clean workspace, and one handoff PR. The agent writes a
+  git-excluded ready marker instead of changing labels. The evidence workflow's
+  one-turn ceiling enters the canary-specific `after_run` hook immediately; the
+  hook requires a terminal `turn.completed` transcript plus clean pushed branch
+  and PR invariants before moving the issue to human review. Cancelled or
+  incomplete turns cannot hand off. Live issue
+  [#16](https://github.com/colin-prologue/switchboard-mixed-canary/issues/16)
+  satisfied every circuit invariant and merged
+  [PR #17](https://github.com/colin-prologue/switchboard-mixed-canary/pull/17)
+  as `b110de1` after 13 tests passed. The separately named default-mode rollback
+  issue [#18](https://github.com/colin-prologue/switchboard-mixed-canary/issues/18)
+  dispatched Claude while retaining `provider:codex`, passed 15 tests, and
+  merged [PR #19](https://github.com/colin-prologue/switchboard-mixed-canary/pull/19)
+  as `e2694d2`. Preserve
+  `/private/tmp/switchboard-stage7-circuit-recovery.cuulYq/orchestrator-20260727T005405Z.log`,
+  `/private/tmp/switchboard-stage7-rollback-claude.AE4Ehl/orchestrator-20260727T010518Z.log`,
+  and workspaces `16` and `18` as the accepted live evidence. Dry runs remain
+  offline.
 - **Rejected Slice 4 live attempt:** mixed-canary issue
   [#11](https://github.com/colin-prologue/switchboard-mixed-canary/issues/11)
   opened the Codex circuit on the injected `service_unavailable`, retained the
@@ -117,7 +127,9 @@
   is valid but insufficient for an agent that mutates its own dispatch state.
   Preserve issue #14, PR #15, clean workspace, two raw transcripts, and
   `/private/tmp/switchboard-stage7-circuit-recovery.WU0fWR/orchestrator-20260726T224344Z.log`.
-  Do not merge PR #15 or resume issue #14.
+  PR #104 corrected the boundary; issue #14 now carries its failure summary and
+  is closed as `not planned`, and PR #15 is closed unmerged. Do not resume #14
+  or reopen/merge #15.
 - **Stage 7 Slice 2.3 recovery/concurrency evidence:** mixed-provider
   integration tests prove a Codex circuit opening does not cancel another
   in-flight Codex worker or block fresh Claude work; the in-flight Codex
@@ -292,18 +304,14 @@
   standard-library `greeting.py`, one passing unittest, and no dependencies.
   [Issue #1](https://github.com/colin-prologue/switchboard-codex-canary/issues/1)
   and PRs #2 and #4 are merged. Standard gate-state labels are installed.
-- **Next single task:** review and merge the terminal-marker handoff correction.
-  Then close PR #15 without merging, comment on and close rejected issue #14
-  without deleting its preserved workspace, and run only the newly titled
-  `circuit-recovery` from the normal macOS Terminal. Retain its named evidence
-  and stop at human review. Merge that passing synthetic fixture PR and confirm
-  issue closure before running the separately named Claude-only rollback phase.
-- **Do not dispatch:** another mixed-canary issue until the terminal-marker
-  correction is reviewed and merged and rejected issue #14/PR #15 are
-  documented and closed, or any mixed process against an existing project
-  until both the isolated circuit canary and Claude-only rollback drill pass.
-  Do not resume issues #11, #12, or #14; merge PR #15; or rerun checkpoints 1
-  through 5.
+- **Next single task:** review and merge the Stage 7 completion-evidence record.
+  After that, any first low-percentage existing-project pilot requires its own
+  explicit scope, rollback, observability, and approval decision; this
+  completion record does not enable one.
+- **Do not dispatch:** another Stage 6 or Stage 7 mixed-canary checkpoint, or
+  any mixed process against an existing project without the separately reviewed
+  pilot decision. Do not resume issues #11, #12, or #14; reopen/merge PRs #13
+  or #15; or rerun checkpoints 1 through 5, circuit recovery, or rollback.
 
 Update this section at the end of every migration session. A future session
 must be able to continue from it without reconstructing prior chat context.
@@ -813,7 +821,7 @@ Claude-only mode. Begin with Codex opt-in or low weight.
 
 **Purpose:** make mixed execution observable and production-ready.
 
-**Status:** Slice 1 merged in PR #96. Accepted
+**Status:** Complete. Slice 1 merged in PR #96. Accepted
 [AgDR-025](../../.decisions/AgDR-025-provider-observability-taxonomy.md) splits
 the work into an observability-only taxonomy followed by separately reviewed
 circuit behavior. Slice 1 adds provider-tagged lifecycle outcomes and explicit
@@ -823,8 +831,12 @@ fallback, or any project binding. Its final full suite passed 401 tests. Accepte
 defines Slice 2's provider-scoped pause, no-retry-burn accounting, half-open
 recovery, and isolated implementation gates. Slice 2.1's pure policy merged in
 PR #98 after passing the full 428-test suite. Slice 2.2's scheduler integration
-is complete on its review branch and passes the full 432-test suite; project
-bindings and live launch behavior remain unchanged.
+merged in PR #99, recovery/concurrency evidence merged in PR #100, and the
+isolated procedure plus three corrective hardening changes merged in PRs #101
+through #104. Live issue #16 proved deterministic circuit recovery and live
+issue #18 proved immediate default Claude-only rollback; their fixture PRs #17
+and #19 merged and closed both issues. Existing-project bindings and production
+launch behavior remain Claude-only and unchanged.
 
 **Test:** provider metrics, usage-limit classification, circuit breaking,
 credential expiry, restart recovery, transcript handling, and rollback drills.
