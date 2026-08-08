@@ -473,8 +473,43 @@ class GitHubTracker:
                         ) from exc
                 raise
 
-        verify = await self.fetch_issue_states_by_ids([issue_id])
-        after = verify[0].labels if verify else []
+        # Final read-back with bounded retry (PR #115 round 7): both
+        # mutations may have applied — abandoning the handoff on a transient
+        # read failure would leave a completed board transition unlogged (the
+        # checkpoint asserts the success line). Ambiguity after retries is
+        # named, not silent.
+        verify = None
+        read_exc: TrackerError | None = None
+        for _ in range(3):
+            try:
+                verify = await self.fetch_issue_states_by_ids([issue_id])
+                break
+            except TrackerError as exc:
+                read_exc = exc
+        if verify is None:
+            raise TrackerError(
+                "handoff_swap_uncertain",
+                f"both label mutations were issued but the final read-back "
+                f"failed 3x; the board may already show the transition — "
+                f"inspect by hand: {read_exc}",
+            ) from read_exc
+        fetched_final = verify[0] if verify else None
+        after = fetched_final.labels if fetched_final else []
+        # Closure yield (PR #115 round 7): a human closing the issue between
+        # the preemption check and here is a terminal transition that WINS —
+        # never report a successful handoff on a closed issue. Compensate our
+        # label best-effort (label noise on a closed issue is cosmetic).
+        if fetched_final is not None and fetched_final.state.lower() == "closed":
+            if label in after:
+                try:
+                    await self.remove_labels(issue_id, [label])
+                except TrackerError:
+                    pass
+            raise TrackerError(
+                "handoff_preempted",
+                "issue was closed during the swap; the closure wins and the "
+                "handoff label was withdrawn (best-effort)",
+            )
         status_after = sorted(l for l in after if l.startswith("status:"))
         if status_after != [label]:
             # A concurrent transition landed between the preemption fetch and

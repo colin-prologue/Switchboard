@@ -200,7 +200,13 @@ class FakeTracker:
                     self.remove_labels_error = None
                     await self.remove_labels(issue_id, [label])
                 raise
-        all_after = self._issues_with_id(issue_id)[0].labels
+        final = self._issues_with_id(issue_id)[0]
+        if final.state.lower() == "closed":
+            # Mirror: closure wins mid-swap (PR #115 round 7).
+            if label in final.labels:
+                await self.remove_labels(issue_id, [label])
+            raise TrackerError("handoff_preempted", "closed during swap")
+        all_after = final.labels
         after = sorted(l for l in all_after if l.startswith("status:"))
         if after != [label]:
             # Mirror of the real tracker: a concurrent transition wins.
