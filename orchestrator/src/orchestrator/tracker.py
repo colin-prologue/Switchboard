@@ -411,7 +411,26 @@ class GitHubTracker:
         current = fetched.labels
         added_now = label not in current
         if added_now:
-            await self.add_labels(issue_id, [label])
+            try:
+                await self.add_labels(issue_id, [label])
+            except TrackerError as exc:
+                # The add is commit-ambiguous too (PR #115 round 6): it may
+                # have applied with the response lost, leaving a dual state
+                # normalization resolves to human-review — suppressing the
+                # retry that would repair it. Read back before deciding.
+                try:
+                    check = await self.fetch_issue_states_by_ids([issue_id])
+                except TrackerError as read_exc:
+                    raise TrackerError(
+                        "handoff_swap_uncertain",
+                        f"label add failed and the read-back also failed; no "
+                        f"further mutation attempted — inspect the issue by "
+                        f"hand: add={exc}, readback={read_exc}",
+                    ) from exc
+                applied = bool(check) and label in check[0].labels
+                if not applied:
+                    raise  # clean failure: nothing mutated, retry can rerun
+                # The add landed despite the error — continue the swap.
         stale = [l for l in current if l.startswith("status:") and l != label]
         if stale:
             try:
@@ -458,6 +477,29 @@ class GitHubTracker:
         after = verify[0].labels if verify else []
         status_after = sorted(l for l in after if l.startswith("status:"))
         if status_after != [label]:
+            # A concurrent transition landed between the preemption fetch and
+            # here (PR #115 round 6): e.g. a human moved in-progress -> todo
+            # mid-swap, so we removed only the stale label captured earlier
+            # and the issue now shows their status alongside ours — where
+            # ours wins normalization and suppresses their intent. The other
+            # actor's transition wins: remove OUR label, then report
+            # preemption so the session ends without claiming success.
+            if label in after and len(status_after) > 1:
+                try:
+                    await self.remove_labels(issue_id, [label])
+                except TrackerError as rollback_exc:
+                    raise TrackerError(
+                        "handoff_label_rollback_failed",
+                        f"concurrent transition during swap AND rollback "
+                        f"failed; dual-status state needs operator repair: "
+                        f"{status_after}, rollback={rollback_exc}",
+                    )
+                raise TrackerError(
+                    "handoff_preempted",
+                    f"concurrent transition landed during the swap "
+                    f"({status_after}); our label was removed and the newer "
+                    f"transition wins",
+                )
             raise TrackerError(
                 "handoff_label_verify_failed",
                 f"post-swap status labels {status_after} != [{label!r}]",

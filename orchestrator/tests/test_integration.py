@@ -200,11 +200,13 @@ class FakeTracker:
                     self.remove_labels_error = None
                     await self.remove_labels(issue_id, [label])
                 raise
-        after = sorted(
-            l for l in self._issues_with_id(issue_id)[0].labels
-            if l.startswith("status:")
-        )
+        all_after = self._issues_with_id(issue_id)[0].labels
+        after = sorted(l for l in all_after if l.startswith("status:"))
         if after != [label]:
+            # Mirror of the real tracker: a concurrent transition wins.
+            if label in all_after and len(after) > 1:
+                await self.remove_labels(issue_id, [label])
+                raise TrackerError("handoff_preempted", f"concurrent: {after}")
             raise TrackerError(
                 "handoff_label_verify_failed", f"{after} != [{label!r}]"
             )
