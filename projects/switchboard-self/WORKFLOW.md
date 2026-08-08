@@ -196,9 +196,18 @@ once the verdict is routed.
    weakest point. A PR touching those layers with no AgDR is incomplete and
    will be bounced at the merge gate.
 7. **Hand off, don't self-merge.** Commit, push the branch, open a PR with `gh`
-   linking this issue, attach evidence of the criteria passing, then move the
-   issue's `status:` label to the handoff state defined in `METHODOLOGY.md`
-   (default `status:human-review`). Stop there. A human merges.
+   linking this issue, attach evidence of the criteria passing. Then, as your
+   FINAL action, write the handoff evidence file `.run/handoff-evidence.json`
+   at the workspace root (issue #61):
+   ```
+   {"issue": "<this issue's number>", "pr_number": <PR number>, "head_sha": "<output of: git rev-parse HEAD>"}
+   ```
+   Do NOT edit any `status:*` label yourself — the orchestrator validates the
+   evidence after your session ends successfully (the PR must exist, be the
+   only open PR for your branch, and its head must match your `head_sha`) and
+   performs the single `status:human-review` transition itself. Invalid or
+   stale evidence is rejected with a diagnostic and no transition. Stop after
+   writing the file. A human merges.
 {% endif %}
 
 <!-- PHASE 4: before choosing any architecture, query the decision-corpus MCP for

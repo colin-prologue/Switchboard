@@ -275,8 +275,10 @@ if [ "$PHASE" = "circuit-recovery" ]; then
     || fail "log does not prove circuit recovery"
   [ -f "$WORKSPACE/.run/stage7-circuit-failure-injected" ] \
     || fail "deterministic failure marker is missing"
-  [ ! -e "$WORKSPACE/.run/stage7-handoff-ready" ] \
-    || fail "terminal handoff marker was not consumed"
+  [ -f "$WORKSPACE/.run/handoff-evidence.json" ] \
+    || fail "production handoff evidence file is missing (issue #61)"
+  grep -q "handoff evidence validated; issue moved to human-review" "$LOG" \
+    || fail "log does not prove orchestrator-owned handoff transition (issue #61)"
   LATEST_CODEX_TRANSCRIPT="$(find "$WORKSPACE/.run/transcripts" -maxdepth 1 \
     -type f -name 'codex-*.jsonl' -print | sort | tail -n 1)"
   [ -n "$LATEST_CODEX_TRANSCRIPT" ] \

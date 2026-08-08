@@ -27,8 +27,8 @@ hooks:
 agent:
   max_concurrent_agents: 1
   # This evidence workflow must enter after_run immediately after the single
-  # half-open recovery turn so the terminal handoff marker cannot trigger
-  # generic continuation turns while the synthetic issue remains active.
+  # half-open recovery turn; the handoff evidence file is validated in-loop by
+  # the orchestrator (issue #61) before any continuation could fire.
   max_turns: 1
   max_retry_backoff_ms: 300000
   max_sessions_per_issue: 3
@@ -72,9 +72,12 @@ python3 -m unittest discover -s tests -v
 ```
 
 When the criteria pass, commit the scoped change, push the current branch, and
-open a pull request whose body closes the issue. Then write the git-excluded
-`.run/stage7-handoff-ready` marker and return success without changing any
-issue labels: the canary's `after_run` hook owns the `status:human-review`
-transition after terminal Codex completion. Do not merge the pull request. If
-blocked, leave the issue active with a clear comment instead of weakening the
-sandbox or expanding scope.
+open a pull request whose body closes the issue. Then, as your FINAL action,
+write the git-excluded production handoff evidence file
+`.run/handoff-evidence.json` (issue #61):
+`{"issue": "<issue number>", "pr_number": <PR number>, "head_sha": "<git rev-parse HEAD>"}`
+and return success without changing any issue labels: the orchestrator
+validates the evidence (open PR, matching head, closes-linkage) and owns the
+single `status:human-review` transition after terminal Codex completion.
+Do not merge the pull request. If blocked, leave the issue active with a clear
+comment instead of weakening the sandbox or expanding scope.

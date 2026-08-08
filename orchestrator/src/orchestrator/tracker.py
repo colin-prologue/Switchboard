@@ -111,6 +111,21 @@ mutation($subjectId: ID!, $body: String!) {
 }
 """
 
+
+OPEN_PRS_FOR_BRANCH_QUERY = """
+query($owner: String!, $name: String!, $headRef: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(headRefName: $headRef, states: [OPEN], first: 5) {
+      nodes {
+        number
+        headRefOid
+        closingIssuesReferences(first: 10) { nodes { number } }
+      }
+    }
+  }
+}
+"""
+
 LABEL_ID_QUERY = """
 query($owner: String!, $name: String!, $label: String!) {
   repository(owner: $owner, name: $name) {
@@ -283,6 +298,71 @@ class GitHubTracker:
         await self._request(
             REMOVE_LABELS_MUTATION, {"labelableId": issue_id, "labelIds": label_ids}
         )
+
+    async def fetch_open_prs(self, head_ref: str) -> list[dict]:
+        """Open PRs whose head branch is `head_ref` (issue #61 handoff evidence).
+
+        Returns `[{"number": int, "head_sha": str}]`. The handoff validator
+        requires exactly one and matches its head oid against the evidence sha,
+        proving the workspace commit was pushed and the PR is current.
+        """
+        owner, repo = self._split_repo()
+        data = await self._request(
+            OPEN_PRS_FOR_BRANCH_QUERY,
+            {"owner": owner, "name": repo, "headRef": head_ref},
+        )
+        nodes = (
+            ((data.get("repository") or {}).get("pullRequests") or {}).get("nodes")
+            or []
+        )
+        out: list[dict] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            number = node.get("number")
+            head_sha = node.get("headRefOid")
+            closing = (node.get("closingIssuesReferences") or {}).get("nodes") or []
+            closes = [
+                c["number"] for c in closing
+                if isinstance(c, dict) and isinstance(c.get("number"), int)
+            ]
+            if isinstance(number, int) and isinstance(head_sha, str):
+                out.append({
+                    "number": number, "head_sha": head_sha, "closes": closes,
+                })
+        return out
+
+    async def set_sole_status_label(self, issue_id: str, label: str) -> None:
+        """Issue #61: the orchestrator-owned terminal handoff transition.
+
+        Make `label` the issue's ONLY `status:*` label — one tracker mutation
+        from the orchestrator's perspective (add + removals inside), followed
+        by a mandatory read-back verification: a textual claim of a transition
+        is not evidence the transition happened (issue #44 failure class).
+        Raises TrackerError("handoff_label_verify_failed") when the read-back
+        does not show exactly `[label]`.
+        """
+        issues = await self.fetch_issue_states_by_ids([issue_id])
+        if not issues:
+            raise TrackerError(
+                "handoff_label_verify_failed",
+                f"issue {issue_id} not fetchable before status swap",
+            )
+        current = issues[0].labels
+        if label not in current:
+            await self.add_labels(issue_id, [label])
+        stale = [l for l in current if l.startswith("status:") and l != label]
+        if stale:
+            await self.remove_labels(issue_id, stale)
+
+        verify = await self.fetch_issue_states_by_ids([issue_id])
+        after = verify[0].labels if verify else []
+        status_after = sorted(l for l in after if l.startswith("status:"))
+        if status_after != [label]:
+            raise TrackerError(
+                "handoff_label_verify_failed",
+                f"post-swap status labels {status_after} != [{label!r}]",
+            )
 
     async def _resolve_label_id(self, name: str) -> str:
         if name in self._label_id_cache:

@@ -120,7 +120,10 @@ def test_circuit_workflow_is_isolated_and_capacity_one(monkeypatch) -> None:
     assert mixed.codex.command == NATIVE_INJECTOR_COMMAND
     assert "stage7-circuit-after-run.sh" in cfg.hooks().after_run
     assert "recovery probe" in definition.prompt_template
-    assert ".run/stage7-handoff-ready" in definition.prompt_template
+    # issue #61: the canary agent writes the PRODUCTION evidence contract;
+    # the legacy ready-marker is gone.
+    assert ".run/handoff-evidence.json" in definition.prompt_template
+    assert "stage7-handoff-ready" not in definition.prompt_template
     assert "without changing" in definition.prompt_template
     assert "issue labels" in definition.prompt_template
     assert "Do not merge the pull request" in definition.prompt_template
@@ -205,191 +208,46 @@ def test_circuit_injector_fails_once_then_delegates_with_unchanged_io(
     assert stdin_file.read_text(encoding="utf-8") == "recovery prompt"
 
 
-def _prepare_handoff_workspace(
-    tmp_path: Path,
-    *,
-    terminal_transcript: bool,
-    ready_marker: bool = True,
-) -> tuple[Path, dict[str, str], Path]:
-    workspace = tmp_path / "14"
-    workspace.mkdir()
-    subprocess.run(
-        ["git", "init", "-b", "switchboard/issue-14"],
-        cwd=workspace,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=workspace,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=workspace,
-        check=True,
-    )
-    (workspace / "greeting.py").write_text("fixture = True\n", encoding="utf-8")
-    subprocess.run(["git", "add", "greeting.py"], cwd=workspace, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "fixture"],
-        cwd=workspace,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            "update-ref",
-            "refs/remotes/origin/switchboard/issue-14",
-            "HEAD",
-        ],
-        cwd=workspace,
-        check=True,
-    )
-    exclude = workspace / ".git" / "info" / "exclude"
-    with exclude.open("a", encoding="utf-8") as handle:
-        handle.write(".run/\n")
-    transcripts = workspace / ".run" / "transcripts"
-    transcripts.mkdir(parents=True)
-    final_record = (
-        '{"type":"turn.completed","usage":{}}\n'
-        if terminal_transcript
-        else '{"type":"item.completed","item":{"type":"agent_message"}}\n'
-    )
-    (transcripts / "codex-20260726T000000Z-1.jsonl").write_text(
-        '{"type":"turn.started"}\n' + final_record,
-        encoding="utf-8",
-    )
-    if ready_marker:
-        (workspace / ".run" / "stage7-handoff-ready").touch()
-
-    base_called = tmp_path / "base-called"
-    base_hook = tmp_path / "base-after-run"
-    base_hook.write_text(
-        f'#!/bin/sh\ntouch "{base_called}"\n',
-        encoding="utf-8",
-    )
-    base_hook.chmod(0o755)
-    gh_calls = tmp_path / "gh-calls"
-    fake_gh = tmp_path / "gh"
-    fake_gh.write_text(
-        "#!/bin/sh\n"
-        'printf "%s\\n" "$*" >>"$GH_CALLS"\n'
-        'case "$*" in\n'
-        '  *"--json number"*) printf "1\\n" ;;\n'
-        '  *"--json body"*) printf "Closes #14\\n" ;;\n'
-        "esac\n",
-        encoding="utf-8",
-    )
-    fake_gh.chmod(0o755)
-    env = {
-        **os.environ,
-        "SB_HOME": str(REPO_ROOT),
-        "SB_GITHUB_REPO": "colin-prologue/switchboard-mixed-canary",
-        "SWITCHBOARD_CANARY_BASE_AFTER_RUN": str(base_hook),
-        "SWITCHBOARD_CANARY_GH_BIN": str(fake_gh),
-        "GH_CALLS": str(gh_calls),
-    }
-    return workspace, env, base_called
-
-
-def test_stage7_handoff_hook_requires_terminal_codex_success(tmp_path: Path) -> None:
-    workspace, env, base_called = _prepare_handoff_workspace(
-        tmp_path,
-        terminal_transcript=False,
-    )
-
-    result = subprocess.run(
-        [str(HANDOFF_HOOK)],
-        cwd=workspace,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert base_called.is_file()
-    assert (workspace / ".run" / "stage7-handoff-ready").is_file()
-    assert not (tmp_path / "gh-calls").exists()
-    assert "latest Codex turn is incomplete" in result.stdout
-
-
-def test_stage7_handoff_hook_moves_only_verified_terminal_run(
+def test_stage7_handoff_hook_is_a_base_passthrough_with_repo_guard(
     tmp_path: Path,
 ) -> None:
-    workspace, env, base_called = _prepare_handoff_workspace(
-        tmp_path,
-        terminal_transcript=True,
+    """issue #61: the canary hook no longer validates or moves labels — that
+    ownership is production (orchestrator handoff validation + single swap).
+    The hook must call the base after_run, enforce the canary repo guard, and
+    perform no gh mutations regardless of evidence presence."""
+    workspace = tmp_path / "ws"
+    (workspace / ".run").mkdir(parents=True)
+    base_called = tmp_path / "base-called"
+    base_hook = tmp_path / "base.sh"
+    base_hook.write_text("#!/bin/sh\ntouch \"$BASE_CALLED\"\n", encoding="utf-8")
+    base_hook.chmod(0o755)
+    env = {
+        **os.environ,
+        "SB_HOME": str(tmp_path),
+        "SB_GITHUB_REPO": "colin-prologue/switchboard-mixed-canary",
+        "SWITCHBOARD_CANARY_BASE_AFTER_RUN": str(base_hook),
+        "BASE_CALLED": str(base_called),
+    }
+    (workspace / ".run" / "handoff-evidence.json").write_text(
+        '{"issue": "1", "pr_number": 1, "head_sha": "abc"}', encoding="utf-8"
     )
-
     result = subprocess.run(
-        [str(HANDOFF_HOOK)],
-        cwd=workspace,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+        [str(HANDOFF_HOOK)], cwd=workspace, env=env,
+        capture_output=True, text=True, check=False,
     )
-
     assert result.returncode == 0, result.stderr
     assert base_called.is_file()
-    assert not (workspace / ".run" / "stage7-handoff-ready").exists()
-    calls = (tmp_path / "gh-calls").read_text(encoding="utf-8")
-    assert calls.count("pr list") == 2
-    assert (
-        "issue edit 14 --repo colin-prologue/switchboard-mixed-canary "
-        "--add-label status:human-review --remove-label status:in-progress"
-        in calls
+    assert "orchestrator-owned" in result.stdout
+    # evidence file untouched — the orchestrator, not the hook, consumes it
+    assert (workspace / ".run" / "handoff-evidence.json").is_file()
+
+    wrong_repo = subprocess.run(
+        [str(HANDOFF_HOOK)], cwd=workspace,
+        env={**env, "SB_GITHUB_REPO": "colin-prologue/other"},
+        capture_output=True, text=True, check=False,
     )
-    assert "moved to human review after terminal Codex success" in result.stdout
-
-
-def test_stage7_handoff_hook_is_inert_without_ready_marker(tmp_path: Path) -> None:
-    workspace, env, base_called = _prepare_handoff_workspace(
-        tmp_path,
-        terminal_transcript=True,
-        ready_marker=False,
-    )
-
-    result = subprocess.run(
-        [str(HANDOFF_HOOK)],
-        cwd=workspace,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert base_called.is_file()
-    assert not (tmp_path / "gh-calls").exists()
-
-
-def test_stage7_handoff_hook_rejects_dirty_workspace(tmp_path: Path) -> None:
-    workspace, env, base_called = _prepare_handoff_workspace(
-        tmp_path,
-        terminal_transcript=True,
-    )
-    (workspace / "greeting.py").write_text("fixture = False\n", encoding="utf-8")
-
-    result = subprocess.run(
-        [str(HANDOFF_HOOK)],
-        cwd=workspace,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 1
-    assert base_called.is_file()
-    assert (workspace / ".run" / "stage7-handoff-ready").is_file()
-    assert not (tmp_path / "gh-calls").exists()
-    assert "handoff workspace is dirty" in result.stderr
+    assert wrong_repo.returncode != 0
+    assert "instead of" in wrong_repo.stderr
 
 
 def test_stage7_procedure_pins_evidence_and_unchanged_rollback(
@@ -421,7 +279,10 @@ def test_stage7_procedure_pins_evidence_and_unchanged_rollback(
         "worker completed .*issue_identifier=$ISSUE_NUMBER .*provider_id=codex"
         in source
     )
-    assert "terminal handoff marker was not consumed" in source
+    # issue #61: the launcher asserts the production handoff path, not the
+    # legacy consumed-marker behavior.
+    assert "production handoff evidence file is missing" in source
+    assert "handoff evidence validated; issue moved to human-review" in source
     assert "recovery transcript lacks terminal Codex success" in source
 
     rollback_definition = load_workflow(ROLLBACK_WORKFLOW)

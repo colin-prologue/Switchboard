@@ -108,6 +108,8 @@ class FakeTracker:
         self.comments: list[tuple[str, str]] = []
         self.labels_added: list[tuple[str, tuple[str, ...]]] = []
         self.labels_removed: list[tuple[str, tuple[str, ...]]] = []
+        self.open_prs: dict[str, list[dict]] = {}
+        self.sole_status_swaps: list[tuple[str, str]] = []
         self.add_labels_error: TrackerError | None = None  # set to simulate a write failure
         self.remove_labels_error: TrackerError | None = None
 
@@ -155,6 +157,33 @@ class FakeTracker:
         for issue in self._issues_with_id(issue_id):
             issue.labels = [lbl for lbl in issue.labels if lbl not in drop]
             self._after_label_write(issue)
+
+    async def fetch_open_prs(self, head_ref):
+        # issue #61 handoff surface: [{"number", "head_sha", "closes"}].
+        return [dict(pr) for pr in self.open_prs.get(head_ref, [])]
+
+    async def set_sole_status_label(self, issue_id, label):
+        # Mirror of the real tracker method: add + remove-other-status inside
+        # one call, then a read-back verification that derives state from
+        # labels the same way (fake fidelity — never hard-code the outcome).
+        issues = self._issues_with_id(issue_id)
+        if not issues:
+            raise TrackerError("handoff_label_verify_failed", "issue not found")
+        current = list(issues[0].labels)
+        if label not in current:
+            await self.add_labels(issue_id, [label])
+        stale = [l for l in current if l.startswith("status:") and l != label]
+        if stale:
+            await self.remove_labels(issue_id, stale)
+        after = sorted(
+            l for l in self._issues_with_id(issue_id)[0].labels
+            if l.startswith("status:")
+        )
+        if after != [label]:
+            raise TrackerError(
+                "handoff_label_verify_failed", f"{after} != [{label!r}]"
+            )
+        self.sole_status_swaps.append((issue_id, label))
 
     def _issues_with_id(self, issue_id):
         # candidates and states may hold DISTINCT Issue objects for one id (the
@@ -2007,3 +2036,103 @@ async def test_orchestrator_never_writes_gate_or_handoff_labels(harness):
     assert written <= ALLOWED_STATUS_LABELS             # only owned labels ever touched
     assert not (written & FORBIDDEN_STATUS_LABELS)      # never a gate/handoff/triage label
     assert tracker.comments == []                       # handoff not "released" — left alone
+
+# --- issue #61: terminal-safe handoff (orchestrator-owned transition) ---------
+
+import contextlib as _contextlib  # noqa: E402  (test-local, issue #61 block)
+import json as _json  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+
+
+def _git_ws(ws: Path) -> str:
+    """Make `ws` a real git repo (the handoff validator runs real git) and
+    return its HEAD sha."""
+    for args in (["init", "-q", "-b", "switchboard/issue-1"],
+                 ["-c", "user.email=t@t", "-c", "user.name=t",
+                  "commit", "-q", "--allow-empty", "-m", "seed"]):
+        _subprocess.run(["git", "-C", str(ws), *args], check=True,
+                        capture_output=True)
+    out = _subprocess.run(["git", "-C", str(ws), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+class HandoffRunner(FakeRunner):
+    """Succeeds like FakeRunner, but first git-inits the workspace and writes
+    the production evidence contract — the worker behavior the issue #61
+    prompt mandates. The paired FakeTracker (attached post-harness via
+    `.tracker`) gets a matching open PR. `evidence_overrides` injects defects;
+    `fail_with_evidence=True` reproduces the Stage 7 race (evidence exists,
+    provider result is a failure)."""
+
+    def __init__(self, *, evidence_overrides=None, fail_with_evidence=False):
+        super().__init__()
+        self.tracker: FakeTracker | None = None
+        self.evidence_overrides = evidence_overrides or {}
+        self.fail_with_evidence = fail_with_evidence
+
+    async def run_turn(self, workspace, prompt, resume_session_id, on_event,
+                       issue_id, agent_token=None):
+        head = _git_ws(Path(workspace))
+        run_dir = Path(workspace) / ".run"
+        run_dir.mkdir(exist_ok=True)
+        evidence = {"issue": "1", "pr_number": 5, "head_sha": head,
+                    **self.evidence_overrides}
+        (run_dir / "handoff-evidence.json").write_text(
+            _json.dumps(evidence), encoding="utf-8")
+        assert self.tracker is not None
+        self.tracker.open_prs["switchboard/issue-1"] = [
+            {"number": 5, "head_sha": head, "closes": [1]}]
+        result = await super().run_turn(
+            workspace, prompt, resume_session_id, on_event, issue_id,
+            agent_token=agent_token)
+        if self.fail_with_evidence:
+            return TurnResult(status="failed", session_id=result.session_id,
+                              error="provider died after evidence was written")
+        return result
+
+
+def _handoff_harness(tmp_path, monkeypatch, **runner_kw):
+    runner = HandoffRunner(**runner_kw)
+    orch, tracker, _, ws_root = _build_harness(tmp_path, monkeypatch,
+                                               runner=runner)
+    runner.tracker = tracker
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+    return orch, tracker, issue
+
+
+async def test_valid_handoff_swaps_to_sole_human_review(tmp_path, monkeypatch):
+    orch, tracker, issue = _handoff_harness(tmp_path, monkeypatch)
+    await orch._tick()
+    await wait_for(lambda: tracker.sole_status_swaps)
+    await wait_for(lambda: not orch.running)
+    status = sorted(l for l in issue.labels if l.startswith("status:"))
+    assert status == ["status:human-review"]
+    assert tracker.sole_status_swaps == [(issue.id, "status:human-review")]
+    # the triage provenance marker is not a status label and survives
+    assert "gate:triage-passed" in issue.labels
+
+
+async def test_stage7_race_failure_after_evidence_never_exposes_human_review(
+        tmp_path, monkeypatch):
+    orch, tracker, issue = _handoff_harness(
+        tmp_path, monkeypatch, fail_with_evidence=True)
+    await orch._tick()
+    await wait_for(lambda: not orch.running)
+    assert tracker.sole_status_swaps == []
+    assert "status:human-review" not in issue.labels
+
+
+async def test_invalid_evidence_is_diagnostic_not_transition(
+        tmp_path, monkeypatch, capfd):
+    orch, tracker, issue = _handoff_harness(
+        tmp_path, monkeypatch, evidence_overrides={"head_sha": "0" * 40})
+    await orch._tick()
+    await wait_for(lambda: not orch.running)
+    assert tracker.sole_status_swaps == []
+    assert "status:human-review" not in issue.labels
+    err = capfd.readouterr().err
+    assert "handoff evidence rejected" in err
+    assert "head_mismatch" in err
