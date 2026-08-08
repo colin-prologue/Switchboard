@@ -18,6 +18,13 @@ _CLAUDE_CODES: Mapping[str, FailureClass] = {
     "service_unavailable": FailureClass.PROVIDER_UNAVAILABLE,
 }
 
+# FORWARD-COMPATIBLE ONLY — unreachable on real output as of codex-cli
+# 0.146.0-alpha.3.1: ground truth (issue #109, tests/fixtures/
+# codex_cli_auth_401.jsonl) shows real `turn.failed` and `error` events carry
+# no `error.code`/`code` field, so `_classify` always falls through to
+# `_TEXT_PATTERNS` for Codex. Kept in case a future CLI adds typed codes;
+# every entry here must have a text-pattern equivalent derived from captured
+# output before it can be considered covered.
 _CODEX_CODES: Mapping[str, FailureClass] = {
     "authentication_expired": FailureClass.PROVIDER_AUTHENTICATION,
     "authentication_required": FailureClass.PROVIDER_AUTHENTICATION,
@@ -36,6 +43,11 @@ _TEXT_PATTERNS: tuple[tuple[FailureClass, tuple[re.Pattern[str], ...]], ...] = (
             re.compile(r"\blogin (?:has )?expired\b"),
             re.compile(r"\bnot logged in\b"),
             re.compile(r"\bauthentication required\b"),
+            # issue #109 ground truth (fixtures/codex_cli_auth_401.jsonl):
+            # logged-out codex exec fails with "unexpected status 401
+            # Unauthorized: Missing bearer or basic authentication in header".
+            re.compile(r"\b401 unauthorized\b"),
+            re.compile(r"\bmissing bearer or basic authentication\b"),
         ),
     ),
     (

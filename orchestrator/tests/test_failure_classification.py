@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from orchestrator.codex_runner import _error_code, _error_text
 from orchestrator.failure_classification import (
     classify_claude_failure,
     classify_codex_failure,
@@ -86,3 +90,61 @@ def test_codex_context_exhaustion_message_classified_via_text() -> None:
         classify_claude_failure(detail=CODEX_CONTEXT_EXHAUSTED_MESSAGE)
         is FailureClass.PROVIDER_CONTEXT_EXHAUSTED
     )
+
+
+# issue #109: fixture-driven ground truth — real codex-cli 0.146.0-alpha.3.1
+# output captured logged-out (see fixtures/README.md). Never hand-edit the
+# fixture; these tests assert against the REAL event shapes and strings.
+_FIXTURE = Path(__file__).parent / "fixtures" / "codex_cli_auth_401.jsonl"
+
+
+def _fixture_events() -> list[dict]:
+    return [
+        json.loads(line)
+        for line in _FIXTURE.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_no_real_codex_event_carries_an_error_code() -> None:
+    # Finding 1 of #109: _CODEX_CODES is unreachable — every real event lacks
+    # both `error.code` and top-level `code`. If a future CLI version starts
+    # emitting codes, this test fails on the refreshed fixture and _CODEX_CODES
+    # coverage must be re-evaluated (see comment on _CODEX_CODES).
+    events = _fixture_events()
+    assert events, "fixture is empty"
+    for event in events:
+        assert _error_code(event) is None, event
+
+
+def test_real_codex_turn_failed_auth_message_opens_auth_class() -> None:
+    # The terminal turn.failed from a real logged-out run must classify as
+    # PROVIDER_AUTHENTICATION via text (pre-#109 it fell to WORKER_FAILURE and
+    # the provider circuit never opened on a real auth outage).
+    events = _fixture_events()
+    turn_failed = [e for e in events if e.get("type") == "turn.failed"]
+    assert len(turn_failed) == 1
+    detail = _error_text(turn_failed[0])
+    assert "401 unauthorized" in detail.lower()
+    assert (
+        classify_codex_failure(code=_error_code(turn_failed[0]), detail=detail)
+        is FailureClass.PROVIDER_AUTHENTICATION
+    )
+
+
+def test_real_codex_intermediate_error_events_use_top_level_message() -> None:
+    # Finding: real intermediate `error` events carry a TOP-LEVEL `message`
+    # (not a nested error object). _error_text must extract it, and the
+    # extracted text must classify to the auth class, since the runner breaks
+    # and classifies on the first `error` event it sees.
+    events = _fixture_events()
+    intermediate = [e for e in events if e.get("type") == "error"]
+    assert intermediate, "fixture has no intermediate error events"
+    for event in intermediate:
+        assert "error" not in event, "real error events are not nested"
+        detail = _error_text(event)
+        assert detail, event
+        assert (
+            classify_codex_failure(code=_error_code(event), detail=detail)
+            is FailureClass.PROVIDER_AUTHENTICATION
+        )

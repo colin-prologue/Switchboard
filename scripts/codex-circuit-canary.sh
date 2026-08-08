@@ -9,9 +9,16 @@ FAILURE_MARKER="$RUN_DIR/stage7-circuit-failure-injected"
 mkdir -p "$RUN_DIR"
 
 if (set -C; : >"$FAILURE_MARKER") 2>/dev/null; then
+  # Real-shaped injection (issue #109): actual codex-cli 0.146.0-alpha.3.1
+  # failure events carry NO error.code — turn.failed nests error.message only,
+  # and intermediate error events use a top-level message. The message text
+  # below is the REAL captured 401 string (orchestrator/tests/fixtures/
+  # codex_cli_auth_401.jsonl) plus an injection marker; classification must
+  # travel the _TEXT_PATTERNS path, the only path real Codex traffic takes.
   printf '%s\n' \
     '{"type":"thread.started","thread_id":"stage7-circuit-injected-outage"}' \
-    '{"type":"error","error":{"code":"service_unavailable","message":"deterministic mixed-canary provider outage"}}'
+    '{"type":"turn.started"}' \
+    '{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses (mixed-canary injected outage)"}}'
   exit 1
 fi
 

@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+
+from orchestrator.failure_classification import classify_codex_failure
+from orchestrator.types import FailureClass
 from pathlib import Path
 
 import pytest
@@ -137,13 +140,20 @@ def test_circuit_injector_fails_once_then_delegates_with_unchanged_io(
 
     assert first.returncode == 1
     records = [json.loads(line) for line in first.stdout.splitlines()]
-    assert records[-1] == {
-        "type": "error",
-        "error": {
-            "code": "service_unavailable",
-            "message": "deterministic mixed-canary provider outage",
-        },
-    }
+    # issue #109: injection must be REAL-shaped — turn.failed nesting
+    # error.message with NO code (ground truth: fixtures/codex_cli_auth_401
+    # .jsonl), so the circuit path exercised is the _TEXT_PATTERNS path real
+    # Codex traffic takes.
+    terminal = records[-1]
+    assert terminal["type"] == "turn.failed"
+    assert "code" not in terminal["error"]
+    assert "401 unauthorized" in terminal["error"]["message"].lower()
+    assert (
+        classify_codex_failure(
+            code=None, detail=terminal["error"]["message"]
+        )
+        is FailureClass.PROVIDER_AUTHENTICATION
+    )
     assert (tmp_path / ".run" / "stage7-circuit-failure-injected").is_file()
 
     argv_file = tmp_path / "argv"

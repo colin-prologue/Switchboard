@@ -192,3 +192,17 @@ as accepted rollback evidence.
 Stage 7 is complete. Do not rerun either phase, shorten the circuit cooldown,
 induce real subscription exhaustion, or use an existing project without a
 separately reviewed pilot plan.
+
+## Accuracy note — Stage 7 circuit evidence (issue #109, 2026-08-08)
+
+The pre-#109 canary injected `{"type":"error","error":{"code":"service_unavailable",…}}`
+— a hand-authored shape carrying an `error.code`. Ground-truth capture
+(`orchestrator/tests/fixtures/codex_cli_auth_401.jsonl`, codex-cli
+0.146.0-alpha.3.1) shows real Codex failure events carry **no code**: the
+Stage 7 live evidence (AgDR-026, PRs #99–#104) therefore exercised the
+`_CODEX_CODES` lookup path, which real Codex traffic never takes. The circuit
+*mechanism* proven by that evidence (open/pause/recover concurrency) is not in
+doubt; its classification input shape was unrealistic. The canary now injects
+the real-shaped `turn.failed` with the captured 401 text, exercising the
+`_TEXT_PATTERNS` path production traffic actually uses. Re-validation of the
+Stage 7 checkpoints was deliberately NOT re-run (per #109 non-goals).
