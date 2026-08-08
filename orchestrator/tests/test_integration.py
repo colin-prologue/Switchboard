@@ -170,11 +170,19 @@ class FakeTracker:
         if not issues:
             raise TrackerError("handoff_label_verify_failed", "issue not found")
         current = list(issues[0].labels)
-        if label not in current:
+        added_now = label not in current
+        if added_now:
             await self.add_labels(issue_id, [label])
         stale = [l for l in current if l.startswith("status:") and l != label]
         if stale:
-            await self.remove_labels(issue_id, stale)
+            try:
+                await self.remove_labels(issue_id, stale)
+            except TrackerError:
+                # Mirror of the real tracker's compensating rollback.
+                if added_now:
+                    self.remove_labels_error = None
+                    await self.remove_labels(issue_id, [label])
+                raise
         after = sorted(
             l for l in self._issues_with_id(issue_id)[0].labels
             if l.startswith("status:")

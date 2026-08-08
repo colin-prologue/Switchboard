@@ -81,6 +81,27 @@ async def _git_output(workspace: Path, *args: str) -> str | None:
     return stdout.decode("utf-8", "replace").strip() or None
 
 
+async def _git_status_porcelain(workspace: Path) -> str | None:
+    """`git status --porcelain`, distinguishing FAILURE (None) from CLEAN ("").
+
+    `_git_output` collapses both into None (empty stdout is its miss signal),
+    which would let a corrupt/unreadable index pass as a clean worktree
+    (PR #115 review round 3).
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(workspace), "status", "--porcelain",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return stdout.decode("utf-8", "replace")
+
+
 def read_evidence(workspace: Path) -> HandoffEvidence | HandoffRejection | None:
     """Parse the evidence file. None = no file (worker not handing off)."""
     path = workspace / EVIDENCE_RELPATH
@@ -161,9 +182,13 @@ async def validate_handoff(
     # an incomplete implementation must not reach review. `.run/` is the
     # orchestrator's own workspace-local channel (evidence, transcripts) and
     # is excluded from the check.
-    porcelain = await _git_output(workspace, "status", "--porcelain")
+    porcelain = await _git_status_porcelain(workspace)
+    if porcelain is None:
+        return None, HandoffRejection(
+            "workspace_unreadable", "git status --porcelain failed"
+        )
     dirty = [
-        line for line in (porcelain or "").splitlines()
+        line for line in porcelain.splitlines()
         if line.strip() and not line[3:].startswith(".run/")
     ]
     if dirty:

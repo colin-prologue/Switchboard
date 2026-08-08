@@ -701,3 +701,43 @@ async def test_mint_failure_surfaces_as_tracker_error():
     with pytest.raises(TrackerError) as exc:
         await tracker.fetch_issue_states_by_ids(["I_1"])
     assert exc.value.code == "github_api_request"
+
+
+# --- issue #61: set_sole_status_label partial-swap rollback -------------------
+
+
+@pytest.mark.asyncio
+async def test_sole_status_swap_rolls_back_added_label_when_remove_fails():
+    """PR #115 round 3: add-then-remove-fails must not strand a dual-status
+    issue (sorted-first normalization would deactivate it). The method removes
+    the label it just added, restoring the pre-call state, then raises."""
+    state = {"remove_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "issue(" in body or "nodes(ids:" in body or "fetch" in body:
+            pass
+        if "removeLabelsFromLabelable" in body:
+            state["remove_calls"] += 1
+            if state["remove_calls"] == 1:
+                return graphql_response(errors=[{"message": "boom"}])
+            return graphql_response(data={"removeLabelsFromLabelable": {"clientMutationId": None}})
+        if "addLabelsToLabelable" in body:
+            state["add_ids"] = json.loads(body)["variables"]["labelIds"]
+            return graphql_response(data={"addLabelsToLabelable": {"clientMutationId": None}})
+        if "label(name:" in body or '"label"' in body:
+            name = json.loads(body)["variables"]["label"]
+            return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
+        # issue state fetch
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1,
+            labels=["status:in-progress", "gate:triage-passed"],
+        )]})
+
+    tracker, transport = make_tracker(handler)
+    with pytest.raises(TrackerError):
+        await tracker.set_sole_status_label("node-1", "status:human-review")
+    # remove was attempted twice: the failing stale-removal, then the rollback
+    assert state["remove_calls"] == 2
+    # the rollback removed exactly the label the method had just added
+    assert state["add_ids"] == ["id-status:human-review"]

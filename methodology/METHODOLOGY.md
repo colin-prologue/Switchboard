@@ -25,14 +25,15 @@ Dependencies use GitHub's native **blocked-by**; Symphony won't dispatch a
 ### Who writes which status label (four writers)
 
 One status label per issue is the workflow contract, and each label has exactly
-one owner. The orchestrator writes **only** its own three and never touches the
-others (issue #14 / AgDR-010):
+one owner. Worker agents write **no** status labels at all (issue #61 /
+AgDR-028): a worker's final action is the handoff evidence file, and the
+orchestrator performs the verified transition.
 
 | Label(s)                                        | Written by | When |
 |-------------------------------------------------|------------|------|
 | `status:drafting`, `status:plan-review`, `status:blocked` | **humans** | authoring/approving at the gates |
 | `status:triage` → `status:todo` \| `status:drafting`      | the **triage verifier agent** | on its PASS / NEEDS WORK verdict |
-| `status:human-review`                           | **worker agents** | at handoff (WORKFLOW.md §handoff) |
+| `status:human-review`                           | the **orchestrator** | after provider-turn success + validated handoff evidence (issue #61 / AgDR-028; workers only write `.run/handoff-evidence.json`) |
 | `status:todo` → `status:in-progress`, its revert, and `status:parked` | the **orchestrator** | claim taken / claim died / session cap |
 
 `status:in-progress` is **board visibility only, not a lock** — a label cannot

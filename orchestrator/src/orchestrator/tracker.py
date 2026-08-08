@@ -349,11 +349,31 @@ class GitHubTracker:
                 f"issue {issue_id} not fetchable before status swap",
             )
         current = issues[0].labels
-        if label not in current:
+        added_now = label not in current
+        if added_now:
             await self.add_labels(issue_id, [label])
         stale = [l for l in current if l.startswith("status:") and l != label]
         if stale:
-            await self.remove_labels(issue_id, stale)
+            try:
+                await self.remove_labels(issue_id, stale)
+            except TrackerError as exc:
+                # Partial swap: the new label is applied but the old one
+                # remains, and sorted-first normalization would deactivate the
+                # issue in that dual state — permanently divergent (PR #115
+                # review round 3). Compensate by removing the label we just
+                # added so the issue returns to its pre-call state and the
+                # retry path can repair it.
+                if added_now:
+                    try:
+                        await self.remove_labels(issue_id, [label])
+                    except TrackerError as rollback_exc:
+                        raise TrackerError(
+                            "handoff_label_rollback_failed",
+                            f"partial swap AND rollback failed; issue is in a "
+                            f"dual-status state needing operator repair: "
+                            f"swap={exc}, rollback={rollback_exc}",
+                        ) from exc
+                raise
 
         verify = await self.fetch_issue_states_by_ids([issue_id])
         after = verify[0].labels if verify else []

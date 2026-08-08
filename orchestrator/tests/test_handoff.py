@@ -212,3 +212,22 @@ async def test_run_dir_contents_do_not_count_as_dirty(workspace: Path) -> None:
     tracker = FakePRTracker([_pr_for(workspace)])
     evidence, rejection = await validate_handoff(tracker, workspace, "7")
     assert rejection is None and evidence is not None
+
+
+@pytest.mark.asyncio
+async def test_git_status_failure_is_rejected_not_treated_clean(
+    workspace: Path, monkeypatch
+) -> None:
+    # PR #115 round 3: a failing `git status` (corrupt/unreadable index) must
+    # reject as workspace_unreadable, never pass as a clean worktree.
+    import orchestrator.handoff as handoff_mod
+
+    async def broken_status(ws):
+        return None
+
+    monkeypatch.setattr(handoff_mod, "_git_status_porcelain", broken_status)
+    _write_evidence(workspace)
+    tracker = FakePRTracker([_pr_for(workspace)])
+    evidence, rejection = await validate_handoff(tracker, workspace, "7")
+    assert evidence is None and rejection.reason == "workspace_unreadable"
+    assert "status" in rejection.detail
