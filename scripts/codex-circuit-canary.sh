@@ -10,15 +10,18 @@ mkdir -p "$RUN_DIR"
 
 if (set -C; : >"$FAILURE_MARKER") 2>/dev/null; then
   # Real-shaped injection (issue #109): actual codex-cli 0.146.0-alpha.3.1
-  # failure events carry NO error.code — turn.failed nests error.message only,
-  # and intermediate error events use a top-level message. The message text
-  # below is the REAL captured 401 string (orchestrator/tests/fixtures/
-  # codex_cli_auth_401.jsonl) plus an injection marker; classification must
-  # travel the _TEXT_PATTERNS path, the only path real Codex traffic takes.
+  # failure events carry NO error.code — turn.failed nests error.message only
+  # (ground truth: orchestrator/tests/fixtures/codex_cli_auth_401.jsonl), so
+  # classification travels the _TEXT_PATTERNS path real Codex traffic takes.
+  # The text must classify PROVIDER_UNAVAILABLE — a COOLDOWN class — because
+  # this canary proves open→cooldown→half-open→recovery; an auth-class message
+  # would latch the circuit and never reach the probe (codex review, PR #113).
+  # No real unavailable string has been captured yet (fixtures/README.md lists
+  # it unverified); the text below is pattern-matching by construction.
   printf '%s\n' \
     '{"type":"thread.started","thread_id":"stage7-circuit-injected-outage"}' \
     '{"type":"turn.started"}' \
-    '{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses (mixed-canary injected outage)"}}'
+    '{"type":"turn.failed","error":{"message":"service temporarily unavailable: deterministic mixed-canary provider outage (real-shaped injection, #109)"}}'
   exit 1
 fi
 

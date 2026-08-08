@@ -147,12 +147,14 @@ def test_circuit_injector_fails_once_then_delegates_with_unchanged_io(
     terminal = records[-1]
     assert terminal["type"] == "turn.failed"
     assert "code" not in terminal["error"]
-    assert "401 unauthorized" in terminal["error"]["message"].lower()
+    # Must classify to a COOLDOWN class (PROVIDER_UNAVAILABLE), not a latched
+    # one — the recovery canary needs open_cooldown -> half-open -> recovery
+    # (run-stage7-circuit-canary.sh greps for exactly that transition).
     assert (
         classify_codex_failure(
             code=None, detail=terminal["error"]["message"]
         )
-        is FailureClass.PROVIDER_AUTHENTICATION
+        is FailureClass.PROVIDER_UNAVAILABLE
     )
     assert (tmp_path / ".run" / "stage7-circuit-failure-injected").is_file()
 

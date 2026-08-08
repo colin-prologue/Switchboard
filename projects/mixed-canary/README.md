@@ -203,6 +203,12 @@ Stage 7 live evidence (AgDR-026, PRs #99–#104) therefore exercised the
 `_CODEX_CODES` lookup path, which real Codex traffic never takes. The circuit
 *mechanism* proven by that evidence (open/pause/recover concurrency) is not in
 doubt; its classification input shape was unrealistic. The canary now injects
-the real-shaped `turn.failed` with the captured 401 text, exercising the
-`_TEXT_PATTERNS` path production traffic actually uses. Re-validation of the
+a real-shaped `turn.failed` (message-only, no code), exercising the
+`_TEXT_PATTERNS` path production traffic actually uses. Its message classifies
+`PROVIDER_UNAVAILABLE` (a cooldown class) rather than the captured auth text:
+authentication latches the circuit and would never reach the cooldown/half-open
+recovery this canary proves (codex review, PR #113). No real
+service-unavailable string is captured yet (fixtures/README.md lists it
+unverified), so the injected text is pattern-matching by construction — shape
+real, unavailable-text still synthetic. Re-validation of the
 Stage 7 checkpoints was deliberately NOT re-run (per #109 non-goals).
