@@ -54,6 +54,11 @@ python3 -m unittest discover -s tests -v
 ```
 
 When the criteria pass, commit the scoped change, push the current branch, open
-a pull request whose body closes the issue, and move the issue to
-`status:human-review`. Do not merge the pull request. If blocked, leave a clear
+a pull request whose body closes the issue, and write the git-excluded
+production handoff evidence file `.run/handoff-evidence.json` as your FINAL
+action (issue #61):
+`{"issue": "<issue number>", "pr_number": <PR number>, "head_sha": "<git rev-parse HEAD>"}`
+Do NOT change any issue labels — the orchestrator validates the evidence and
+owns the `status:human-review` transition after your turn ends successfully.
+Do not merge the pull request. If blocked, leave a clear
 issue comment instead of weakening the sandbox or expanding scope.
