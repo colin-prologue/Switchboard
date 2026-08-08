@@ -162,14 +162,25 @@ class FakeTracker:
         # issue #61 handoff surface: [{"number", "head_sha", "closes"}].
         return [dict(pr) for pr in self.open_prs.get(head_ref, [])]
 
-    async def set_sole_status_label(self, issue_id, label):
-        # Mirror of the real tracker method: add + remove-other-status inside
-        # one call, then a read-back verification that derives state from
-        # labels the same way (fake fidelity — never hard-code the outcome).
+    async def set_sole_status_label(
+            self, issue_id, label,
+            expected_status=("status:in-progress", "status:todo")):
+        # Mirror of the real tracker method: preemption guard, then add +
+        # remove-other-status inside one call, then a read-back verification
+        # that derives state from labels the same way (fake fidelity).
         issues = self._issues_with_id(issue_id)
         if not issues:
             raise TrackerError("handoff_label_verify_failed", "issue not found")
-        current = list(issues[0].labels)
+        fetched = issues[0]
+        if fetched.state.lower() == "closed":
+            raise TrackerError("handoff_preempted", "issue closed")
+        current_status = sorted(
+            l for l in fetched.labels if l.startswith("status:"))
+        if len(current_status) != 1 or current_status[0] not in expected_status:
+            raise TrackerError(
+                "handoff_preempted",
+                f"{current_status} not in {sorted(expected_status)}")
+        current = list(fetched.labels)
         added_now = label not in current
         if added_now:
             await self.add_labels(issue_id, [label])

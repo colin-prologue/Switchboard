@@ -741,3 +741,59 @@ async def test_sole_status_swap_rolls_back_added_label_when_remove_fails():
     assert state["remove_calls"] == 2
     # the rollback removed exactly the label the method had just added
     assert state["add_ids"] == ["id-status:human-review"]
+
+
+@pytest.mark.asyncio
+async def test_sole_status_swap_refuses_when_human_transition_preempted():
+    """PR #115 round 4: a human moving the issue (or closing it) between
+    provider success and the swap fetch must win — no mutations."""
+    mutations = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "Labelable" in body:
+            mutations["count"] += 1
+            return graphql_response(data={})
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1,
+            labels=["status:drafting"],  # human re-scoped it mid-turn
+        )]})
+
+    tracker, _ = make_tracker(handler)
+    with pytest.raises(TrackerError) as exc:
+        await tracker.set_sole_status_label("node-1", "status:human-review")
+    assert exc.value.code == "handoff_preempted"
+    assert mutations["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_prs_paginates_closing_references():
+    """PR #115 round 4: closing refs beyond the first page must be collected,
+    not truncated into a false pr_linkage_missing."""
+    state = {"pages": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        if "pullRequests(headRefName" in request.content.decode():
+            return graphql_response(data={"repository": {"pullRequests": {"nodes": [{
+                "number": 9,
+                "headRefOid": "abc",
+                "closingIssuesReferences": {
+                    "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+                    "nodes": [{"number": n} for n in range(1, 51)],
+                },
+            }]}}})
+        state["pages"] += 1
+        assert body["variables"]["prNumber"] == 9
+        return graphql_response(data={"repository": {"pullRequest": {
+            "closingIssuesReferences": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"number": 61}],
+            },
+        }}})
+
+    tracker, _ = make_tracker(handler)
+    prs = await tracker.fetch_open_prs("switchboard/issue-61")
+    assert state["pages"] == 1
+    assert prs[0]["number"] == 9
+    assert 61 in prs[0]["closes"] and 50 in prs[0]["closes"]

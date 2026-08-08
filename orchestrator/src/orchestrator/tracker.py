@@ -119,7 +119,23 @@ query($owner: String!, $name: String!, $headRef: String!) {
       nodes {
         number
         headRefOid
-        closingIssuesReferences(first: 10) { nodes { number } }
+        closingIssuesReferences(first: 50) {
+          pageInfo { hasNextPage endCursor }
+          nodes { number }
+        }
+      }
+    }
+  }
+}
+"""
+
+CLOSING_REFS_PAGE_QUERY = """
+query($owner: String!, $name: String!, $prNumber: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $prNumber) {
+      closingIssuesReferences(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { number }
       }
     }
   }
@@ -321,18 +337,41 @@ class GitHubTracker:
                 continue
             number = node.get("number")
             head_sha = node.get("headRefOid")
-            closing = (node.get("closingIssuesReferences") or {}).get("nodes") or []
+            refs = node.get("closingIssuesReferences") or {}
             closes = [
-                c["number"] for c in closing
+                c["number"] for c in (refs.get("nodes") or [])
                 if isinstance(c, dict) and isinstance(c.get("number"), int)
             ]
+            # PR #115 review round 4: a PR closing more issues than one page
+            # must not truncate — a missed reference would reject valid
+            # linkage and burn worker retries. Paginate the connection.
+            page = refs.get("pageInfo") or {}
+            while page.get("hasNextPage") and isinstance(number, int):
+                more = await self._request(
+                    CLOSING_REFS_PAGE_QUERY,
+                    {"owner": owner, "name": repo, "prNumber": number,
+                     "cursor": page.get("endCursor")},
+                )
+                refs = (
+                    (more.get("repository") or {}).get("pullRequest") or {}
+                ).get("closingIssuesReferences") or {}
+                closes.extend(
+                    c["number"] for c in (refs.get("nodes") or [])
+                    if isinstance(c, dict) and isinstance(c.get("number"), int)
+                )
+                page = refs.get("pageInfo") or {}
             if isinstance(number, int) and isinstance(head_sha, str):
                 out.append({
                     "number": number, "head_sha": head_sha, "closes": closes,
                 })
         return out
 
-    async def set_sole_status_label(self, issue_id: str, label: str) -> None:
+    async def set_sole_status_label(
+        self,
+        issue_id: str,
+        label: str,
+        expected_status: tuple[str, ...] = ("status:in-progress", "status:todo"),
+    ) -> None:
         """Issue #61: the orchestrator-owned terminal handoff transition.
 
         Make `label` the issue's ONLY `status:*` label — one tracker mutation
@@ -348,7 +387,28 @@ class GitHubTracker:
                 "handoff_label_verify_failed",
                 f"issue {issue_id} not fetchable before status swap",
             )
-        current = issues[0].labels
+        # Preemption guard (PR #115 review round 4): a human transition or
+        # closure landing between provider success and this fetch must WIN —
+        # never clobber it. The swap proceeds only from the expected active
+        # claim state: an open issue whose sole status label is one of
+        # `expected_status`.
+        fetched = issues[0]
+        if fetched.state.lower() == "closed":
+            raise TrackerError(
+                "handoff_preempted",
+                "issue was closed before the handoff swap; leaving it alone",
+            )
+        current_status = sorted(
+            l for l in fetched.labels if l.startswith("status:")
+        )
+        if len(current_status) != 1 or current_status[0] not in expected_status:
+            raise TrackerError(
+                "handoff_preempted",
+                f"issue status {current_status} is not an expected active "
+                f"claim state {sorted(expected_status)}; a newer transition "
+                f"wins and the handoff is refused",
+            )
+        current = fetched.labels
         added_now = label not in current
         if added_now:
             await self.add_labels(issue_id, [label])
