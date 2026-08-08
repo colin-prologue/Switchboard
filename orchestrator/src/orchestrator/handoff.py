@@ -35,6 +35,11 @@ from pathlib import Path
 
 EVIDENCE_RELPATH = Path(".run") / "handoff-evidence.json"
 
+# The per-issue branch convention established by hooks/before_run.sh and
+# required by the canary launchers' --head assertions. A handoff from any
+# other branch is refused before its PRs are even queried (PR #115 round 5).
+EXPECTED_BRANCH_PREFIX = "switchboard/issue-"
+
 
 def snapshot_evidence(workspace: Path) -> tuple[int, str] | None:
     """Pre-turn snapshot of the evidence file: (mtime_ns, sha256) or None when
@@ -202,6 +207,13 @@ async def validate_handoff(
     if branch is None or branch == "HEAD":
         return None, HandoffRejection(
             "workspace_unreadable", f"cannot resolve workspace branch (got {branch!r})"
+        )
+    expected_branch = f"{EXPECTED_BRANCH_PREFIX}{issue_identifier}"
+    if branch != expected_branch:
+        return None, HandoffRejection(
+            "branch_mismatch",
+            f"workspace is on {branch!r}, expected {expected_branch!r} "
+            f"(before_run.sh convention; canary launchers assert --head on it)",
         )
 
     prs = await tracker.fetch_open_prs(branch)

@@ -231,3 +231,15 @@ async def test_git_status_failure_is_rejected_not_treated_clean(
     evidence, rejection = await validate_handoff(tracker, workspace, "7")
     assert evidence is None and rejection.reason == "workspace_unreadable"
     assert "status" in rejection.detail
+
+
+@pytest.mark.asyncio
+async def test_alternate_branch_is_rejected_before_pr_query(workspace: Path) -> None:
+    # PR #115 round 5: a worker that switched off the before_run branch must
+    # be refused before its PRs are even queried.
+    _git(workspace, "checkout", "-q", "-b", "some/other-branch")
+    _write_evidence(workspace)
+    tracker = FakePRTracker([_pr_for(workspace)])
+    evidence, rejection = await validate_handoff(tracker, workspace, "7")
+    assert evidence is None and rejection.reason == "branch_mismatch"
+    assert tracker.queried_refs == []

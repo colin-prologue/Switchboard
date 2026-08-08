@@ -189,8 +189,14 @@ class FakeTracker:
             try:
                 await self.remove_labels(issue_id, stale)
             except TrackerError:
-                # Mirror of the real tracker's compensating rollback.
-                if added_now:
+                # Mirror of the real tracker: read back before compensating
+                # (a failed removal is commit-ambiguous — PR #115 round 5).
+                after = self._issues_with_id(issue_id)[0].labels
+                status_after = sorted(
+                    l for l in after if l.startswith("status:"))
+                if status_after == [label]:
+                    return
+                if added_now and label in after:
                     self.remove_labels_error = None
                     await self.remove_labels(issue_id, [label])
                 raise

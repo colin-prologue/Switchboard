@@ -711,27 +711,30 @@ async def test_sole_status_swap_rolls_back_added_label_when_remove_fails():
     """PR #115 round 3: add-then-remove-fails must not strand a dual-status
     issue (sorted-first normalization would deactivate it). The method removes
     the label it just added, restoring the pre-call state, then raises."""
-    state = {"remove_calls": 0}
+    state = {"remove_calls": 0, "added": False}
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = request.content.decode()
-        if "issue(" in body or "nodes(ids:" in body or "fetch" in body:
-            pass
         if "removeLabelsFromLabelable" in body:
             state["remove_calls"] += 1
             if state["remove_calls"] == 1:
+                # stale-removal fails AND genuinely does not apply
                 return graphql_response(errors=[{"message": "boom"}])
             return graphql_response(data={"removeLabelsFromLabelable": {"clientMutationId": None}})
         if "addLabelsToLabelable" in body:
             state["add_ids"] = json.loads(body)["variables"]["labelIds"]
+            state["added"] = True
             return graphql_response(data={"addLabelsToLabelable": {"clientMutationId": None}})
         if "label(name:" in body or '"label"' in body:
             name = json.loads(body)["variables"]["label"]
             return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
-        # issue state fetch
+        # issue state fetch — stateful: shows the applied add so the round-5
+        # read-back sees the true dual state and proceeds to rollback
+        labels = ["status:in-progress", "gate:triage-passed"]
+        if state["added"]:
+            labels = ["status:in-progress", "status:human-review", "gate:triage-passed"]
         return graphql_response(data={"nodes": [issue_node(
-            id_="node-1", number=1,
-            labels=["status:in-progress", "gate:triage-passed"],
+            id_="node-1", number=1, labels=labels,
         )]})
 
     tracker, transport = make_tracker(handler)
@@ -797,3 +800,33 @@ async def test_fetch_open_prs_paginates_closing_references():
     assert state["pages"] == 1
     assert prs[0]["number"] == 9
     assert 61 in prs[0]["closes"] and 50 in prs[0]["closes"]
+
+
+@pytest.mark.asyncio
+async def test_sole_status_swap_detects_applied_removal_despite_error():
+    """PR #115 round 5: a stale-removal that APPLIED but errored (lost
+    response) must be detected by read-back and treated as a completed swap —
+    never rolled back into a no-status stranded issue."""
+    state = {"removed": False, "remove_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "removeLabelsFromLabelable" in body:
+            state["remove_calls"] += 1
+            state["removed"] = True  # the mutation APPLIES...
+            return graphql_response(errors=[{"message": "response lost"}])  # ...but errors
+        if "addLabelsToLabelable" in body:
+            return graphql_response(data={"addLabelsToLabelable": {"clientMutationId": None}})
+        if '"label"' in body:
+            name = json.loads(body)["variables"]["label"]
+            return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
+        labels = ["gate:triage-passed", "status:human-review"] if state["removed"] \
+            else ["status:in-progress", "gate:triage-passed"]
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1, labels=labels,
+        )]})
+
+    tracker, _ = make_tracker(handler)
+    # completes without raising: read-back shows the swap landed
+    await tracker.set_sole_status_label("node-1", "status:human-review")
+    assert state["remove_calls"] == 1  # no rollback removal was attempted

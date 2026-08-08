@@ -417,13 +417,32 @@ class GitHubTracker:
             try:
                 await self.remove_labels(issue_id, stale)
             except TrackerError as exc:
-                # Partial swap: the new label is applied but the old one
-                # remains, and sorted-first normalization would deactivate the
-                # issue in that dual state — permanently divergent (PR #115
-                # review round 3). Compensate by removing the label we just
-                # added so the issue returns to its pre-call state and the
-                # retry path can repair it.
-                if added_now:
+                # A failed removal is COMMIT-AMBIGUOUS (PR #115 round 5): the
+                # mutation may have applied with the response lost. Blindly
+                # rolling back the added label would then strand the issue
+                # with NO status label — invisible to fetch_candidate_issues,
+                # worse than dual. Read back before compensating.
+                try:
+                    check = await self.fetch_issue_states_by_ids([issue_id])
+                except TrackerError as read_exc:
+                    raise TrackerError(
+                        "handoff_swap_uncertain",
+                        f"stale-removal failed and the read-back also failed; "
+                        f"no further mutation attempted — inspect the issue "
+                        f"by hand: swap={exc}, readback={read_exc}",
+                    ) from exc
+                after = check[0].labels if check else []
+                status_after = sorted(
+                    l for l in after if l.startswith("status:")
+                )
+                if status_after == [label]:
+                    # The removal actually applied — the swap is complete.
+                    return
+                # Removal genuinely did not apply: partial swap (dual state,
+                # sorted-first normalization would deactivate the issue —
+                # round 3). Compensate by removing the label we just added so
+                # the issue returns to its pre-call state and can retry.
+                if added_now and label in after:
                     try:
                         await self.remove_labels(issue_id, [label])
                     except TrackerError as rollback_exc:
