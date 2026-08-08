@@ -171,3 +171,44 @@ async def test_non_git_workspace_is_rejected_not_crashed(tmp_path: Path) -> None
     )
     evidence, rejection = await validate_handoff(FakePRTracker(), ws, "7")
     assert evidence is None and rejection.reason == "workspace_unreadable"
+
+
+@pytest.mark.asyncio
+async def test_stale_evidence_from_prior_turn_is_rejected(workspace: Path) -> None:
+    # PR #115 review: evidence surviving a failed turn must not validate on a
+    # later successful turn unless rewritten during that turn.
+    from orchestrator.handoff import snapshot_evidence
+
+    _write_evidence(workspace)
+    prior = snapshot_evidence(workspace)
+    tracker = FakePRTracker([_pr_for(workspace)])
+    evidence, rejection = await validate_handoff(
+        tracker, workspace, "7", prior_snapshot=prior)
+    assert evidence is None and rejection.reason == "evidence_not_fresh"
+
+    # Rewriting the file (even with identical fields) during the turn is fresh.
+    _write_evidence(workspace)
+    evidence, rejection = await validate_handoff(
+        tracker, workspace, "7", prior_snapshot=prior)
+    assert rejection is None and evidence is not None
+
+
+@pytest.mark.asyncio
+async def test_dirty_worktree_outside_run_dir_is_rejected(workspace: Path) -> None:
+    _write_evidence(workspace)
+    (workspace / "forgotten.py").write_text("x = 1\n", encoding="utf-8")
+    tracker = FakePRTracker([_pr_for(workspace)])
+    evidence, rejection = await validate_handoff(tracker, workspace, "7")
+    assert evidence is None and rejection.reason == "workspace_dirty"
+    assert "forgotten.py" in rejection.detail
+
+
+@pytest.mark.asyncio
+async def test_run_dir_contents_do_not_count_as_dirty(workspace: Path) -> None:
+    # .run/ is the orchestrator's own channel (evidence, transcripts) and is
+    # excluded from the clean-worktree guard.
+    _write_evidence(workspace)
+    (workspace / ".run" / "transcript.jsonl").write_text("{}", encoding="utf-8")
+    tracker = FakePRTracker([_pr_for(workspace)])
+    evidence, rejection = await validate_handoff(tracker, workspace, "7")
+    assert rejection is None and evidence is not None

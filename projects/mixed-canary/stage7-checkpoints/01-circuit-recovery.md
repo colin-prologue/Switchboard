@@ -13,9 +13,12 @@ and completes this issue without burning retry or session allowance.
 - `python3 -m unittest discover -s tests -v` passes.
 - Commit and push only the scoped fixture change.
 - Open a pull request whose body closes this issue when merged.
-- Write the git-excluded `.run/stage7-handoff-ready` marker, then return
-  success without changing issue labels. The canary hook owns the
-  `status:human-review` transition after terminal Codex completion.
+- As your FINAL action, write the git-excluded production handoff evidence
+  file `.run/handoff-evidence.json` (issue #61):
+  `{"issue": "<this issue's number>", "pr_number": <PR number>, "head_sha": "<git rev-parse HEAD>"}`
+  then return success without changing issue labels. The orchestrator
+  validates the evidence and owns the `status:human-review` transition after
+  terminal Codex completion.
 - Do not merge it.
 
 ## Non-goals

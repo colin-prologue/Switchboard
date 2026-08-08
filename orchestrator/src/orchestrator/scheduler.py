@@ -29,7 +29,7 @@ import httpx
 
 from .agent_runner import AgentRunner
 from .log import log
-from .handoff import validate_handoff
+from .handoff import snapshot_evidence, validate_handoff
 from .prompt import render_prompt
 from .provider_circuit import (
     CircuitState,
@@ -691,6 +691,9 @@ class Orchestrator:
                 # Fresh (cached) mint per turn: a session spanning the hourly
                 # installation-token expiry always injects a valid bot token.
                 agent_token = await self._agent_token(runner.turn_timeout_ms)
+                # issue #61 freshness: evidence must be (re)written during the
+                # turn that succeeds; leftovers from failed turns are stale.
+                evidence_snapshot = snapshot_evidence(ws.path)
                 result = await runner.run_turn(
                     ws.path, prompt, resume_session_id=session_id,
                     on_event=self._on_agent_event, issue_id=issue.id,
@@ -737,7 +740,8 @@ class Orchestrator:
                     # transitions; the workspace is preserved and the session
                     # continues so the worker can repair within its budget.
                     evidence, rejection = await validate_handoff(
-                        tracker, ws.path, issue.identifier)
+                        tracker, ws.path, issue.identifier,
+                        prior_snapshot=evidence_snapshot)
                     if evidence is not None:
                         try:
                             await tracker.set_sole_status_label(

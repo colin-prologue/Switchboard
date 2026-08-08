@@ -28,11 +28,27 @@ transcripts), so evidence never lands in PRs.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
 EVIDENCE_RELPATH = Path(".run") / "handoff-evidence.json"
+
+
+def snapshot_evidence(workspace: Path) -> tuple[int, str] | None:
+    """Pre-turn snapshot of the evidence file: (mtime_ns, sha256) or None when
+    absent. The scheduler captures this before EVERY provider turn; validation
+    then requires the file to have been created or changed during the turn
+    that succeeded — evidence left over from an earlier failed turn is stale
+    and must not transition the issue (PR #115 review finding)."""
+    path = workspace / EVIDENCE_RELPATH
+    try:
+        raw = path.read_bytes()
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        return None
+    return (mtime, hashlib.sha256(raw).hexdigest())
 
 
 @dataclass(frozen=True)
@@ -96,7 +112,10 @@ def read_evidence(workspace: Path) -> HandoffEvidence | HandoffRejection | None:
 
 
 async def validate_handoff(
-    tracker, workspace: Path, issue_identifier: str
+    tracker,
+    workspace: Path,
+    issue_identifier: str,
+    prior_snapshot: tuple[int, str] | None = None,
 ) -> tuple[HandoffEvidence | None, HandoffRejection | None]:
     """Full validation: (evidence, None) on success; (None, rejection) on any
     defect; (None, None) when no evidence file exists (not a handoff attempt).
@@ -109,6 +128,18 @@ async def validate_handoff(
         return None, None
     if isinstance(parsed, HandoffRejection):
         return None, parsed
+
+    # Freshness: the evidence must have been created or changed during the
+    # turn that just succeeded. `prior_snapshot` is the pre-turn state; an
+    # identical post-turn snapshot means this is leftover evidence from an
+    # earlier (failed/incomplete) turn — the Stage 7 race through the side
+    # door of a later unrelated success (PR #115 review).
+    if prior_snapshot is not None and snapshot_evidence(workspace) == prior_snapshot:
+        return None, HandoffRejection(
+            "evidence_not_fresh",
+            "evidence file unchanged since before this provider turn; a "
+            "handing-off worker must (re)write it in the turn that succeeds",
+        )
 
     if parsed.issue != issue_identifier:
         return None, HandoffRejection(
@@ -123,6 +154,23 @@ async def validate_handoff(
         return None, HandoffRejection(
             "head_mismatch",
             f"evidence head {parsed.head_sha} != workspace HEAD {head} (stale evidence)",
+        )
+
+    # Clean-worktree guard (parity with the retired canary hook): tracked
+    # modifications or untracked task files mean the PR omits workspace work —
+    # an incomplete implementation must not reach review. `.run/` is the
+    # orchestrator's own workspace-local channel (evidence, transcripts) and
+    # is excluded from the check.
+    porcelain = await _git_output(workspace, "status", "--porcelain")
+    dirty = [
+        line for line in (porcelain or "").splitlines()
+        if line.strip() and not line[3:].startswith(".run/")
+    ]
+    if dirty:
+        return None, HandoffRejection(
+            "workspace_dirty",
+            f"{len(dirty)} uncommitted path(s) outside .run/ "
+            f"(first: {dirty[0].strip()!r}); the PR omits workspace changes",
         )
 
     branch = await _git_output(workspace, "rev-parse", "--abbrev-ref", "HEAD")
