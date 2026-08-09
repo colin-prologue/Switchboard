@@ -1,4 +1,4 @@
-# AgDR-030 — NEEDS DECISION verdict class + body-hash unchanged-body fast-path
+# AgDR-031 — NEEDS DECISION verdict class + body-hash unchanged-body fast-path
 
 - **Status:** proposed (ratify at the merge gate)
 - **Date:** 2026-08-08
