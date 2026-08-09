@@ -314,6 +314,27 @@ def test_near_miss_config_keys_are_allowed(command, tmp_path):
     assert r.returncode == 0
 
 
+# --- help discovery (round 14, PR #136) ---------------------------------------
+# `gh pr merge --help` stays DENIED by design: cobra consumes `--help` as the
+# value of a preceding value-flag (`--body --help` merges, no help shown), so
+# token-presence help detection is a bypass class; the guard's smoke canary
+# (#133 human gate) also pins the denial. Discovery goes through `gh help`.
+
+@pytest.mark.parametrize("command", [
+    "gh help pr merge",
+    "gh help pr close",
+    "gh pr --help",
+])
+def test_gh_help_forms_are_allowed(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0
+
+
+def test_help_flag_on_denied_verb_stays_denied(tmp_path):
+    r = _run_bash("gh pr merge --help", tmp_path)
+    assert r.returncode == 2
+
+
 # --- line continuations, non-push config, alias smuggling (round 9, PR #136) --
 
 @pytest.mark.parametrize("command", [
