@@ -240,3 +240,25 @@ def test_repository_operand_starting_with_plus_is_not_a_refspec(tmp_path):
     # ...a refspec AFTER the repository still denies
     r2 = _run_bash("git push +remote +main", tmp_path)
     assert r2.returncode == 2
+
+
+# --- config-injected force + attached repo selector (round 6, PR #136) --------
+
+@pytest.mark.parametrize("command", [
+    "git -c remote.origin.push=+HEAD:refs/heads/main push origin",
+    "git -cremote.origin.push=+HEAD:refs/heads/main push origin",
+    "git --config-env remote.origin.push=FORCE_VAR push origin",
+])
+def test_config_injected_force_is_denied(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+
+
+@pytest.mark.parametrize("command", [
+    "git -c user.name=x push origin branch",             # non-push config fine
+    "git -c remote.origin.push=HEAD push origin",        # non-force push config fine
+    "gh pr review 1 -Ro/a --comment -b ok",              # attached repo value with 'a'
+])
+def test_benign_config_and_attached_repo_are_allowed(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0

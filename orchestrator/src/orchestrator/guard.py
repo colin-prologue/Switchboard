@@ -131,7 +131,8 @@ def _denied_shape(command: str) -> str | None:
                         # bare body/body-file consume their SEPARATED value
                         # (codex review r4, PR #136: `--body --approve` makes
                         # `--approve` the literal body text, not an approval)
-                        if a in ("-b", "--body", "-F", "--body-file"):
+                        if a in ("-b", "--body", "-F", "--body-file",
+                                 "-R", "--repo"):
                             i += 2
                             continue
                         if (
@@ -142,7 +143,9 @@ def _denied_shape(command: str) -> str | None:
                             or a.startswith("--approve=")
                             # bundled booleans, value-aware: `-am` denies,
                             # `-b=x`/`-ba` do not (b/F take values)
-                            or _bundled_bool(a, "a", "bF")
+                            # R takes a value too: -Ro/a's `a` is part of
+                            # the repo selector, not an approve (r6)
+                            or _bundled_bool(a, "a", "bFR")
                         ):
                             return "gh pr review --approve"
                         i += 1
@@ -151,7 +154,36 @@ def _denied_shape(command: str) -> str | None:
     if tokens[0] == "git":
         # Git accepts global options before the subcommand (`git -C . push`,
         # `git -c k=v push` — codex review, PR #136); locate `push` as the
-        # first non-flag token with global values consumed.
+        # first non-flag token with global values consumed. Before consuming,
+        # inspect -c / --config-env values: a `remote.<name>.push=+refspec`
+        # config IS a force push smuggled through a global flag (codex
+        # review r6 demonstrated it rewinding a remote), and a
+        # --config-env indirection hides the value in an env var we cannot
+        # read — deny any push-config key outright there (fail toward deny).
+        gi = 1
+        while gi < len(tokens) and tokens[gi].startswith("-"):
+            flag = tokens[gi]
+            source = None
+            value = None
+            if flag.startswith("-c") and not flag.startswith("--") and len(flag) > 2:
+                # attached short form: -cremote.origin.push=+x
+                source, value = "-c", flag[2:]
+            elif flag == "-c" or flag.split("=", 1)[0] == "--config-env":
+                source = flag.split("=", 1)[0]
+                if "=" in flag and source == "--config-env":
+                    value = flag.split("=", 1)[1]
+                elif gi + 1 < len(tokens):
+                    # bare form: the value is the next token (`-c k=v`)
+                    value = tokens[gi + 1]
+                    gi += 1
+            if value is not None:
+                key = value.split("=", 1)[0]
+                val = value.split("=", 1)[1] if "=" in value else ""
+                if key.endswith(".push") and (
+                    val.startswith("+") or source == "--config-env"
+                ):
+                    return f"git -c {key}=+... (force via push config)"
+            gi += 1
         rest = _skip_flags(tokens[1:], _GIT_GLOBAL_VALUE_FLAGS)
         if rest[:1] == ["push"]:
             args = rest[1:]
