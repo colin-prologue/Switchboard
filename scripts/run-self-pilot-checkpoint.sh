@@ -24,9 +24,21 @@ APP_ENV="$HOME/.config/switchboard/app.env"
 PREREQ_ISSUES="47 57 61 109"
 PHASE="${1:-}"
 DRY_RUN=0
-[ "${2:-}" = "--dry-run" ] && DRY_RUN=1
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+# Reject anything that is not exactly --dry-run BEFORE any live action: a
+# mistyped flag must fail loudly, never silently launch against the live
+# repository (PR #117 review).
+if [ "$#" -gt 2 ]; then
+  fail "too many arguments; usage: $0 <explicit-codex|rollback> [--dry-run]"
+fi
+if [ -n "${2:-}" ]; then
+  case "$2" in
+    --dry-run) DRY_RUN=1 ;;
+    *) fail "unknown argument: $2 (only --dry-run is accepted)" ;;
+  esac
+fi
 
 case "$PHASE" in
   explicit-codex)
