@@ -2292,7 +2292,7 @@ async def test_fold_signal_surfaces_once_per_process_and_writes_nothing(
     err = capfd.readouterr().err
     assert "fold signal detected" in err
     assert "verdict_comment_id=IC_verdict" in err
-    assert orch.fold_signals_seen == {"RE_1"}
+    assert orch.fold_signals_seen == {"RE_1:1:IC_verdict"}  # decision-identity key (PR #129 r1)
 
     # A gate-state issue is never dispatched, and part (a) writes NOTHING.
     assert runner.turns == []
@@ -2303,7 +2303,7 @@ async def test_fold_signal_surfaces_once_per_process_and_writes_nothing(
     orch._fold_last_poll_at = None
     await orch._tick()
     assert "fold signal detected" not in capfd.readouterr().err
-    assert orch.fold_signals_seen == {"RE_1"}
+    assert orch.fold_signals_seen == {"RE_1:1:IC_verdict"}  # decision-identity key (PR #129 r1)
 
 
 async def test_fold_poll_disabled_by_default_makes_no_calls(harness, monkeypatch):
