@@ -160,18 +160,11 @@ trap cleanup EXIT
 
 # --- supervise: durable assignment, then verified handoff ---------------------
 deadline=$((SECONDS + 2700))
-SEEN_PROVIDER=0
 STOP_STATUS=""
 while [ "$SECONDS" -lt "$deadline" ]; do
   kill -0 "$ORCHESTRATOR_PID" 2>/dev/null || fail "orchestrator exited early; see $LOG"
   LABELS="$(gh_clean issue view "$ISSUE_NUMBER" --repo "$REPO" \
     --json labels --jq '[.labels[].name] | join(",")')"
-  if [ "$SEEN_PROVIDER" = "0" ]; then
-    case "$LABELS" in *provider:codex*)
-      SEEN_PROVIDER=1
-      printf 'durable provider:codex assignment observed pre-claim\n' ;;
-    esac
-  fi
   case "$LABELS" in
     *status:human-review*) STOP_STATUS="human-review"; break ;;
     *status:parked*)       STOP_STATUS="parked"; break ;;
@@ -180,7 +173,22 @@ while [ "$SECONDS" -lt "$deadline" ]; do
 done
 [ "$STOP_STATUS" = "human-review" ] \
   || fail "pilot did not reach human-review (last state: ${STOP_STATUS:-timeout}); see $LOG"
-[ "$SEEN_PROVIDER" = "1" ] || fail "provider:codex was never observed on the issue"
+
+# Durable-assignment-before-claim is verified from ORCHESTRATOR LOG ORDER, not
+# label polling (PR #117 review: a fast dispatch outruns the first poll sample,
+# so observation order proves nothing). The persisted-assignment line must
+# precede the claim-visibility swap line in the log stream.
+ASSIGN_LINE="$(grep -n "mixed provider assignment persisted" "$LOG" | head -1 | cut -d: -f1)"
+CLAIM_LINE="$(grep -nE "dispatched|in-progress label" "$LOG" | head -1 | cut -d: -f1)"
+[ -n "$ASSIGN_LINE" ] || fail "log does not show a persisted provider assignment"
+[ -n "$CLAIM_LINE" ] || fail "log does not show the claim/dispatch"
+[ "$ASSIGN_LINE" -lt "$CLAIM_LINE" ] \
+  || fail "provider assignment (log line $ASSIGN_LINE) did not precede the claim (line $CLAIM_LINE)"
+FINAL_LABELS="$(gh_clean issue view "$ISSUE_NUMBER" --repo "$REPO" \
+  --json labels --jq '[.labels[].name] | join(",")')"
+case "$FINAL_LABELS" in *provider:codex*) ;; *)
+  fail "durable provider:codex label is missing at handoff" ;;
+esac
 
 # --- evidence assertions (issue #107 AC) --------------------------------------
 WORKSPACE="$SB_WORKSPACE_ROOT/$ISSUE_NUMBER"

@@ -22,6 +22,18 @@ polling:
 workspace:
   root: "/Users/colindwan/Developer/switchboard-workspaces/switchboard-self"
 
+hooks:
+  # Hooks run with cwd == the per-issue workspace dir. They derive the issue
+  # number from the dir name and the repo/base from the exported project.env.
+  after_create: |
+    "$SB_HOME/hooks/after_create.sh"
+  before_run: |
+    "$SB_HOME/hooks/before_run.sh"
+  after_run: |
+    "$SB_HOME/hooks/after_run.sh"
+  timeout_ms: 120000
+
+
 agent:
   max_concurrent_agents: 1
   max_turns: 100
