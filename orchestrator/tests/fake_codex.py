@@ -54,6 +54,28 @@ elif scenario == "provider_error":
             "message": os.environ.get("FAKE_CODEX_ERROR_DETAIL", "provider failed"),
         },
     })
+elif scenario == "replay_fixture":
+    # Stream a committed ground-truth capture byte-for-byte. Never re-encode
+    # the lines as dicts — the point is that the runner sees exactly what the
+    # real CLI emitted (tests/fixtures/README.md).
+    sys.stdout.buffer.write(Path(os.environ["FAKE_CODEX_FIXTURE"]).read_bytes())
+    sys.stdout.buffer.flush()
+elif scenario == "recovered":
+    # Transient reconnect blips mid-turn, then the CLI recovers (issue #114).
+    emit({"type": "thread.started", "thread_id": "codex-recovered"})
+    emit({"type": "turn.started"})
+    emit({"type": "error", "message": "Reconnecting... 1/5 (connection reset)"})
+    emit({"type": "error", "message": "Reconnecting... 2/5 (connection reset)"})
+    emit({
+        "type": "item.completed",
+        "item": {"id": "item-1", "type": "agent_message", "text": "done"},
+    })
+    emit({"type": "turn.completed", "usage": {"input_tokens": 7, "output_tokens": 11}})
+elif scenario == "error_then_error":
+    # Two non-terminal errors then EOF: the terminal-most one classifies.
+    emit({"type": "thread.started", "thread_id": "codex-error-then-error"})
+    emit({"type": "error", "message": "Reconnecting... 1/5 (connection reset)"})
+    emit({"type": "error", "message": "Usage limit reached"})
 elif scenario in {"turn_timeout", "hang"}:
     emit({"type": "thread.started", "thread_id": "codex-hang"})
     if path := os.environ.get("FAKE_CODEX_PID_FILE"):
