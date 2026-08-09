@@ -1126,3 +1126,93 @@ def test_build_credentials_missing_bot_identity_fails_loud(tmp_path: Path):
         build_credentials(cfg.tracker(), env, client=None)
     assert exc_info.value.code == "incomplete_app_credentials"
     assert "SB_APP_BOT_LOGIN" in str(exc_info.value)
+
+
+# --- fold.operator_logins (issue #51 part a) ----------------------------------
+#
+# The operator allowlist is the ONLY identity surface fold detection has. A
+# silently-disabled allowlist is indistinguishable from "the operator hasn't
+# reacted yet", so malformed config must fail loudly at startup instead.
+
+def _fold_cfg(tmp_path: Path, block: str) -> Config:
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        f"{block}"
+        "---\n"
+        "body\n"
+    )
+    return Config(load_workflow(p), tmp_path)
+
+
+def test_fold_block_absent_disables_detection(tmp_path: Path):
+    assert _fold_cfg(tmp_path, "").fold().operator_logins == ()
+
+
+def test_fold_empty_list_disables_detection(tmp_path: Path):
+    cfg = _fold_cfg(tmp_path, "fold:\n  operator_logins: []\n")
+    assert cfg.fold().operator_logins == ()
+
+
+def test_fold_logins_are_lowercased_and_deduped(tmp_path: Path):
+    cfg = _fold_cfg(
+        tmp_path,
+        "fold:\n  operator_logins: [\"Colin-Prologue\", \" colin-prologue \", \"other\"]\n",
+    )
+    # GitHub logins are case-insensitive; the stored form is canonical so the
+    # detector can compare without re-normalizing at every call site.
+    assert cfg.fold().operator_logins == ("colin-prologue", "other")
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "fold: not-a-map\n",
+        "fold:\n  operator_logins: colin\n",
+        "fold:\n  operator_logins: [\"\"]\n",
+        "fold:\n  operator_logins: [123]\n",
+        "fold:\n  operator_lgoins: [\"colin\"]\n",  # typo'd key must not pass silently
+    ],
+)
+def test_fold_malformed_config_raises(tmp_path: Path, block: str):
+    with pytest.raises(WorkflowError) as exc_info:
+        _fold_cfg(tmp_path, block).fold()
+    assert exc_info.value.code == "workflow_parse_error"
+
+
+def test_validate_dispatch_forces_fold_validation(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        "  api_key: $GITHUB_TOKEN\n"
+        "fold:\n"
+        "  operator_logins: 7\n"
+        "---\n"
+        "body\n"
+    )
+    with pytest.raises(WorkflowError) as exc_info:
+        validate_dispatch(Config(load_workflow(p), tmp_path))
+    assert exc_info.value.code == "workflow_parse_error"
+
+
+def test_real_workflow_base_declares_an_empty_fold_allowlist(tmp_path: Path):
+    """The scaffold ships detection OFF: an allowlist nobody vetted must never
+    grant fold authority by default."""
+    real_path = Path(__file__).resolve().parents[2] / "workflow" / "WORKFLOW.base.md"
+    substituted = (
+        real_path.read_text(encoding="utf-8")
+        .replace("{{REPO}}", "acme/widgets")
+        .replace("{{WORKSPACE_ROOT}}", "/tmp/ws")
+        .replace("{{MAX_AGENTS}}", "10")
+        .replace("{{CONVENTION_ROOT}}", "")
+    )
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(substituted)
+    assert Config(load_workflow(p), tmp_path).fold().operator_logins == ()

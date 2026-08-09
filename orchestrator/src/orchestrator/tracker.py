@@ -28,7 +28,14 @@ import httpx
 
 from orchestrator.auth import AppInstallationTokenProvider, StaticTokenProvider
 from orchestrator.log import log
-from orchestrator.types import BlockerRef, Issue, TrackerConfig, TrackerError
+from orchestrator.types import (
+    BlockerRef,
+    CommentReaction,
+    Issue,
+    IssueComment,
+    TrackerConfig,
+    TrackerError,
+)
 
 # --- GraphQL query/mutation constants (core §11.2) --------------------------
 
@@ -91,6 +98,36 @@ query($owner: String!, $name: String!, $after: String) {{
 }}
 """
 
+# fetch_issue_comments: verdict-comment fold-signal detection (issue #51 part a).
+# GitHub issue comments have no reply threading, so every comment is top-level
+# and the connection is flat. The login field on a reaction is `user`, NOT
+# `author` (only Comment-ish types carry `author`) — asking for `author` here is
+# a schema error, which is why this query's exact shape is pinned by a test.
+# Reactions are read as full nodes rather than `reactionGroups` because the
+# per-reaction node id is the dedupe key and the reacting login must be matched
+# against the operator allowlist — presence alone is not enough.
+ISSUE_COMMENTS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      comments(first: 50, after: $after) {
+        nodes {
+          id
+          body
+          createdAt
+          author { login }
+          reactions(first: 100) {
+            pageInfo { hasNextPage endCursor }
+            nodes { id content createdAt user { login } }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
 # fetch_issue_states_by_ids: reconciliation by node id.
 ISSUES_BY_IDS_QUERY = f"""
 query($ids: [ID!]!) {{
@@ -111,6 +148,19 @@ mutation($subjectId: ID!, $body: String!) {
 }
 """
 
+
+COMMENT_REACTIONS_PAGE_QUERY = """
+query($commentId: ID!, $cursor: String) {
+  node(id: $commentId) {
+    ... on IssueComment {
+      reactions(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id content createdAt user { login } }
+      }
+    }
+  }
+}
+"""
 
 OPEN_PRS_FOR_BRANCH_QUERY = """
 query($owner: String!, $name: String!, $headRef: String!) {
@@ -251,6 +301,95 @@ class GitHubTracker:
         owner, name = self._split_repo()
         raw_issues = await self._paginate(CLOSED_ISSUES_QUERY, {"owner": owner, "name": name})
         return [self._normalize_issue(raw) for raw in raw_issues]
+
+    async def fetch_open_issues_by_status(self, status_names: list[str]) -> list[Issue]:
+        """OPEN issues whose normalized state is one of `status_names`.
+
+        Owned extension (issue #51 part a). `fetch_candidate_issues` filters to
+        `cfg.active_states`, and `fetch_issues_by_states` only has a GitHub-side
+        form for CLOSED — so neither can see a *gate* state like `drafting` or
+        `decision`, which is exactly the set the fold poller must watch. This
+        reuses CANDIDATE_ISSUES_QUERY (already parameterized on `states`) with
+        the same client-side `issue.state` filter `fetch_candidate_issues`
+        applies, against an explicit list instead of the active set. Reading
+        gate states here has NO dispatch side-effect: dispatch eligibility still
+        keys off `active_states`, which is untouched.
+
+        An empty request list makes zero API calls (core §17.3).
+        """
+        wanted = {s.strip().lower() for s in status_names if s and s.strip()}
+        if not wanted:
+            return []
+        owner, name = self._split_repo()
+        raw_issues = await self._paginate(
+            CANDIDATE_ISSUES_QUERY, {"owner": owner, "name": name, "states": ["OPEN"]}
+        )
+        issues = [self._normalize_issue(raw) for raw in raw_issues]
+        return [issue for issue in issues if issue.state in wanted]
+
+    async def fetch_issue_comments(self, issue_number: str | int) -> list[IssueComment]:
+        """Top-level comments on one issue, with their reactions (issue #51).
+
+        Read-only. Ordered oldest-first as GitHub returns them, which is the
+        order the fold binding rule ("the most recent verdict comment preceding
+        this one") depends on.
+        """
+        owner, name = self._split_repo()
+        try:
+            number = int(issue_number)
+        except (TypeError, ValueError) as exc:
+            raise TrackerError(
+                "github_unknown_payload",
+                f"issue identifier {issue_number!r} is not a number",
+            ) from exc
+
+        nodes: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            data = await self._request(
+                ISSUE_COMMENTS_QUERY,
+                {"owner": owner, "name": name, "number": number, "after": after},
+            )
+            issue = (data.get("repository") or {}).get("issue")
+            if issue is None:
+                raise TrackerError(
+                    "github_unknown_payload",
+                    f"issue #{number} not found in repository payload",
+                )
+            conn = issue.get("comments")
+            if not isinstance(conn, dict):
+                raise TrackerError(
+                    "github_unknown_payload", "missing 'issue.comments' connection"
+                )
+            page_nodes = conn.get("nodes")
+            page_info = conn.get("pageInfo")
+            if page_nodes is None or page_info is None:
+                raise TrackerError(
+                    "github_unknown_payload", "missing comments nodes/pageInfo"
+                )
+            nodes.extend(n for n in page_nodes if isinstance(n, dict))
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if after is None:
+                raise TrackerError(
+                    "github_missing_end_cursor", "hasNextPage true but endCursor missing"
+                )
+        # PR #129 review: a comment with >100 reactions truncates the nested
+        # connection — paginate each such comment's reactions to completion so
+        # an operator signal beyond the first page is never silently missed.
+        for raw in nodes:
+            rc = raw.get("reactions") or {}
+            page = rc.get("pageInfo") or {}
+            while page.get("hasNextPage"):
+                more = await self._request(
+                    COMMENT_REACTIONS_PAGE_QUERY,
+                    {"commentId": raw.get("id"), "cursor": page.get("endCursor")},
+                )
+                rconn = ((more.get("node") or {}).get("reactions")) or {}
+                (rc.setdefault("nodes", [])).extend(rconn.get("nodes") or [])
+                page = rconn.get("pageInfo") or {}
+        return [self._normalize_comment(node) for node in nodes]
 
     async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
         """Active-run reconciliation by GraphQL node id.
@@ -710,6 +849,38 @@ class GitHubTracker:
             blocked_by=blocked_by,
             created_at=_parse_iso8601(raw.get("createdAt")),
             updated_at=_parse_iso8601(raw.get("updatedAt")),
+        )
+
+    @staticmethod
+    def _normalize_comment(raw: dict[str, Any]) -> IssueComment:
+        """Normalize one comment node (issue #51 part a).
+
+        `author`/`user` are null for deleted accounts, so logins stay
+        `str | None` — a null login can never match the operator allowlist,
+        which is the safe direction.
+        """
+        author = raw.get("author") or {}
+        login = author.get("login") if isinstance(author, dict) else None
+        reactions = []
+        for node in ((raw.get("reactions") or {}).get("nodes") or []):
+            if not isinstance(node, dict) or not node.get("id"):
+                continue
+            user = node.get("user") or {}
+            reactor = user.get("login") if isinstance(user, dict) else None
+            reactions.append(
+                CommentReaction(
+                    id=node["id"],
+                    content=str(node.get("content") or ""),
+                    login=reactor.strip().lower() if isinstance(reactor, str) else None,
+                    created_at=_parse_iso8601(node.get("createdAt")),
+                )
+            )
+        return IssueComment(
+            id=raw["id"],
+            body=raw.get("body") or "",
+            login=login.strip().lower() if isinstance(login, str) else None,
+            created_at=_parse_iso8601(raw.get("createdAt")),
+            reactions=tuple(reactions),
         )
 
 

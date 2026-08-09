@@ -26,6 +26,7 @@ from .types import (
     AgentConfig,
     ClaudeConfig,
     CodexConfig,
+    FoldConfig,
     HooksConfig,
     MixedExecutionConfig,
     TrackerConfig,
@@ -254,6 +255,53 @@ class Config:
                 " (a non-positive interval hot-loops the tracker API)",
             )
         return value
+
+    # -- fold (issue #51 part a: operator fold-signal detection) ---------------
+
+    def fold(self) -> FoldConfig:
+        """Operator allowlist for fold-signal detection.
+
+        Absent block, absent key, or an empty list -> detection disabled (the
+        default; the poller then makes zero API calls). Everything else is
+        validated strictly: a typo'd key or a scalar where a list belongs must
+        fail loudly at startup rather than silently disable the loop — a
+        silently-disabled approval channel looks identical to "the operator
+        hasn't reacted yet".
+        """
+        raw = self._config.get("fold")
+        if raw is None:
+            return FoldConfig()
+        if not isinstance(raw, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"fold must be a map, got {type(raw).__name__}",
+            )
+        unknown = [key for key in raw if key != "operator_logins"]
+        if unknown:
+            raise WorkflowError(
+                "workflow_parse_error",
+                "fold contains unknown fields: "
+                + ", ".join(sorted(map(str, unknown))),
+            )
+        logins_raw = raw.get("operator_logins", [])
+        if not isinstance(logins_raw, list):
+            raise WorkflowError(
+                "workflow_parse_error",
+                "fold.operator_logins must be a list of GitHub logins, got "
+                f"{type(logins_raw).__name__}",
+            )
+        logins: list[str] = []
+        for value in logins_raw:
+            if not isinstance(value, str) or not value.strip():
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    "fold.operator_logins entries must be non-empty strings, "
+                    f"got {value!r}",
+                )
+            login = value.strip().lower()
+            if login not in logins:  # duplicates are harmless; keep it canonical
+                logins.append(login)
+        return FoldConfig(operator_logins=tuple(logins))
 
     # -- workspace ---------------------------------------------------------------
 
@@ -840,3 +888,4 @@ def validate_dispatch(cfg: Config, *, provider_id: str = "claude") -> None:
     cfg.hooks()
     cfg.workspace_root()
     cfg.polling_interval_ms()
+    cfg.fold()

@@ -46,6 +46,38 @@ class Issue:
     updated_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class CommentReaction:
+    """One reaction on an issue comment (issue #51 part a).
+
+    `id` is the reaction's GraphQL node id — the per-process dedupe key for a
+    reaction-channel fold signal. `content` is GitHub's enum verbatim
+    (`THUMBS_UP` / `THUMBS_DOWN` / …); `login` is the reacting user's login,
+    read from the `user { login }` field (reactions have no `author`).
+    """
+
+    id: str
+    content: str
+    login: str | None
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class IssueComment:
+    """One top-level issue comment plus its reactions (issue #51 part a).
+
+    GitHub issue comments have NO reply threading — every comment is top-level,
+    which is why `/fold` binding needs an explicit rule (see `fold.py`) while a
+    reaction is already comment-bound.
+    """
+
+    id: str
+    body: str
+    login: str | None
+    created_at: datetime | None = None
+    reactions: tuple[CommentReaction, ...] = ()
+
+
 # --- workflow definition (core §4.1.2) ---------------------------------------
 
 @dataclass
@@ -112,6 +144,24 @@ class CodexConfig:
     turn_timeout_ms: int = 3600000
     read_timeout_ms: int = 30000
     stall_timeout_ms: int = 300000
+
+
+@dataclass(frozen=True)
+class FoldConfig:
+    """Operator identity for fold-signal detection (issue #51 part a).
+
+    `operator_logins` is an ALLOWLIST of GitHub logins whose 👍/👎 reactions and
+    `/fold` // `/no-fold` comments count as fold signals. An empty list disables
+    detection entirely (zero API calls) — that is the default, so a project that
+    never configures `fold:` pays nothing. Logins are stored lower-cased
+    (GitHub logins are case-insensitive).
+
+    The bot identity (`SB_APP_BOT_LOGIN`) is NEVER an operator; that exclusion
+    is applied at detection time (`fold.py`) rather than here, so config parsing
+    stays free of environment reads.
+    """
+
+    operator_logins: tuple[str, ...] = ()
 
 
 @dataclass

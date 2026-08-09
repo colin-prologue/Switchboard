@@ -29,6 +29,7 @@ from pathlib import Path
 import httpx
 
 from .agent_runner import AgentRunner
+from .fold import FoldSignal, detect_fold_signals
 from .log import log
 from .handoff import snapshot_evidence, validate_handoff
 from .prompt import render_prompt
@@ -107,6 +108,17 @@ CLAIM_RELEASE_COMMENT = (
     "keep the board honest. It will be re-dispatched on a future poll if it is "
     "still eligible."
 )
+
+# Fold-signal detection (issue #51 part a). The gate states a fold can target —
+# NOT active states, so `fetch_candidate_issues` structurally never returns them
+# and the poller needs the tracker's `fetch_open_issues_by_status`.
+FOLD_POLL_STATES = ["drafting", "decision"]
+
+# Sub-poll cadence: an operator's 👍 is a human-latency event, so polling it at
+# the dispatch interval (30s) would spend one issue-comments query per gate
+# issue per tick for nothing. Ten minutes is the low-frequency floor; detection
+# is read-only, so a late signal costs nothing but latency.
+FOLD_POLL_INTERVAL_MS = 600000
 
 CONTINUATION_PROMPT = (
     "Continue working the same issue in this workspace. Do not restart from "
@@ -222,6 +234,14 @@ class Orchestrator:
         # it does not reconstruct transition edges.
         self._requires_marker: dict[str, list[str]] = load_requires_marker()
         self._marker_refused: set[str] = set()  # refusal comment posted once per issue
+
+        # Fold-signal detection (issue #51 part a). Dedupe is per PROCESS
+        # LIFETIME, keyed on the deciding comment/reaction node id: a restart
+        # re-emits every still-standing signal, which is accepted and documented
+        # — part (b)'s durable fold marker on the issue is the real dedupe. Part
+        # (a) performs zero writes, so a re-emission costs one log line.
+        self.fold_signals_seen: set[str] = set()
+        self._fold_last_poll_at: datetime | None = None
 
         self._stopping = False
         self._workflow_broken: str | None = None  # §5.5 dispatch block reason
@@ -474,6 +494,75 @@ class Orchestrator:
                 break
             if self._should_dispatch(issue):
                 await self._dispatch(issue, attempt=None)
+
+        await self._poll_fold_signals(tracker)
+
+    # -- fold-signal sub-poll (issue #51 part a) --------------------------------
+
+    async def _poll_fold_signals(self, tracker: GitHubTracker) -> list[FoldSignal]:
+        """Surface new operator fold signals on gate-state issues. Read-only.
+
+        Runs at the tail of a tick so it can never delay dispatch, and at
+        FOLD_POLL_INTERVAL_MS rather than every tick. Disabled (zero API calls)
+        when `fold.operator_logins` is empty, which is the default.
+
+        Part (a) only *detects*: every signal is logged and returned; the apply
+        step that edits the body and relabels is part (b).
+        """
+        cfg = self._cfg
+        assert cfg is not None
+        operators = cfg.fold().operator_logins
+        if not operators:
+            return []
+
+        now = datetime.now(timezone.utc)
+        if self._fold_last_poll_at is not None:
+            elapsed_ms = (now - self._fold_last_poll_at).total_seconds() * 1000
+            if elapsed_ms < FOLD_POLL_INTERVAL_MS:
+                return []
+        self._fold_last_poll_at = now
+
+        try:
+            issues = await tracker.fetch_open_issues_by_status(FOLD_POLL_STATES)
+        except TrackerError as exc:
+            log("fold poll: gate-issue fetch failed; skipping this round",
+                error=str(exc))
+            return []
+
+        bot_login = os.environ.get("SB_APP_BOT_LOGIN") or None
+        fresh: list[FoldSignal] = []
+        for issue in issues:
+            if self._stopping:
+                break
+            try:
+                comments = await tracker.fetch_issue_comments(issue.identifier)
+            except TrackerError as exc:
+                log("fold poll: comment fetch failed; skipping issue",
+                    issue_id=issue.id, issue_identifier=issue.identifier,
+                    error=str(exc))
+                continue
+            signals, rejected = detect_fold_signals(
+                issue_id=issue.id,
+                issue_identifier=issue.identifier,
+                comments=comments,
+                operator_logins=operators,
+                bot_login=bot_login,
+            )
+            for bad in rejected:
+                log("fold signal rejected: unknown body-sha1",
+                    issue_identifier=bad.issue_identifier,
+                    comment_id=bad.comment_id, operator=bad.operator_login,
+                    body_sha1=bad.body_sha1, reason=bad.reason)
+            for signal in signals:
+                # Dedupe on the EFFECTIVE decision, not the mutable node id
+                # (PR #129 review): an edited or re-promoted command re-emits.
+                key = signal.dedupe_key()
+                if key in self.fold_signals_seen:
+                    continue
+                self.fold_signals_seen.add(key)
+                log("fold signal detected", **signal.log_fields())
+                fresh.append(signal)
+        return fresh
 
     @staticmethod
     def _sort_for_dispatch(issues: list[Issue]) -> list[Issue]:
