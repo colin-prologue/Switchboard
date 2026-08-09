@@ -105,8 +105,15 @@ verbatim, do not substitute a variant (`git hash-object` is on the worker
 allowlist; `shasum` is **not**, and a denied command strands the session):
 
 ```
-gh issue view {{ issue.identifier }} --repo colin-prologue/Switchboard --json body -q .body | git hash-object --stdin
+gh issue view {{ issue.identifier }} --repo colin-prologue/Switchboard --json body -q .body > .run/triage-body.md
+git hash-object .run/triage-body.md
 ```
+
+**Review `.run/triage-body.md`, not the issue text rendered into this prompt** —
+the prompt copy was snapshotted at dispatch and may be stale by the time you
+run. The fetched file and its digest are captured together, so the hash your
+verdict carries is the hash of the exact bytes you reviewed (a verdict must
+never claim coverage of content it did not see).
 
 Then read the most recent `## Triage verdict` comment on this issue
 (`gh issue view {{ issue.identifier }} --repo colin-prologue/Switchboard --comments`) and look at
