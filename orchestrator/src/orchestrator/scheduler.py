@@ -34,6 +34,15 @@ from .fold_apply import apply_fold_signal
 from .log import log
 from .handoff import snapshot_evidence, validate_handoff
 from .prompt import render_prompt
+from .review_response import (
+    CAP_MARKER,
+    ROUND_CAP,
+    format_round_marker,
+    has_cap_comment,
+    latest_round,
+    needs_response,
+    normalize_login,
+)
 from .provider_circuit import (
     CircuitState,
     CircuitTransition,
@@ -120,6 +129,31 @@ FOLD_POLL_STATES = ["drafting", "decision"]
 # issue per tick for nothing. Ten minutes is the low-frequency floor; detection
 # is read-only, so a late signal costs nothing but latency.
 FOLD_POLL_INTERVAL_MS = 600000
+
+# Review-response triggering (issue #43 / AgDR-037). The ONE gate state whose
+# PRs can still be accumulating bot review comments: a `status:human-review`
+# issue is waiting at Gate C, which is exactly when Codex reviews land.
+REVIEW_POLL_STATES = ["human review"]
+
+# Same cadence, same reasoning as the fold sub-poll: a bot review is a
+# minutes-latency event and the sub-poll is bounded to human-review issues'
+# PRs, so a late trigger costs latency and nothing else.
+REVIEW_POLL_INTERVAL_MS = 600000
+
+# Posted once per PR when the durable round cap is reached. At the cap the
+# orchestrator STOPS RELABELING — it does not park (no active
+# `human-review -> parked` edge exists, and `_park` clears only
+# IN_PROGRESS_LABEL, which would strand a dual-label state).
+REVIEW_CAP_COMMENT = (
+    "{marker}\n"
+    "**Switchboard reached its review-response round cap on this PR "
+    "({cap} rounds).** Unresolved bot review threads remain, but no further "
+    "response session will be dispatched automatically — the loop is bounded "
+    "so an acknowledgment-happy reviewer cannot drive it forever. Review the "
+    "remaining threads by hand, or move the issue back to `" + TODO_LABEL +
+    "` to dispatch another session.\n\n"
+    "_Posted by Switchboard (AI orchestrator)._"
+)
 
 CONTINUATION_PROMPT = (
     "Continue working the same issue in this workspace. Do not restart from "
@@ -243,6 +277,13 @@ class Orchestrator:
         # dedupe. A key is written only after apply reaches a DECIDED outcome.
         self.fold_signals_seen: set[str] = set()
         self._fold_last_poll_at: datetime | None = None
+
+        # Review-response triggering (issue #43 / AgDR-037). No durable state
+        # lives here: the round count is a marker comment ON THE PR, re-read
+        # every poll, so the cap survives a restart by construction. These two
+        # are cadence and log-once bookkeeping only.
+        self._review_last_poll_at: datetime | None = None
+        self._review_disabled_logged = False
 
         self._stopping = False
         self._workflow_broken: str | None = None  # §5.5 dispatch block reason
@@ -397,12 +438,18 @@ class Orchestrator:
             await self._startup_in_progress_sweep()
 
             while not self._stopping:
+                # Clear BEFORE the tick (codex review, PR #134): a wake-up
+                # raised DURING the tick — e.g. the review sub-poll relabeling
+                # an issue to todo — must survive into the wait below, or the
+                # owed dispatch stalls a full polling interval. A signal set
+                # during the previous wait has already been consumed by waking
+                # that wait, so clearing here drops nothing.
+                self._tick_wakeup.clear()
                 try:
                     await self._tick()
                 except Exception as exc:  # a tick must never kill the service (§14.2)
                     log("tick error", error=repr(exc))
                 interval = (self._cfg.polling_interval_ms() if self._cfg else 30000) / 1000
-                self._tick_wakeup.clear()
                 try:
                     await asyncio.wait_for(self._tick_wakeup.wait(), timeout=interval)
                 except asyncio.TimeoutError:
@@ -497,6 +544,185 @@ class Orchestrator:
                 await self._dispatch(issue, attempt=None)
 
         await self._poll_fold_signals(tracker)
+        await self._poll_review_responses(tracker)
+
+    # -- review-response sub-poll (issue #43 / AgDR-037) ------------------------
+
+    async def _poll_review_responses(self, tracker: GitHubTracker) -> list[str]:
+        """Relabel `human-review -> todo` for issues whose PR owes a bot reply.
+
+        AgDR-034-shaped: bounded (only `status:human-review` issues' PRs),
+        config-gated, per-issue reads — but unlike its prior art this one is
+        WRITE-BEARING: it writes the round marker, relabels, may post the cap
+        comment, and resets the issue's session counters. Returns the
+        identifiers it triggered (tests and logs; nothing else consumes it).
+
+        No new state and no new session role: the re-dispatched session is an
+        ordinary implement-role session on `status:todo`, and the response
+        behaviour lives entirely in the prompt addendum.
+        """
+        cfg = self._cfg
+        assert cfg is not None
+
+        # GATE FIRST — BOTH checks precede the issue fetch. The fold poll this
+        # is modelled on fetches first; copying that shape verbatim would spend
+        # a repository-issues query on a disabled feature.
+        bot_logins = cfg.review_response().bot_logins
+        if not bot_logins:
+            return []
+        self_login = normalize_login(os.environ.get("SB_APP_BOT_LOGIN"))
+        if self_login is None:
+            # Reachable via the documented GITHUB_TOKEN dogfood path, under
+            # which worker replies are authored by the OPERATOR's login and no
+            # login-based identification can work. Same zero-cost posture as an
+            # empty allowlist, but LOUD once — a silently-disabled responder is
+            # indistinguishable from "the bot hasn't reviewed yet".
+            if not self._review_disabled_logged:
+                self._review_disabled_logged = True
+                log("review-response disabled: SB_APP_BOT_LOGIN is unset; the "
+                    "feature requires the App identity (bot_logins is "
+                    "configured but cannot be acted on)",
+                    bot_logins=",".join(bot_logins))
+            return []
+
+        now = datetime.now(timezone.utc)
+        if self._review_last_poll_at is not None:
+            elapsed_ms = (now - self._review_last_poll_at).total_seconds() * 1000
+            if elapsed_ms < REVIEW_POLL_INTERVAL_MS:
+                return []
+        self._review_last_poll_at = now
+
+        try:
+            issues = await tracker.fetch_open_issues_by_status(REVIEW_POLL_STATES)
+        except TrackerError as exc:
+            log("review poll: human-review fetch failed; skipping this round",
+                error=str(exc))
+            return []
+
+        triggered: list[str] = []
+        for issue in issues:
+            if self._stopping:
+                break
+            if PARK_LABEL in issue.labels:
+                # `_park` leaves the status label in place, so a hand-parked
+                # issue still shows human-review. Triggering it would burn a
+                # round on `_should_dispatch`'s park refusal.
+                log("review poll: issue is parked; skipping",
+                    issue_identifier=issue.identifier)
+                continue
+            try:
+                if await self._maybe_trigger_review_response(
+                        tracker, issue, bot_logins, self_login):
+                    triggered.append(issue.identifier)
+            except TrackerError as exc:
+                log("review poll: issue failed; skipping",
+                    issue_identifier=issue.identifier, error=str(exc))
+        return triggered
+
+    async def _bind_pr(
+        self, tracker: GitHubTracker, issue: Issue
+    ) -> dict | None:
+        """The one open PR bound to `issue`, or None (issue #43 binding rule).
+
+        The authoritative binding is the tracker's structured query — the head
+        ref the handoff path constructs, plus `closingIssuesReferences` — NOT
+        prose `Closes #N` and NOT `.run/handoff-evidence.json` (workspace-local;
+        it does not survive workspace recreation). Zero open PRs is the normal
+        post-merge state and skips QUIETLY; the other two failure modes are
+        UNBINDABLE and fail loud, never a silent drop.
+        """
+        head_ref = f"switchboard/issue-{issue.identifier}"
+        prs = await tracker.fetch_open_prs(head_ref)
+        if not prs:
+            log("review poll: no open PR for branch; skipping",
+                issue_identifier=issue.identifier, head_ref=head_ref)
+            return None
+        if len(prs) > 1:
+            log("review poll: UNBINDABLE — more than one open PR on the branch",
+                issue_identifier=issue.identifier, head_ref=head_ref,
+                unbindable=True, prs=",".join(str(p.get("number")) for p in prs))
+            return None
+        pr = prs[0]
+        try:
+            issue_number = int(issue.identifier)
+        except (TypeError, ValueError):
+            log("review poll: UNBINDABLE — issue identifier is not a number",
+                issue_identifier=issue.identifier, unbindable=True)
+            return None
+        if issue_number not in (pr.get("closes") or []):
+            log("review poll: UNBINDABLE — the open PR does not close this issue",
+                issue_identifier=issue.identifier, head_ref=head_ref,
+                unbindable=True, pr_number=pr.get("number"),
+                closes=",".join(str(n) for n in (pr.get("closes") or [])))
+            return None
+        if not pr.get("id"):
+            log("review poll: UNBINDABLE — PR node id missing; no write target",
+                issue_identifier=issue.identifier, unbindable=True,
+                pr_number=pr.get("number"))
+            return None
+        return pr
+
+    async def _maybe_trigger_review_response(
+        self,
+        tracker: GitHubTracker,
+        issue: Issue,
+        bot_logins: tuple[str, ...],
+        self_login: str,
+    ) -> bool:
+        pr = await self._bind_pr(tracker, issue)
+        if pr is None:
+            return False
+        pr_number, pr_id = pr["number"], pr["id"]
+
+        threads = await tracker.fetch_pr_review_threads(pr_number)
+        owed = [
+            t for t in threads
+            if needs_response(t, bot_logins=bot_logins, self_login=self_login)
+        ]
+        if not owed:
+            return False
+
+        comments = await tracker.fetch_pr_comments(pr_number)
+        rounds, _ = latest_round(comments, self_login=self_login)
+        if rounds >= ROUND_CAP:
+            if not has_cap_comment(comments, self_login=self_login):
+                await tracker.add_issue_comment(
+                    pr_id,
+                    REVIEW_CAP_COMMENT.format(marker=CAP_MARKER, cap=ROUND_CAP),
+                )
+                log("review poll: round cap reached; posted operator comment",
+                    issue_identifier=issue.identifier, pr_number=pr_number,
+                    rounds=rounds, owed=len(owed))
+            return False
+
+        # The marker is written BEFORE the relabel: a crash between them burns
+        # a round harmlessly, while the reverse order hands out a free round the
+        # cap can never account for.
+        await tracker.add_issue_comment(
+            pr_id, format_round_marker(rounds + 1, bot_logins, self_login)
+        )
+        # The per-role session counter is cumulative across the issue's life and
+        # is otherwise cleared only by unpark, so the multi-session PRs that
+        # attract the most findings would arrive here at `spent == cap` and park
+        # on the first response dispatch. Reset every role (the verify budget is
+        # unreachable from `todo`, so dropping it is harmless). The reset runs
+        # BEFORE the relabel (codex review, PR #134): the relabel can land on
+        # GitHub yet raise commit-ambiguous (`handoff_swap_uncertain`) out of
+        # its verification reads — resetting after the await would then leave
+        # the stale counter in place and the next poll would park the
+        # now-`todo` issue instead of dispatching the owed responder. A reset
+        # with a relabel that truly failed is harmless: the issue stays at
+        # human-review and the next trigger resets again.
+        self._reset_issue_sessions(issue.id)
+        await tracker.set_sole_status_label(
+            issue.id, TODO_LABEL, expected_status=(HUMAN_REVIEW_LABEL,)
+        )
+        self._tick_wakeup.set()
+        log("review-response triggered",
+            issue_id=issue.id, issue_identifier=issue.identifier,
+            pr_number=pr_number, round=rounds + 1, owed=len(owed),
+            threads=",".join(t.id for t in owed))
+        return True
 
     # -- fold-signal sub-poll (issue #51 part a) --------------------------------
 

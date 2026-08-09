@@ -1202,9 +1202,8 @@ def test_validate_dispatch_forces_fold_validation(tmp_path: Path, monkeypatch):
     assert exc_info.value.code == "workflow_parse_error"
 
 
-def test_real_workflow_base_declares_an_empty_fold_allowlist(tmp_path: Path):
-    """The scaffold ships detection OFF: an allowlist nobody vetted must never
-    grant fold authority by default."""
+def _real_base_config(tmp_path: Path, name: str = "WORKFLOW.md") -> Config:
+    """The committed `WORKFLOW.base.md`, scaffold placeholders substituted."""
     real_path = Path(__file__).resolve().parents[2] / "workflow" / "WORKFLOW.base.md"
     substituted = (
         real_path.read_text(encoding="utf-8")
@@ -1213,6 +1212,131 @@ def test_real_workflow_base_declares_an_empty_fold_allowlist(tmp_path: Path):
         .replace("{{MAX_AGENTS}}", "10")
         .replace("{{CONVENTION_ROOT}}", "")
     )
-    p = tmp_path / "WORKFLOW.md"
+    p = tmp_path / name
     p.write_text(substituted)
-    assert Config(load_workflow(p), tmp_path).fold().operator_logins == ()
+    return Config(load_workflow(p), tmp_path)
+
+
+def test_real_workflow_base_declares_an_empty_fold_allowlist(tmp_path: Path):
+    """The scaffold ships detection OFF: an allowlist nobody vetted must never
+    grant fold authority by default."""
+    assert _real_base_config(tmp_path).fold().operator_logins == ()
+
+
+# --- review_response.bot_logins (issue #43 / AgDR-037) ------------------------
+#
+# Same posture and same reason as `fold` above: this allowlist is the loop's
+# only botness definition, and a typo'd key that silently disabled the responder
+# would be indistinguishable from "the bot hasn't reviewed yet". Without this
+# accessor the shipped block would load clean and be inert — no top-level
+# unknown-key check exists to catch it.
+
+def _rr_cfg(tmp_path: Path, block: str) -> Config:
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        f"{block}"
+        "---\n"
+        "body\n"
+    )
+    return Config(load_workflow(p), tmp_path)
+
+
+def test_review_response_block_absent_disables_the_loop(tmp_path: Path):
+    assert _rr_cfg(tmp_path, "").review_response().bot_logins == ()
+
+
+def test_review_response_empty_list_disables_the_loop(tmp_path: Path):
+    cfg = _rr_cfg(tmp_path, "review_response:\n  bot_logins: []\n")
+    assert cfg.review_response().bot_logins == ()
+
+
+def test_review_response_logins_are_lowercased_and_deduped(tmp_path: Path):
+    cfg = _rr_cfg(
+        tmp_path,
+        "review_response:\n"
+        "  bot_logins: [\"ChatGPT-Codex-Connector\", \" chatgpt-codex-connector \","
+        " \"other-bot\"]\n",
+    )
+    # The stored form is canonical because it is ALSO what gets written into the
+    # round marker's `bots=` field, which a session parses in another process.
+    assert cfg.review_response().bot_logins == (
+        "chatgpt-codex-connector", "other-bot",
+    )
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "review_response: not-a-map\n",
+        "review_response:\n  bot_logins: codex\n",
+        "review_response:\n  bot_logins: [\"\"]\n",
+        "review_response:\n  bot_logins: [123]\n",
+        "review_response:\n  bot_lgoins: [\"codex\"]\n",  # typo'd key: no silent pass
+    ],
+)
+def test_review_response_malformed_config_raises(tmp_path: Path, block: str):
+    with pytest.raises(WorkflowError) as exc_info:
+        _rr_cfg(tmp_path, block).review_response()
+    assert exc_info.value.code == "workflow_parse_error"
+
+
+def test_validate_dispatch_forces_review_response_validation(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        "  api_key: $GITHUB_TOKEN\n"
+        "review_response:\n"
+        "  bot_logins: 7\n"
+        "---\n"
+        "body\n"
+    )
+    with pytest.raises(WorkflowError) as exc_info:
+        validate_dispatch(Config(load_workflow(p), tmp_path))
+    assert exc_info.value.code == "workflow_parse_error"
+
+
+def test_real_workflow_base_ships_the_response_loop_disabled(tmp_path: Path):
+    """SHIPPED CONFIG AC: the loop lands DISABLED, dead code by design.
+
+    Going live is a deliberate post-merge config edit, never a merge side
+    effect — and with no `bot_logins` no trigger fires, so no round marker is
+    ever written and the prompt addendum stays inert too.
+    """
+    assert _real_base_config(tmp_path).review_response().bot_logins == ()
+
+
+def test_composed_self_workflow_ships_the_response_loop_disabled(tmp_path: Path):
+    """The OTHER carrying file. `projects/switchboard-self/WORKFLOW.md` is the
+    composed copy the live instance actually loads; shipping it enabled would
+    activate the loop on merge regardless of what the base template says."""
+    real = Path(__file__).resolve().parents[2] / "projects" / "switchboard-self"
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text((real / "WORKFLOW.md").read_text(encoding="utf-8"))
+    assert Config(load_workflow(p), tmp_path).review_response().bot_logins == ()
+
+
+def test_review_response_rejects_logins_that_break_the_marker_grammar(tmp_path: Path):
+    """Codex review (PR #134): a whitespace-bearing entry would serialize into
+    the round marker's `bots=` field (matched as \\S*), making every marker
+    parse as round 0 — the cap never engages and response sessions dispatch
+    indefinitely. Malformed config fails the LOAD, never the marker."""
+    for bad in ("codex bot", "bots=evil", "a<b", "-lead", "trail-"):
+        cfg = _rr_cfg(
+            tmp_path, f'review_response:\n  bot_logins: ["{bad}"]\n'
+        )
+        with pytest.raises(WorkflowError):
+            cfg.review_response()
+    ok = _rr_cfg(
+        tmp_path, 'review_response:\n  bot_logins: ["Codex-Bot[bot]"]\n'
+    ).review_response()
+    assert ok.bot_logins == ("codex-bot[bot]",)
