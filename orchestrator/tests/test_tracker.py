@@ -960,3 +960,39 @@ async def test_sole_status_swap_yields_when_issue_closes_mid_swap():
         await tracker.set_sole_status_label("node-1", "status:human-review")
     assert exc.value.code == "handoff_preempted"
     assert state["remove_calls"][-1] == ["id-status:human-review"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_removal_readback_yields_to_closure():
+    """PR #115 round 8: the ambiguous-removal early return must apply the
+    closure yield too — an applied-but-errored removal read back on a closed
+    issue is preemption, not success."""
+    state = {"removed": False, "remove_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "removeLabelsFromLabelable" in body:
+            state["remove_calls"] += 1
+            if state["remove_calls"] == 1:
+                state["removed"] = True  # applies but errors
+                return graphql_response(errors=[{"message": "response lost"}])
+            return graphql_response(data={"removeLabelsFromLabelable": {"clientMutationId": None}})
+        if "addLabelsToLabelable" in body:
+            return graphql_response(data={"addLabelsToLabelable": {"clientMutationId": None}})
+        if '"label"' in body:
+            name = json.loads(body)["variables"]["label"]
+            return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
+        if not state["removed"]:  # preemption fetch: open, expected claim
+            return graphql_response(data={"nodes": [issue_node(
+                id_="node-1", number=1,
+                labels=["status:in-progress", "gate:triage-passed"])]})
+        # ambiguity read-back: removal applied AND the issue closed meanwhile
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1, state="CLOSED",
+            labels=["status:human-review", "gate:triage-passed"])]})
+
+    tracker, _ = make_tracker(handler)
+    with pytest.raises(TrackerError) as exc:
+        await tracker.set_sole_status_label("node-1", "status:human-review")
+    assert exc.value.code == "handoff_preempted"
+    assert state["remove_calls"] == 2  # withdrawal of our label on the closed issue

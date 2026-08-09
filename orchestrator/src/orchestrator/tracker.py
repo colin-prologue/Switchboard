@@ -455,7 +455,22 @@ class GitHubTracker:
                     l for l in after if l.startswith("status:")
                 )
                 if status_after == [label]:
-                    # The removal actually applied — the swap is complete.
+                    # The removal actually applied. Before accepting, apply
+                    # the closure yield here too (PR #115 round 8): this
+                    # early return skips the final state check, and a closure
+                    # landing by now must win, not be logged as success.
+                    if check and check[0].state.lower() == "closed":
+                        try:
+                            await self.remove_labels(issue_id, [label])
+                        except TrackerError:
+                            pass
+                        raise TrackerError(
+                            "handoff_preempted",
+                            "issue closed before the ambiguous-removal "
+                            "read-back; closure wins, handoff label "
+                            "withdrawn (best-effort)",
+                        ) from exc
+                    # Swap complete on an open issue.
                     return
                 # Removal genuinely did not apply: partial swap (dual state,
                 # sorted-first normalization would deactivate the issue —

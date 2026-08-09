@@ -191,10 +191,15 @@ class FakeTracker:
             except TrackerError:
                 # Mirror of the real tracker: read back before compensating
                 # (a failed removal is commit-ambiguous — PR #115 round 5).
-                after = self._issues_with_id(issue_id)[0].labels
+                final = self._issues_with_id(issue_id)[0]
                 status_after = sorted(
-                    l for l in after if l.startswith("status:"))
+                    l for l in final.labels if l.startswith("status:"))
                 if status_after == [label]:
+                    if final.state.lower() == "closed":
+                        self.remove_labels_error = None
+                        await self.remove_labels(issue_id, [label])
+                        raise TrackerError("handoff_preempted",
+                                           "closed before ambiguous read-back")
                     return
                 if added_now and label in after:
                     self.remove_labels_error = None
