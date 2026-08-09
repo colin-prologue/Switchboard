@@ -438,12 +438,18 @@ class Orchestrator:
             await self._startup_in_progress_sweep()
 
             while not self._stopping:
+                # Clear BEFORE the tick (codex review, PR #134): a wake-up
+                # raised DURING the tick — e.g. the review sub-poll relabeling
+                # an issue to todo — must survive into the wait below, or the
+                # owed dispatch stalls a full polling interval. A signal set
+                # during the previous wait has already been consumed by waking
+                # that wait, so clearing here drops nothing.
+                self._tick_wakeup.clear()
                 try:
                     await self._tick()
                 except Exception as exc:  # a tick must never kill the service (§14.2)
                     log("tick error", error=repr(exc))
                 interval = (self._cfg.polling_interval_ms() if self._cfg else 30000) / 1000
-                self._tick_wakeup.clear()
                 try:
                     await asyncio.wait_for(self._tick_wakeup.wait(), timeout=interval)
                 except asyncio.TimeoutError:
