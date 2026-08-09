@@ -47,10 +47,23 @@ def record_stdin() -> str:
     return data
 
 
-def result_line(subtype: str = "success", session_id: str = "sess-123") -> dict:
+def result_line(
+    subtype: str = "success",
+    session_id: str = "sess-123",
+    *,
+    is_error: bool,
+) -> dict:
+    """One terminal `result` record.
+
+    `is_error` is EXPLICIT and never derived (issue #116): ground truth
+    (fixtures/claude_cli_auth_logged_out.jsonl) is a record with
+    subtype "success" AND is_error true, so `is_error = subtype != "success"`
+    is a relationship the real CLI disproves. Each caller states its own value.
+    """
     return {
         "type": "result",
         "subtype": subtype,
+        "is_error": is_error,
         "total_cost_usd": 0.0123,
         "usage": {"input_tokens": 10, "output_tokens": 20},
         "num_turns": 2,
@@ -69,14 +82,14 @@ def main() -> None:
         emit({"type": "system", "subtype": "init", "session_id": "sess-123"})
         emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "hello there"}]}})
         emit({"type": "user", "message": {"content": [{"type": "text", "text": "ack"}]}})
-        emit(result_line("success"))
+        emit(result_line("success", is_error=False))
         return
 
     if scenario == "resume":
         # argv already recorded above; test inspects FAKE_ARGV_FILE.
         record_stdin()
         emit({"type": "system", "subtype": "init", "session_id": "sess-resumed"})
-        emit(result_line("success", session_id="sess-resumed"))
+        emit(result_line("success", session_id="sess-resumed", is_error=False))
         return
 
     if scenario == "error_max_turns":
@@ -86,7 +99,11 @@ def main() -> None:
         # early-stop result — which is what makes this the `incomplete` case.
         record_stdin()
         emit({"type": "system", "subtype": "init", "session_id": "sess-err"})
-        payload = result_line("error_max_turns", session_id="sess-err")
+        # UNVERIFIED: no capture of a real `error_max_turns` result exists, so
+        # whether the real CLI sets is_error there is unknown. True is the
+        # WORST CASE — and it is what makes the issue #116 branch ordering
+        # bite: this record must still be `incomplete` + RESUME_SESSION.
+        payload = result_line("error_max_turns", session_id="sess-err", is_error=True)
         if result_text := os.environ.get("FAKE_CLAUDE_RESULT_TEXT"):
             payload["result"] = result_text
         emit(payload)
@@ -97,7 +114,7 @@ def main() -> None:
         # learned (no init line, no session_id on the result). Nothing to
         # resume, so this stays a failure, not `incomplete`.
         record_stdin()
-        payload = result_line("error_max_turns")
+        payload = result_line("error_max_turns", is_error=True)  # UNVERIFIED, as above
         payload.pop("session_id")
         emit(payload)
         sys.exit(1)
@@ -108,6 +125,7 @@ def main() -> None:
         payload = result_line(
             os.environ.get("FAKE_CLAUDE_ERROR_CODE", "provider_error"),
             session_id="sess-provider",
+            is_error=True,  # UNVERIFIED — no capture of a real error subtype
         )
         payload["error"] = {
             "message": os.environ.get("FAKE_CLAUDE_ERROR_DETAIL", "provider failed")
@@ -115,12 +133,52 @@ def main() -> None:
         emit(payload)
         sys.exit(1)
 
+    if scenario == "gated_success":
+        # issue #116: a result the `is_error` gate claims — subtype "success"
+        # with is_error true, the shape ground truth shows. SYNTHETIC on
+        # purpose: the text is supplied per-test so the class-derivation step
+        # (including the no-pattern negative space) can be exercised
+        # independently of the one real capture, which is replayed verbatim by
+        # `replay_fixture` below.
+        record_stdin()
+        emit({"type": "system", "subtype": "init", "session_id": "sess-gated"})
+        payload = result_line("success", session_id="sess-gated", is_error=True)
+        payload["terminal_reason"] = os.environ.get(
+            "FAKE_CLAUDE_TERMINAL_REASON", "api_error"
+        )
+        if result_text := os.environ.get("FAKE_CLAUDE_RESULT_TEXT"):
+            payload["result"] = result_text
+        emit(payload)
+        sys.exit(1)
+
+    if scenario == "auth_prose_success":
+        # issue #116 boundary: the agent merely QUOTES auth-failure text in its
+        # own prose while the run genuinely succeeds. The terminal record says
+        # is_error false, so the gate never claims it.
+        record_stdin()
+        emit({"type": "system", "subtype": "init", "session_id": "sess-prose"})
+        emit({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "The ticket says: Not logged in · Please run /login"}
+        ]}})
+        emit(result_line("success", session_id="sess-prose", is_error=False))
+        return
+
+    if scenario == "replay_fixture":
+        # Stream a committed ground-truth capture byte-for-byte (mirrors
+        # fake_codex.py). Never re-encode the lines as dicts — the point is that
+        # the runner sees exactly what the real CLI emitted
+        # (tests/fixtures/README.md).
+        record_stdin()
+        sys.stdout.buffer.write(open(os.environ["FAKE_CLAUDE_FIXTURE"], "rb").read())
+        sys.stdout.buffer.flush()
+        sys.exit(1)  # real logged-out run exits 1 (fixtures/README.md)
+
     if scenario == "turn_timeout":
         record_stdin()
         emit({"type": "system", "subtype": "init", "session_id": "sess-slow"})
         # sleep past the tiny turn_timeout_ms configured by the test
         time.sleep(5)
-        emit(result_line("success", session_id="sess-slow"))
+        emit(result_line("success", session_id="sess-slow", is_error=False))
         return
 
     if scenario == "hang":
@@ -156,7 +214,7 @@ def main() -> None:
         emit({"type": "system", "subtype": "init", "session_id": "sess-mal"})
         sys.stdout.write("not json at all {{{\n")
         sys.stdout.flush()
-        emit(result_line("success", session_id="sess-mal"))
+        emit(result_line("success", session_id="sess-mal", is_error=False))
         return
 
     if scenario == "no_result":
@@ -171,7 +229,7 @@ def main() -> None:
         sys.stderr.write("some diagnostic noise\nmore noise\n")
         sys.stderr.flush()
         emit({"type": "system", "subtype": "init", "session_id": "sess-stderr"})
-        emit(result_line("success", session_id="sess-stderr"))
+        emit(result_line("success", session_id="sess-stderr", is_error=False))
         return
 
     # unknown scenario: fail loudly so tests don't silently pass
