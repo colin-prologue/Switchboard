@@ -117,6 +117,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
           createdAt
           author { login }
           reactions(first: 100) {
+            pageInfo { hasNextPage endCursor }
             nodes { id content createdAt user { login } }
           }
         }
@@ -147,6 +148,19 @@ mutation($subjectId: ID!, $body: String!) {
 }
 """
 
+
+COMMENT_REACTIONS_PAGE_QUERY = """
+query($commentId: ID!, $cursor: String) {
+  node(id: $commentId) {
+    ... on IssueComment {
+      reactions(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id content createdAt user { login } }
+      }
+    }
+  }
+}
+"""
 
 OPEN_PRS_FOR_BRANCH_QUERY = """
 query($owner: String!, $name: String!, $headRef: String!) {
@@ -361,6 +375,20 @@ class GitHubTracker:
                 raise TrackerError(
                     "github_missing_end_cursor", "hasNextPage true but endCursor missing"
                 )
+        # PR #129 review: a comment with >100 reactions truncates the nested
+        # connection — paginate each such comment's reactions to completion so
+        # an operator signal beyond the first page is never silently missed.
+        for raw in nodes:
+            rc = raw.get("reactions") or {}
+            page = rc.get("pageInfo") or {}
+            while page.get("hasNextPage"):
+                more = await self._request(
+                    COMMENT_REACTIONS_PAGE_QUERY,
+                    {"commentId": raw.get("id"), "cursor": page.get("endCursor")},
+                )
+                rconn = ((more.get("node") or {}).get("reactions")) or {}
+                (rc.setdefault("nodes", [])).extend(rconn.get("nodes") or [])
+                page = rconn.get("pageInfo") or {}
         return [self._normalize_comment(node) for node in nodes]
 
     async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:

@@ -508,9 +508,12 @@ class Orchestrator:
                     comment_id=bad.comment_id, operator=bad.operator_login,
                     body_sha1=bad.body_sha1, reason=bad.reason)
             for signal in signals:
-                if signal.source_node_id in self.fold_signals_seen:
+                # Dedupe on the EFFECTIVE decision, not the mutable node id
+                # (PR #129 review): an edited or re-promoted command re-emits.
+                key = signal.dedupe_key()
+                if key in self.fold_signals_seen:
                     continue
-                self.fold_signals_seen.add(signal.source_node_id)
+                self.fold_signals_seen.add(key)
                 log("fold signal detected", **signal.log_fields())
                 fresh.append(signal)
         return fresh

@@ -60,8 +60,12 @@ _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 class FoldSignal:
     """One resolved operator decision about one verdict comment.
 
-    `source_node_id` is the comment or reaction node id that decided it — the
-    per-process dedupe key. `approved` False is a veto (👎 / `/no-fold`), kept
+    `source_node_id` is the comment or reaction node id that decided it.
+    `dedupe_key()` combines it with the RESOLVED decision and target (PR #129
+    review): an operator editing `/no-fold` → `/fold`, retargeting a digest,
+    or a deletion promoting an older command all change the effective decision
+    on an unchanged node id — identity must track outcome, not just node.
+    `approved` False is a veto (👎 / `/no-fold`), kept
     rather than dropped so the operator can see in the log that the veto was
     seen and honoured.
     """
@@ -76,6 +80,13 @@ class FoldSignal:
     source_node_id: str
     created_at: datetime | None = None
 
+    def dedupe_key(self) -> str:
+        """Identity of the EFFECTIVE decision, not the mutable comment."""
+        return (
+            f"{self.source_node_id}:{int(self.approved)}:"
+            f"{self.verdict_comment_id}"
+        )
+
     def log_fields(self) -> dict[str, object]:
         return {
             "issue_id": self.issue_id,
@@ -86,6 +97,7 @@ class FoldSignal:
             "approved": str(self.approved).lower(),
             "operator": self.operator_login,
             "source_node_id": self.source_node_id,
+            "dedupe_key": self.dedupe_key(),
         }
 
 
@@ -166,7 +178,12 @@ def detect_fold_signals(
     for verdict in verdicts:
         digest = parse_body_sha1(verdict.body)
         if digest is not None:
-            by_sha1.setdefault(digest, verdict)
+            # LATEST matching verdict wins (PR #129 review): the fast-path can
+            # legitimately stamp the same body-sha1 on several verdicts, and a
+            # /fold naming that digest means the most recent one the operator
+            # saw — never a stale earlier copy. `verdicts` is oldest-first, so
+            # plain assignment keeps the last.
+            by_sha1[digest] = verdict
 
     rejected: list[RejectedSignal] = []
     # verdict comment id -> winning candidate, per the precedence rules.
