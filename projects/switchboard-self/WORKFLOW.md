@@ -152,9 +152,19 @@ name the class in the verdict so drafting and triage share one vocabulary; see
   gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:triage --add-label status:todo,gate:triage-passed
   ```
 - **NEEDS WORK** → post a feedback comment whose first line is the exact heading
-  `## Triage verdict` (grep-able), listing each failed rubric check and the fix,
-  then relabel to `status:drafting`. Clear `gate:triage-passed` in the same
-  command (every route back to drafting drops the marker — idempotent if absent).
+  `## Triage verdict` (grep-able). Under it, before the per-check list, write an
+  `## In brief` block carrying the same two fields a PR body does:
+
+  > **What this does:** one plain sentence saying what the verdict is and what
+  > the author has to change. No issue numbers, file paths, or rubric numbers.
+  >
+  > **What could be wrong:** the single finding the author has the strongest
+  > case to push back on, and why — in "if X, then Y" shape. You are the one
+  > adversary here; name where you might be the one who is wrong.
+
+  Then list each failed rubric check and its fix, and relabel to
+  `status:drafting`. Clear `gate:triage-passed` in the same command (every route
+  back to drafting drops the marker — idempotent if absent).
   ```
   gh issue comment {{ issue.identifier }} --repo colin-prologue/Switchboard --body "## Triage verdict"...
   gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:triage,gate:triage-passed --add-label status:drafting
@@ -196,9 +206,33 @@ once the verdict is routed.
    weakest point. A PR touching those layers with no AgDR is incomplete and
    will be bounced at the merge gate.
 7. **Hand off, don't self-merge.** Commit, push the branch, open a PR with `gh`
-   linking this issue, attach evidence of the criteria passing. Then, as your
-   FINAL action, write the handoff evidence file `.run/handoff-evidence.json`
-   at the workspace root (issue #61):
+   linking this issue, attach evidence of the criteria passing.
+
+   The PR body opens with an `## In brief` block — two fields, before any other
+   section, for a reader who has none of your context:
+
+   > **What this does:** one plain sentence. No issue numbers, file paths, AgDR
+   > ids, `status:` label names, or function/field names. If you cannot say it
+   > without them, you have not understood your own change well enough to hand
+   > it off.
+   >
+   > **What could be wrong:** one assumption or decision you made, in "if X,
+   > then Y" shape — the trigger, and what concretely breaks when it does not
+   > hold. Naming a quality is not an answer ("coverage could be broader");
+   > naming a consequence is ("if the label API is not read-your-writes, the
+   > read-back false-negatives and the ticket strands").
+
+   Keep the `Closes #N` line first, block second: the orchestrator resolves the
+   issue link through GitHub's closing references, and burying that line breaks
+   your own handoff transition. Everything you would otherwise write goes below
+   the block, unchanged — the block adds a layer, it does not replace one.
+
+   A PR body with no block, or whose second field names a quality instead of a
+   consequence, is incomplete at the merge gate and will be bounced there, the
+   same way a missing AgDR is.
+
+   Then, as your FINAL action, write the handoff evidence file
+   `.run/handoff-evidence.json` at the workspace root (issue #61):
    ```
    {"issue": "<this issue's number>", "pr_number": <PR number>, "head_sha": "<output of: git rev-parse HEAD>"}
    ```

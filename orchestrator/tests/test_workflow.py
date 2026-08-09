@@ -962,6 +962,28 @@ def test_base_and_composed_workflow_are_in_sync():
     )
 
 
+def test_workflow_prompt_pins_in_brief_block():
+    """The plain-language block must reach the agent through the prompt itself.
+
+    Pinned in BOTH files: the base template and the composed mirror. The
+    sync test above proves they match; this test proves the content is
+    actually there, so a well-intentioned "simplification" of either file
+    cannot silently drop the requirement while staying in sync.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    for rel in ("workflow/WORKFLOW.base.md", "projects/switchboard-self/WORKFLOW.md"):
+        text = (repo_root / rel).read_text(encoding="utf-8")
+        assert "## In brief" in text, f"{rel}: block heading absent"
+        assert "**What this does:**" in text, f"{rel}: first field absent"
+        assert "**What could be wrong:**" in text, f"{rel}: second field absent"
+        # The PR-handoff step must keep Closes #N ahead of the block: the
+        # orchestrator resolves the issue link through GitHub's closing
+        # references, so burying it breaks the human-review transition.
+        assert "Keep the `Closes #N` line first" in text, f"{rel}: ordering rule absent"
+        # Gate C consequence must be stated where the agent reads it.
+        assert "is incomplete at the merge gate" in text, f"{rel}: gate consequence absent"
+
+
 # --- decision-record numbering (self/.decisions) -------------------------------
 #
 # Parallel worker sessions each pick "next free AgDR number on their own branch",
