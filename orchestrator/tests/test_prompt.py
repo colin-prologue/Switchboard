@@ -177,19 +177,25 @@ def test_body_hash_command_is_embedded_verbatim():
     under Bash(git:*); `shasum` is NOT, and a denied command strands the
     session. Any drift here (a jq variant, a different digest tool) breaks the
     cross-session comparability the fast-path depends on."""
-    # In the template, verbatim with the Liquid placeholder...
+    # In the template, verbatim with the Liquid placeholder... The command is
+    # now a fetch-to-file + hash pair (PR #125 review): the digest is bound to
+    # the exact bytes the verifier reviews, not the live body at hash time.
     template = _real_base_body()
     assert (
         "gh issue view {{ issue.identifier }} --repo acme/widgets "
-        "--json body -q .body | git hash-object --stdin"
+        "--json body -q .body > .run/triage-body.md"
     ) in template
+    assert "git hash-object .run/triage-body.md" in template
     # ...and in the rendered prompt the agent actually reads, with the issue
     # number substituted and nothing else changed.
     out = _verifier_prompt()
     assert (
         "gh issue view 42 --repo acme/widgets "
-        "--json body -q .body | git hash-object --stdin"
+        "--json body -q .body > .run/triage-body.md"
     ) in out
+    assert "git hash-object .run/triage-body.md" in out
+    # The reviewed-bytes binding is instructed, not implied.
+    assert "not the issue text rendered into this prompt" in out
     # The allowlist trap is named so no session substitutes a denied variant.
     assert "`shasum` is **not**" in out
 
