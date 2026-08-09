@@ -2263,7 +2263,13 @@ async def test_fold_signal_surfaces_once_per_process_and_writes_nothing(
         "polling:", "fold:\n  operator_logins: [\"Colin-Prologue\"]\n\npolling:"
     )
     orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, workflow_tmpl=tmpl)
-    monkeypatch.setenv("SB_APP_BOT_LOGIN", "switchboard-agent[bot]")
+    # Valid credential shape: NONE of SB_APP_* plus the GITHUB_TOKEN fallback.
+    # Setting only SB_APP_BOT_LOGIN makes the App set partial and
+    # validate_dispatch aborts the tick before the fold poll runs (CI-caught).
+    for var in ("SB_APP_ID", "SB_APP_INSTALLATION_ID", "SB_APP_PRIVATE_KEY_FILE",
+                "SB_APP_BOT_LOGIN", "SB_APP_BOT_USER_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
     issue = make_issue(51, state="decision")
     tracker.candidates = [issue]

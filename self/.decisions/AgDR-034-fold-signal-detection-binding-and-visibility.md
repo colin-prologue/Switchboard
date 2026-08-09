@@ -1,4 +1,4 @@
-# AgDR-033: fold signals bind by preceding-verdict rule; gate states get their own read path
+# AgDR-034: fold signals bind by preceding-verdict rule; gate states get their own read path
 
 **Status:** proposed (2026-08-08, issue #51 part a)
 **Surfaces:** `workflow/WORKFLOW.base.md` worker branch (prompt template — the
