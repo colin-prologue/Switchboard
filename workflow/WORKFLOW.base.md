@@ -173,7 +173,18 @@ name the class in the verdict so drafting and triage share one vocabulary; see
   body opens with the `## In brief` block, same as any other ticket
   (`scripts/new-ticket.sh --scaffold` emits it as the skeleton's first section)
   — chain each to this parent with native blocked-by, and park this parent at
-  `status:drafting`. Post a `## Triage verdict` comment linking the children.
+  `status:drafting`. Post a `## Triage verdict` comment whose first line is the
+  exact heading; under it, before the links, write an `## In brief` block
+  carrying the same two fields:
+
+  > **What this does:** one plain sentence saying why the ticket was split and
+  > what the pieces are. No issue numbers, file paths, or rubric numbers.
+  >
+  > **What could be wrong:** the split decision most likely to be wrong — a
+  > boundary drawn in the wrong place, or a dependency edge between children
+  > that may not hold — in "if X, then Y" shape.
+
+  Then link the children.
 
 The verifier never implements; feedback and splits only. Do not open a PR. Stop
 once the verdict is routed.

@@ -1001,6 +1001,14 @@ def test_workflow_prompt_pins_in_brief_block():
         assert "each\n  body opens with the `## In brief` block" in text, (
             f"{rel}: SPLIT child-issue body block instruction absent"
         )
+        # The SPLIT verdict's own `## Triage verdict` comment must also carry
+        # the block, not just the child bodies — this string lives ONLY inside
+        # that SPLIT-comment insertion (distinct from the NEEDS WORK In brief
+        # block above and the SPLIT child-body clause just checked), so a
+        # regression that drops just this insertion turns this test red.
+        assert "the split decision most likely to be wrong" in text, (
+            f"{rel}: SPLIT triage-verdict comment In brief block absent"
+        )
 
 
 # --- decision-record numbering (self/.decisions) -------------------------------
