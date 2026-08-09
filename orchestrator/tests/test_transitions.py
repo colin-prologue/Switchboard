@@ -141,6 +141,15 @@ def test_review_response_adds_no_new_state_and_no_requires_marker():
     assert "review-response" not in states
     assert set(_raw_table()["requires_marker"]) == {"todo"}
 
+# --- the fold edge (issue #126 part b) ---------------------------------------
+
+def test_drafting_to_triage_has_exactly_two_edges_human_and_fold():
+    """Apply relabels drafting -> triage, so the table must record a second
+    actor on that edge. The human edge is KEPT — a hand fold still exists."""
+    edges = [e for e in _edges() if e["from"] == "drafting" and e["to"] == "triage"]
+    assert len(edges) == 2, f"expected exactly two drafting -> triage edges, got {edges}"
+    assert {e["actor"] for e in edges} == {"human", "fold"}
+
 
 def test_degraded_todo_to_human_review_edge_annotated():
     degraded = [e for e in _edges() if e.get("degraded")]
