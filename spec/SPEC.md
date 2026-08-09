@@ -190,15 +190,22 @@ These are ours, layered on top, not in the original Symphony spec:
   labeling mechanism, not the role-pin rule (AgDR-005).
 - **Session cap + parking** (`agent.max_sessions_per_issue`, default 3) — the
   core's continuation loop re-dispatches an active issue indefinitely; with a
-  paid execution adapter that is an unbounded-spend path. After N worker
-  sessions on one issue in a process lifetime, the orchestrator *parks* it:
+  paid execution adapter that is an unbounded-spend path. The counter is keyed
+  by **(issue, session role)** — a `status:triage` dispatch spends the *verify*
+  budget, every other active state spends the *implement* budget — so a ticket
+  that needed several adversarial verify passes still arrives at `status:todo`
+  with its full implementation budget (issue #35 / AgDR-033; the cap value is
+  the same for both roles). After N worker sessions on one issue **in one
+  role** in a process lifetime, the orchestrator *parks* it:
   claim released, workspace preserved (plus the `after_run` run log beside it),
   one notification comment posted on the issue, and the durable `status:parked`
   label applied. A parked issue is not re-dispatched while it carries that
   label; because the label lives in the tracker, the park decision survives a
   process restart. **Unpark is deliberate: a human removes the `status:parked`
-  label** (e.g. moves the card off *Parked* on the board), which also resets the
-  per-issue session counter. A stray edit or comment no longer unparks — this is
+  label** (e.g. moves the card off *Parked* on the board), which also resets
+  BOTH of the issue's per-role session counters. The park comment names which
+  budget ran out ("verify budget exhausted (3/3 verify sessions)"); the label
+  set is unchanged — `status:parked` is the sole park label. A stray edit or comment no longer unparks — this is
   what structurally forecloses the OBS-022 self-unpark loop (the park decision
   never reads `updated_at`). Caps are diagnostic checkpoints, not kill switches.
   The comment and the label are the two deliberate exceptions to the core §11.5

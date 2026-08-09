@@ -6,7 +6,8 @@ overridden by: spec/SPEC.md §1 (worker turns are `claude -p` invocations resume
             by session id), SPEC.md §4 owned extension: per-issue session cap
             with parking ("caps as diagnostic checkpoints" — when
             agent.max_sessions_per_issue worker sessions have been spent on one
-            issue in this process lifetime, the orchestrator releases the claim,
+            issue IN ONE ROLE (verify vs implement, issue #35 / AgDR-033) in
+            this process lifetime, the orchestrator releases the claim,
             posts ONE notification comment on the issue, preserves the
             workspace/logs, and stops re-dispatching until the issue's
             updated_at changes. This is a deliberate, documented exception to
@@ -66,6 +67,21 @@ SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
 # decision survives a process restart (AgDR-002 weakest point → resolved).
 PARK_LABEL = "status:parked"
 
+# Session-budget roles (issue #35 / AgDR-033). `max_sessions_per_issue` is
+# accounted PER ROLE, not per issue: a `status:triage` dispatch runs a VERIFIER
+# session (the triage rubric), every other active state runs an IMPLEMENTER
+# session. Without the split, adversarial verify passes eat the implementation
+# budget and the ticket parks on arrival at `status:todo` (live instances: #30,
+# #15, #57). The cap VALUE is unchanged — each role gets the full budget.
+VERIFY_ROLE = "verify"
+IMPLEMENT_ROLE = "implement"
+VERIFY_STATES = frozenset({"triage"})
+
+
+def session_role(state: str) -> str:
+    """The session role a dispatch in `state` runs as (issue #35 / AgDR-033)."""
+    return VERIFY_ROLE if state.lower() in VERIFY_STATES else IMPLEMENT_ROLE
+
 # Claim-visibility status labels (issue #14 / AgDR-010) plus the terminal
 # handoff label (issue #61 / AgDR-028). The orchestrator owns all four status
 # labels it touches: `status:todo`/`status:in-progress` (plus PARK_LABEL above)
@@ -111,6 +127,11 @@ class RunningEntry:
     issue: Issue
     provider_id: str
     stall_timeout_ms: int
+    session_key: tuple[str, str]           # (issue id, session role) — the
+                                           # budget this session was drawn from,
+                                           # frozen at dispatch so a mid-session
+                                           # state change cannot misroute the
+                                           # failure refund (issue #35)
     session_id: str | None = None
     last_event_at: datetime | None = None  # stall-detection anchor (§8.5)
     retry_attempt: int | None = None
@@ -180,7 +201,12 @@ class Orchestrator:
         self._circuit_refusals: set[tuple[str, str, int]] = set()
 
         # owned extension state (SPEC.md §4 session cap / parking)
-        self.sessions_per_issue: dict[str, int] = {}
+        # Keyed by (issue id, session role) — NOT by issue id alone (issue #35 /
+        # AgDR-032). Verifier and implementer sessions draw on separate budgets,
+        # so `max_sessions_per_issue` verify passes leave the implementation
+        # budget untouched. Read it through `sessions_for_issue()`; a bare-id
+        # lookup is always a miss.
+        self.sessions_per_issue: dict[tuple[str, str], int] = {}
         self.parked: set[str] = set()  # issue ids DURABLY parked this run (label
                                        # write confirmed); counter-reset bookkeeping
                                        # only — the durable state is the PARK_LABEL
@@ -247,6 +273,26 @@ class Orchestrator:
         cfg = self._cfg
         assert cfg is not None
         return self._runner_selector.select(cfg, issue)
+
+    # -- per-role session budgets (issue #35 / AgDR-033) ------------------------
+
+    def sessions_for_issue(self, issue_id: str) -> dict[str, int]:
+        """Sessions spent on `issue_id`, per role: `{"verify": 2}`.
+
+        The single read surface over `sessions_per_issue`'s composite key —
+        `sessions_per_issue.get(issue_id)` is a silent miss, so every reader
+        (including tests) goes through here or builds the tuple explicitly."""
+        return {
+            role: spent
+            for (iid, role), spent in self.sessions_per_issue.items()
+            if iid == issue_id
+        }
+
+    def _reset_issue_sessions(self, issue_id: str) -> None:
+        """Drop EVERY role's counter for one issue (unpark: both budgets are
+        restored, matching the park comment's promise)."""
+        for key in [k for k in self.sessions_per_issue if k[0] == issue_id]:
+            del self.sessions_per_issue[key]
 
     def _provider_circuit(self, provider_id: str) -> ProviderCircuit:
         circuit = self.provider_circuits.get(provider_id)
@@ -501,7 +547,7 @@ class Orchestrator:
         if issue.id in self.parked:
             self.parked.discard(issue.id)
             self._park_notified.discard(issue.id)
-            self.sessions_per_issue.pop(issue.id, None)
+            self._reset_issue_sessions(issue.id)
             log("issue unparked (status:parked label removed)",
                 issue_id=issue.id, issue_identifier=issue.identifier)
         if not self._state_slots_available(issue.state):
@@ -546,10 +592,19 @@ class Orchestrator:
         self._marker_refused.discard(issue.id)  # eligible again -> re-arm the notice
         # The cap is always positive (workflow.py coerces invalid values back
         # to the default) — parking cannot be configured off.
+        # The cap is per ROLE (issue #35 / AgDR-033): the role is derived from the
+        # dispatch-time state and frozen for the whole session, so the verify
+        # passes a ticket spent at `status:triage` do not shrink the implementer
+        # budget it gets at `status:todo`.
         cap = cfg.agent().max_sessions_per_issue
-        spent = self.sessions_per_issue.get(issue.id, 0)
+        role = session_role(issue.state)
+        session_key = (issue.id, role)
+        spent = self.sessions_per_issue.get(session_key, 0)
         if spent >= cap:
-            await self._park(issue, f"session cap reached ({spent}/{cap})")
+            await self._park(
+                issue,
+                f"{role} budget exhausted ({spent}/{cap} {role} sessions)",
+            )
             return DispatchOutcome(DispatchResult.REFUSED, runner.provider_id)
 
         provider_id = runner.provider_id
@@ -628,14 +683,15 @@ class Orchestrator:
         entry = RunningEntry(task=task, identifier=issue.identifier, issue=issue,
                              provider_id=provider_id,
                              stall_timeout_ms=runner.stall_timeout_ms,
+                             session_key=session_key,
                              retry_attempt=attempt,
                              circuit_probe_token=permit.probe_token)
         self.running[issue.id] = entry
         self._cancel_retry(issue.id)
-        self.sessions_per_issue[issue.id] = spent + 1
+        self.sessions_per_issue[session_key] = spent + 1
         log("dispatched", issue_id=issue.id, issue_identifier=issue.identifier,
             provider_id=provider_id, attempt=attempt,
-            session_number=spent + 1, outcome="started")
+            session_role=role, session_number=spent + 1, outcome="started")
         task.add_done_callback(
             lambda t, iid=issue.id: self._on_worker_done(iid, t))
         return DispatchOutcome(DispatchResult.STARTED, provider_id)
@@ -845,7 +901,7 @@ class Orchestrator:
             )
             self._log_circuit_transition(transition, entry)
             if circuit.is_circuit_failure(failure_class):
-                self._refund_issue_session(issue_id)
+                self._refund_issue_session(entry.session_key)
                 self.provider_waiting[issue_id] = ProviderWaitEntry(
                     identifier=entry.identifier,
                     issue=entry.issue,
@@ -867,12 +923,15 @@ class Orchestrator:
                 outcome="failed", failure_class=failure_class.value,
                 error=str(exc))
 
-    def _refund_issue_session(self, issue_id: str) -> None:
-        spent = self.sessions_per_issue.get(issue_id, 0)
+    def _refund_issue_session(self, session_key: tuple[str, str]) -> None:
+        """Give back the session a provider-circuit failure burned. Refunds the
+        role budget the session was DRAWN from (`RunningEntry.session_key`), not
+        whatever role the issue's state implies now (issue #35)."""
+        spent = self.sessions_per_issue.get(session_key, 0)
         if spent <= 1:
-            self.sessions_per_issue.pop(issue_id, None)
+            self.sessions_per_issue.pop(session_key, None)
         else:
-            self.sessions_per_issue[issue_id] = spent - 1
+            self.sessions_per_issue[session_key] = spent - 1
 
     async def _resume_provider_waiters(self, candidates: list[Issue]) -> None:
         if not self.provider_waiting:
@@ -1340,8 +1399,9 @@ class Orchestrator:
             f"**Switchboard parked this issue** — {reason}.\n\n"
             f"The orchestrator will not dispatch it again while it carries the "
             f"`{PARK_LABEL}` label. Remove that label (or move the issue off "
-            f"*Parked* on the board) to re-dispatch — the session counter resets "
-            f"on unpark. The per-issue workspace is preserved for diagnosis at "
+            f"*Parked* on the board) to re-dispatch — BOTH session counters "
+            f"(`{VERIFY_ROLE}` and `{IMPLEMENT_ROLE}`) reset on unpark. The "
+            f"per-issue workspace is preserved for diagnosis at "
             f"`{wsm.path_for(issue.identifier)}`."
         )
         # Hold the claim while the tracker writes settle so a poll tick cannot
