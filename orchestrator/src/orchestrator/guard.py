@@ -102,7 +102,7 @@ def _skip_flags(tokens: list[str], value_takers: tuple[str, ...]) -> list[str]:
 
 _GH_VALUE_FLAGS = ("-R", "--repo")
 _GIT_GLOBAL_VALUE_FLAGS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
-                           "--exec-path", "--config-env")
+                           "--exec-path", "--config-env", "--attr-source")
 
 
 def _denied_shape(command: str) -> str | None:

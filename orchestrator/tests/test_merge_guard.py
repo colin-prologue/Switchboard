@@ -178,6 +178,8 @@ def test_adjacent_short_flags_stay_allowed(command, tmp_path):
     "gh pr review 12 --approve=true",
     "git -C . push -f origin branch",
     "git -c user.name=x push --force origin branch",
+    "git --attr-source HEAD push -f origin main",          # r10: separated value
+    "git --attr-source=HEAD push -f origin main",
 ])
 def test_flag_values_and_globals_do_not_bypass(command, tmp_path):
     r = _run_bash(command, tmp_path)
