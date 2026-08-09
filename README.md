@@ -122,6 +122,22 @@ The three human gates:
   **Agents never self-merge.** Merge review includes ratifying any AgDRs the PR
   added — a PR that changed spec/methodology semantics without one is incomplete.
 
+### Worker handoff evidence
+
+Workers hand completed work back by writing `.run/handoff-evidence.json` with
+the issue number (`issue`), pull request number (`pr_number`), and committed
+branch head (`head_sha`). Writing this file is the worker's **final action**;
+workers do not change `status:*` labels themselves.
+
+After the worker turn succeeds, the orchestrator validates that the evidence is
+fresh, the worktree is clean, and exactly one open PR exists on the issue branch.
+That PR must link to and close the issue, and its head must match both `head_sha`
+and the workspace HEAD. Only then does the orchestrator perform the single
+transition to `status:human-review`. Invalid or stale evidence produces a
+diagnostic and no transition. See
+[`AgDR-028`](self/.decisions/AgDR-028-orchestrator-owned-terminal-handoff.md) for
+the complete contract and rationale.
+
 ### Choosing the entry state (proportionality)
 
 The path a ticket takes *is* the risk control — match it to the risk:
