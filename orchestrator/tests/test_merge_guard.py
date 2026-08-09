@@ -220,6 +220,8 @@ def test_separated_push_option_value_is_not_a_refspec(tmp_path):
     "git push --force-if-includes --force-with-lease origin branch",
     "git push --mirror origin",
     "git push --mir origin",
+    "git push --mi origin",
+    "git push --m origin",
 ])
 def test_abbreviations_and_mirror_are_denied(command, tmp_path):
     r = _run_bash(command, tmp_path)

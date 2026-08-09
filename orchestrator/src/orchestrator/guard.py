@@ -216,8 +216,9 @@ def _denied_shape(command: str) -> str | None:
                 if tok.startswith("--force"):
                     return f"git push {tok}"
                 # --mirror force-updates (and deletes) every ref; git accepts
-                # unambiguous abbreviations down to `--mi`
-                if tok != "--" and len(tok) >= 4 and "--mirror".startswith(tok):
+                # unambiguous abbreviations down to `--m` (codex review r8,
+                # PR #136 — no other push flag starts with `m`)
+                if tok != "--" and len(tok) >= 3 and "--mirror".startswith(tok):
                     return f"git push {tok} (mirror)"
                 # value-aware bundle scan: `-fu`/`-uf` deny, `-ofoo` is the
                 # push-option VALUE and does not (o takes a value)
