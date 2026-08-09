@@ -31,7 +31,7 @@ not exact JSON names. We implement that over the Claude CLI.
 | agent `command` (`codex app-server`)| `claude -p --output-format stream-json` (subprocess, line-delimited JSON)       |
 | thread/turn start                   | first `claude -p` invocation; capture `session_id` from the `system/init` event |
 | continuation turn (reuse thread)    | `claude -p --resume <session_id>` (same workspace)                              |
-| turn completed / failed             | terminal `result` message; map `result.subtype` → Succeeded / Failed            |
+| turn completed / failed             | terminal `result` message; map `result.subtype` → Succeeded / Failed, **gated by the record's own `is_error`** (AgDR-032, issue #116): a result that would otherwise be Succeeded but carries `is_error: true` is Failed, classified over `result` / `terminal_reason`. `error_max_turns` with a session id stays Incomplete + resume (AgDR-027) regardless of `is_error`; an absent `is_error` is false. |
 | `max_turns`                         | `--max-turns`                                                                   |
 | approval / auto-approve             | non-interactive permission mode + `--allowedTools`; a denial is surfaced to the agent (not an attempt-killer) — a session that cannot finish because of one ends in a non-success `result`, which fails the attempt. Never blocks on user input (core §10.5). Ratified 2026-07-03 (AgDR-004 addendum): this soft semantic is what shipped and was validated (PRs #13/#17). |
 | sandbox / safety invariants         | **PreToolUse hooks** vetoing tool calls outside the per-issue workspace (stronger than advisory sandbox) |
@@ -134,14 +134,17 @@ Normalized outputs must match the core's issue domain model.
 | terminal states                     | issue **closed** → terminal; `status:*` gate labels are non-active              |
 | `blocked_by` (Linear `blocks`)      | GitHub **native issue dependencies** (blocked-by), read via GraphQL (`blockedBy` connection) |
 | `issue.identifier`                  | the issue **number** (workspace root is per-project, so numbers don't collide)  |
-| tracker **writes**                  | done by the **agent** via `gh` (move label, comment, link PR), not the orchestrator |
+| tracker **writes**                  | **split.** The agent uses `gh` for comments and PR links but writes **no** `status:*` label; its final action is the handoff evidence contract `.run/handoff-evidence.json` (`orchestrator/src/orchestrator/handoff.py`). The **orchestrator** validates that evidence after verified provider success and performs the single `status:human-review` transition itself, alongside its own claim/park labels (issue #61 / AgDR-028) |
 
 **State mapping is the one real semantic gap.** Model state as `status:*` labels:
 the adapter normalizes a `status:todo` label into `state: "todo"`. Gate states
-(`status:drafting`, `status:plan-review`, `status:human-review`) are **not** in
-`active_states`, so the orchestrator never dispatches a gated ticket and parks at a
-handoff state — the human gate is enforced by state, costing zero orchestrator
-code. See `methodology/METHODOLOGY.md`.
+(`status:drafting`, `status:decision`, `status:plan-review`, `status:human-review`)
+are **not** in `active_states`, so the orchestrator never dispatches a gated ticket
+and parks at a handoff state — the human gate is enforced by state, costing zero
+orchestrator code. Gating is by **omission**: adding a gate state is a label plus
+docs, never an `active_states` edit (`status:decision`, issue #55, was added this
+way — the `active_states` line is byte-identical). See
+`methodology/METHODOLOGY.md`.
 
 **EMU note:** native issue dependencies are recent; if cross-repo blocked-by is
 restricted in your org, fall back to a `status:blocked` label (non-active, so
@@ -191,7 +194,7 @@ These are ours, layered on top, not in the original Symphony spec:
   by **(issue, session role)** — a `status:triage` dispatch spends the *verify*
   budget, every other active state spends the *implement* budget — so a ticket
   that needed several adversarial verify passes still arrives at `status:todo`
-  with its full implementation budget (issue #35 / AgDR-030; the cap value is
+  with its full implementation budget (issue #35 / AgDR-033; the cap value is
   the same for both roles). After N worker sessions on one issue **in one
   role** in a process lifetime, the orchestrator *parks* it:
   claim released, workspace preserved (plus the `after_run` run log beside it),

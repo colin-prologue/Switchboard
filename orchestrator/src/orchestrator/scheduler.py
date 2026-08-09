@@ -6,7 +6,7 @@ overridden by: spec/SPEC.md §1 (worker turns are `claude -p` invocations resume
             by session id), SPEC.md §4 owned extension: per-issue session cap
             with parking ("caps as diagnostic checkpoints" — when
             agent.max_sessions_per_issue worker sessions have been spent on one
-            issue IN ONE ROLE (verify vs implement, issue #35 / AgDR-030) in
+            issue IN ONE ROLE (verify vs implement, issue #35 / AgDR-033) in
             this process lifetime, the orchestrator releases the claim,
             posts ONE notification comment on the issue, preserves the
             workspace/logs, and stops re-dispatching until the issue's
@@ -67,7 +67,7 @@ SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
 # decision survives a process restart (AgDR-002 weakest point → resolved).
 PARK_LABEL = "status:parked"
 
-# Session-budget roles (issue #35 / AgDR-030). `max_sessions_per_issue` is
+# Session-budget roles (issue #35 / AgDR-033). `max_sessions_per_issue` is
 # accounted PER ROLE, not per issue: a `status:triage` dispatch runs a VERIFIER
 # session (the triage rubric), every other active state runs an IMPLEMENTER
 # session. Without the split, adversarial verify passes eat the implementation
@@ -79,13 +79,18 @@ VERIFY_STATES = frozenset({"triage"})
 
 
 def session_role(state: str) -> str:
-    """The session role a dispatch in `state` runs as (issue #35 / AgDR-030)."""
+    """The session role a dispatch in `state` runs as (issue #35 / AgDR-033)."""
     return VERIFY_ROLE if state.lower() in VERIFY_STATES else IMPLEMENT_ROLE
 
-# Claim-visibility status labels (issue #14 / AgDR-010). The orchestrator OWNS
-# exactly these three status labels — gate/handoff/triage status labels belong
-# to humans, worker agents, and the verifier respectively and are NEVER written
-# here. `status:in-progress` is board visibility only, NOT a lock (a label
+# Claim-visibility status labels (issue #14 / AgDR-010) plus the terminal
+# handoff label (issue #61 / AgDR-028). The orchestrator owns all four status
+# labels it touches: `status:todo`/`status:in-progress` (plus PARK_LABEL above)
+# track the claim, and `status:human-review` is the single terminal transition
+# it performs ITSELF after provider-turn success + validated
+# `.run/handoff-evidence.json` (`handoff.py`) — workers write evidence, never
+# labels. Gate labels (`drafting`, `plan-review`, `blocked`) stay with humans
+# and the triage labels with the verifier agent; neither is written here.
+# `status:in-progress` is board visibility only, NOT a lock (a label
 # cannot compare-and-swap; cross-runner mutual exclusion is issue #15). It is
 # applied when a `todo` issue is first claimed and cleared when the claim dies.
 TODO_LABEL = "status:todo"
@@ -197,7 +202,7 @@ class Orchestrator:
 
         # owned extension state (SPEC.md §4 session cap / parking)
         # Keyed by (issue id, session role) — NOT by issue id alone (issue #35 /
-        # AgDR-030). Verifier and implementer sessions draw on separate budgets,
+        # AgDR-032). Verifier and implementer sessions draw on separate budgets,
         # so `max_sessions_per_issue` verify passes leave the implementation
         # budget untouched. Read it through `sessions_for_issue()`; a bare-id
         # lookup is always a miss.
@@ -269,7 +274,7 @@ class Orchestrator:
         assert cfg is not None
         return self._runner_selector.select(cfg, issue)
 
-    # -- per-role session budgets (issue #35 / AgDR-030) ------------------------
+    # -- per-role session budgets (issue #35 / AgDR-033) ------------------------
 
     def sessions_for_issue(self, issue_id: str) -> dict[str, int]:
         """Sessions spent on `issue_id`, per role: `{"verify": 2}`.
@@ -587,7 +592,7 @@ class Orchestrator:
         self._marker_refused.discard(issue.id)  # eligible again -> re-arm the notice
         # The cap is always positive (workflow.py coerces invalid values back
         # to the default) — parking cannot be configured off.
-        # The cap is per ROLE (issue #35 / AgDR-030): the role is derived from the
+        # The cap is per ROLE (issue #35 / AgDR-033): the role is derived from the
         # dispatch-time state and frozen for the whole session, so the verify
         # passes a ticket spent at `status:triage` do not shrink the implementer
         # budget it gets at `status:todo`.

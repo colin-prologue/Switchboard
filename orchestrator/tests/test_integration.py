@@ -730,7 +730,7 @@ async def test_active_to_active_state_change_ends_session(tmp_path, monkeypatch)
     assert runner.turns[0][1] is None  # and that turn was a fresh session
 
 
-# --- per-role session budgets (issue #35 / AgDR-030) --------------------------
+# --- per-role session budgets (issue #35 / AgDR-033) --------------------------
 
 
 class VerifierPassRunner:
@@ -1515,6 +1515,58 @@ async def test_codex_provider_failure_waits_without_burning_retry_or_session(
     assert "retry_disposition=provider_wait" in err
     assert "circuit_state=open_latched" in err
     assert err.count("provider circuit blocked dispatch") == 1
+
+
+async def test_logged_out_claude_turn_refunds_session_and_never_records_success(
+    tmp_path,
+    monkeypatch,
+):
+    """Issue #116, the end of the chain the runner starts.
+
+    `test_runner.py` replays the real logged-out capture and proves the runner
+    now returns failed + PROVIDER_AUTHENTICATION; this is what that verdict then
+    does to the scheduler. Pre-#116 the same run returned `succeeded`, so the
+    worker exited with no exception and `_on_worker_done` fed `record_success()`
+    — the logged-out CLI RESET the provider circuit while spending one session
+    per dispatch until the issue false-parked at the cap (#112/#114).
+    """
+    runner = FakeRunner()
+    runner.provider_id = "claude"
+
+    async def logged_out_turn(*args, **kwargs):
+        return TurnResult(
+            status="failed",
+            session_id="7c08bd33-23f4-426e-985b-218140f37abc",
+            error="api_error",
+            failure_class=FailureClass.PROVIDER_AUTHENTICATION,
+        )
+
+    runner.run_turn = logged_out_turn
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, runner=runner)
+    circuit = orch._provider_circuit("claude")
+    successes = 0
+    real_record_success = circuit.record_success
+
+    def counting_record_success():
+        nonlocal successes
+        successes += 1
+        return real_record_success()
+
+    monkeypatch.setattr(circuit, "record_success", counting_record_success)
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    sessions_before = dict(orch.sessions_per_issue)
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+
+    # the session spent on dispatch is refunded, so the cap is not burned
+    assert dict(orch.sessions_per_issue) == sessions_before
+    assert successes == 0                      # circuit never poisoned by a reset
+    assert orch.provider_circuits["claude"].state is CircuitState.OPEN_LATCHED
+    assert issue.id not in orch.retry_attempts
+    assert issue.id not in orch.parked
 
 
 def assigned_issue(n: int, provider_id: str, state: str = "todo") -> Issue:

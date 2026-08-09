@@ -202,6 +202,42 @@ def test_fake_tracker_state_matches_real_normalization():
         assert issue.state == expected  # sanity anchor, still derived above
 
 
+# --- status:decision gates BY OMISSION from active_states (issue #55) ---------
+#
+# No orchestrator code or config knows the word "decision": `active_states` is
+# an allowlist, so a state absent from it is simply never dispatched. These are
+# the regressions that fail if someone adds it to the list.
+
+def test_should_dispatch_false_for_sole_status_decision_label(harness):
+    orch, _tracker, _runner, _ = harness
+    issue = make_issue(1, ["status:decision"])   # state DERIVED from the label
+    assert issue.state == "decision"
+    assert orch._should_dispatch(issue) is False
+
+
+def test_decision_absent_from_active_states(harness):
+    orch, _tracker, _runner, _ = harness
+    assert "decision" not in orch._cfg.tracker().active_states
+
+
+async def test_status_decision_issue_is_never_claimed(harness):
+    """End-to-end on the tick loop: a decision-gated ticket produces no claim,
+    no label write, and no refusal comment (it is not *refused*, it is simply
+    not a candidate — the gate costs zero orchestrator code)."""
+    orch, tracker, runner, _ = harness
+    issue = make_issue(1, ["status:decision"])
+    tracker.candidates = [issue]
+    tracker.states = {"node-1": issue}
+
+    await orch._tick()
+
+    assert runner.turns == []
+    assert "node-1" not in orch.running
+    assert "node-1" not in orch.claimed
+    assert tracker.labels_added == []
+    assert tracker.comments == []
+
+
 # --- guard behaviour ----------------------------------------------------------
 
 async def test_todo_without_marker_is_refused(harness):

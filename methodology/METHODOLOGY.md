@@ -14,6 +14,7 @@ orchestrator code.
 | `status:triage`        | **yes** | Adversarial ticket verification — dispatched to a verifier session |
 | `status:todo`          | **yes** | Approved, unblocked, dispatchable                              |
 | `status:in-progress`   | **yes** | An agent is working it                                          |
+| `status:decision`      | no      | Waiting on the operator — triage asked a Gate-A question (issue #55) |
 | `status:plan-review`   | no      | Gate B handoff — agent produced a plan/ADR awaiting approval    |
 | `status:human-review`  | no      | Gate C handoff — implementation done, awaiting human merge      |
 | `status:blocked`       | no      | Parked (fallback when native dependencies aren't available)     |
@@ -32,7 +33,9 @@ orchestrator performs the verified transition.
 | Label(s)                                        | Written by | When |
 |-------------------------------------------------|------------|------|
 | `status:drafting`, `status:plan-review`, `status:blocked` | **humans** | authoring/approving at the gates |
-| `status:triage` → `status:todo` \| `status:drafting`      | the **triage verifier agent** | on its PASS / NEEDS WORK verdict |
+| `status:triage` → `status:todo` \| `status:drafting`      | the **triage verifier agent** | on its PASS / NEEDS WORK / SPLIT verdict |
+| `status:triage` → `status:decision`             | the **triage verifier agent** | on its NEEDS DECISION verdict (issue #55) — the ticket is blocked on an unmade human decision |
+| `status:decision` → `status:drafting`           | **humans** | the operator picked an option; the answer is folded into the body at drafting (manual until #51) |
 | `status:human-review`                           | the **orchestrator** | after provider-turn success + validated handoff evidence (issue #61 / AgDR-028; workers only write `.run/handoff-evidence.json`) |
 | `status:todo` → `status:in-progress`, its revert, and `status:parked` | the **orchestrator** | claim taken / claim died / session cap |
 
@@ -90,13 +93,37 @@ testing asks, sizing, boundaries) and routes to exactly one verdict:
 
 - **PASS** → relabel `status:triage → status:todo` (dispatchable).
 - **NEEDS WORK** → relabel `status:triage → status:drafting` + a `## Triage
-  verdict` feedback comment (fixed, grep-able heading).
+  verdict` feedback comment (fixed, grep-able heading). This is the verdict for a
+  **specification error with a determinate answer** — an unstated assumption, an
+  unbounded criterion, a drifted citation.
+- **NEEDS DECISION** → relabel `status:triage → status:decision` + a `## Triage
+  verdict` comment carrying the decision request (the question, the options each
+  steelmanned, per-option acceptance-criteria implications, and "reply on this
+  issue with the chosen option"). This is the verdict for an **unmade human
+  decision** — a Gate-A architecture choice the ticket is stalled on, which a
+  verifier is rightly forbidden to make on the operator's behalf. The boundary
+  against NEEDS WORK is determinacy, not difficulty: a question with a right
+  answer is NEEDS WORK; a question with a *choice* is NEEDS DECISION. Issue #15
+  burned five triage sessions on five concurring NEEDS-WORK verdicts for want of
+  this class.
 - **SPLIT** → file child issues at `status:drafting` (drafted bodies, native
   blocked-by chaining), park the parent at `status:drafting`.
 
+Every verdict comment's first line is `## Triage verdict` and its second line is
+`body-sha1: <40 hex>` — the hash of the body that verdict reviewed, computed by
+the one literal command the prompt embeds (`gh issue view … --json body -q .body
+| git hash-object --stdin`; `git hash-object` is allowlisted, `shasum` is not).
+A re-triaged issue whose current body hash equals the latest verdict's takes the
+**unchanged-body fast-path**: one referral comment and an immediate re-route per
+the prior verdict class, no re-review. A latest verdict with no parseable
+`body-sha1:` line (every pre-#55 verdict) falls through to a full review.
+
 The verifier never edits the issue body and never writes feature code — comments,
 labels, and child issues only. Transitions in: a human (or a `SPLIT` parent)
-files at `status:triage`. Transitions out: `status:todo` or `status:drafting`.
+files at `status:triage`. Transitions out: `status:todo`, `status:drafting`, or
+`status:decision`. `status:decision` leaves only via `status:drafting` (the
+operator's answer must be folded into the body before re-triage —
+`decision → triage` is deliberately illegal; see `workflow/transitions.yml`).
 
 ### When to file at `status:triage` vs straight to `status:todo`
 

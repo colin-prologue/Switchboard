@@ -3,6 +3,10 @@
 - **Status:** accepted (2026-08-08). Implements issue #61; supersedes the
   worker-performed handoff relabel (WORKFLOW step 7, pre-#61) and the Stage 7
   canary's hook-owned transition (`stage7-circuit-after-run.sh`, AgDR-026 era).
+  **Supersedes [AgDR-010](AgDR-010-in-progress-claim-visibility.md) (partial:
+  handoff ownership only)** — its decision #2 assigned `status:human-review` to
+  worker agents; that writer is now the orchestrator. AgDR-010's claim-visibility
+  decisions (`todo → in-progress`, reverts, `parked`) are untouched.
 - **Context:** Issue #59 ended with two `status:*` labels because the worker
   prompt said "move the label" and the agent added without removing. Stage 7
   then showed the deeper race: an agent can expose `status:human-review` while

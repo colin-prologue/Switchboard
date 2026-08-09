@@ -1,4 +1,4 @@
-# AgDR-030 — Session budgets are accounted per role, not per issue
+# AgDR-033 — Session budgets are accounted per role, not per issue
 
 - **Status:** proposed (ratify at the merge gate)
 - **Issue:** #35
