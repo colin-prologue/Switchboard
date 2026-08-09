@@ -171,25 +171,35 @@ def marker_comment_body(
     )
 
 
-def is_fold_marker(comment: IssueComment, bound_comment_id: str) -> bool:
+def is_fold_marker(
+    comment: IssueComment, bound_comment_id: str, *, bot_login: str | None = None
+) -> bool:
     """Marker-first match: AT THE START OF THE COMMENT'S FIRST LINE.
 
     A PREFIX match, never equality (the sha1s vary per fold) and never a
     substring scan of the body — a comment QUOTING a marker (verdicts embed
     whole revised bodies, and bodies quote sentinels) must not spoof one. The
     empty-body guard mirrors `fold.py:118`'s own idiom.
+
+    When `bot_login` is configured (App identity), only that author's markers
+    count: any other participant posting the deterministic prefix would
+    otherwise suppress a legitimate approved fold as `already_folded`.
+    Unconfigured (GITHUB_TOKEN mode), any author is accepted — the
+    single-operator premise.
     """
     if not comment.body.strip():
+        return False
+    if bot_login and (comment.login or "").strip().lower() != bot_login.strip().lower():
         return False
     first = comment.body.lstrip().splitlines()[0]
     return first.startswith(f"{FOLD_MARKER_PREFIX}{bound_comment_id} ")
 
 
 def find_fold_marker(
-    comments: list[IssueComment], bound_comment_id: str
+    comments: list[IssueComment], bound_comment_id: str, *, bot_login: str | None = None
 ) -> IssueComment | None:
     for comment in comments:
-        if is_fold_marker(comment, bound_comment_id):
+        if is_fold_marker(comment, bound_comment_id, bot_login=bot_login):
             return comment
     return None
 
@@ -233,7 +243,9 @@ def _retry(status: str, detail: str, **kw) -> FoldOutcome:
 
 # --- apply -------------------------------------------------------------------
 
-async def apply_fold_signal(tracker, signal: FoldSignal, *, issue: Issue) -> FoldOutcome:
+async def apply_fold_signal(
+    tracker, signal: FoldSignal, *, issue: Issue, bot_login: str | None = None
+) -> FoldOutcome:
     """Apply one fold signal. Returns the outcome; never raises TrackerError.
 
     `issue` is the poll's already-fetched view (state + url only) — every
@@ -313,8 +325,35 @@ async def apply_fold_signal(tracker, signal: FoldSignal, *, issue: Issue) -> Fol
     # COMPLETE-OR-TERMINAL: consume with zero writes regardless of the current
     # digest, because a completed fold's after-digest survives an untouched
     # re-triage round and digests alone cannot tell "resume" from "done".
-    existing = find_fold_marker(comments, bound.id)
+    existing = find_fold_marker(comments, bound.id, bot_login=bot_login)
     if existing is not None:
+        # Discriminate the quiet case (a later re-triage bounced the issue back
+        # to drafting — a verdict NEWER than the marker exists) from the
+        # stranded one (marker committed but the terminal relabel never ran,
+        # e.g. a commit-ambiguous `addComment` whose response was lost). Both
+        # consume (round-6 decision (b): marker-first never relabels); the
+        # stranded one must be LOUD, matching the relabel-failure diagnostic.
+        newer_verdict = any(
+            is_verdict_comment(c)
+            and c.created_at is not None
+            and existing.created_at is not None
+            and c.created_at > existing.created_at
+            for c in comments
+        )
+        if issue.state == "drafting" and not newer_verdict:
+            log(
+                "fold apply: STRANDED FOLD — marker present, issue still at "
+                "status:drafting, and no verdict is newer than the marker: the "
+                "terminal relabel never completed (likely a commit-ambiguous "
+                "marker post); relabel to status:triage by hand",
+                issue=ident, marker=existing.id,
+            )
+            return _decided(
+                "already_folded_stranded",
+                f"fold-applied marker {existing.id} present but the terminal "
+                f"relabel never completed; zero writes — relabel by hand",
+                bound_comment_id=bound.id,
+            )
         return _decided(
             "already_folded",
             f"fold-applied marker {existing.id} already present for the bound "
@@ -344,6 +383,18 @@ async def apply_fold_signal(tracker, signal: FoldSignal, *, issue: Issue) -> Fol
         # fold, so the closed check runs before the BODY write.
         return _decided("skipped_closed", "issue was closed before the body write",
                         bound_comment_id=bound.id)
+    if DRAFTING_LABEL not in current.labels:
+        # A human transition landed between the poll's snapshot and this fresh
+        # read (e.g. drafting -> decision). The relabel helper would refuse at
+        # the end, but by then the body would already be rewritten — a stale
+        # approval must never modify an issue after a newer human transition.
+        return _decided(
+            "skipped_state_changed",
+            f"issue left {DRAFTING_LABEL} before the body write "
+            f"(labels now: {', '.join(current.labels) or 'none'}); "
+            f"the newer transition wins",
+            bound_comment_id=bound.id,
+        )
 
     before_now = body_digest(current.description)
     if before_now == signal.body_sha1:

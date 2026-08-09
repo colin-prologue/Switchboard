@@ -30,10 +30,12 @@ from pathlib import Path
 import pytest
 
 import orchestrator.scheduler as scheduler_mod
+from orchestrator.fold import FoldSignal
 from orchestrator.fold_apply import (
     FOLD_MARKER_PREFIX,
     PROPOSAL_CLOSE,
     PROPOSAL_OPEN,
+    apply_fold_signal,
     body_digest,
     marker_first_line,
 )
@@ -2778,17 +2780,121 @@ async def test_completed_fold_re_emitted_after_a_re_triage_round_writes_nothing(
                      login="switchboard-agent[bot]",
                      created_at=datetime(2026, 8, 1, 13, tzinfo=UTC))]
     # A later re-triage round routed NEEDS WORK and put it back at drafting with
-    # the body untouched — so the digest still equals after-sha1.
+    # the body untouched — so the digest still equals after-sha1. The re-triage
+    # POSTS ITS VERDICT (newer than the marker): that newer verdict is what
+    # discriminates this quiet case from a STRANDED fold (codex review, PR #132).
+    tracker.issue_comments["126"] = tracker.issue_comments["126"] + [
+        IssueComment(id="IC_v2",
+                     body=f"## Triage verdict\nbody-sha1: {after}\n\n"
+                          "NEEDS WORK — round 2 findings.",
+                     login="switchboard-agent[bot]",
+                     created_at=datetime(2026, 8, 1, 14, tzinfo=UTC))]
     issue.labels = ["status:drafting"]
     _recompute_state_from_labels(issue)
     orch.fold_signals_seen.clear()          # restart
     baseline = (len(tracker.body_writes), len(tracker.comments))
 
     await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
 
     assert (len(tracker.body_writes), len(tracker.comments)) == baseline
     assert _status_labels(issue) == ["status:drafting"]   # NOT re-relabelled
-    assert "status=already_folded" in capfd.readouterr().err
+    assert "status=already_folded" in err
+    assert "STRANDED" not in err            # the quiet case stays quiet
+
+
+async def test_stranded_fold_marker_present_no_newer_verdict_is_loud(
+        tmp_path, monkeypatch, capfd):
+    """Codex review (PR #132): a commit-ambiguous marker post (`addComment`
+    committed, response lost) leaves body+marker durable and the relabel
+    never-run. The next poll's marker-first must not consume that SILENTLY:
+    marker present + still drafting + NO verdict newer than the marker ==
+    stranded, and the diagnostic matches the relabel-failure one. Still zero
+    writes and no relabel (round-6 decision (b))."""
+    orch, tracker, issue = _fold_harness(
+        tmp_path, monkeypatch, body=REVISED_BODY)   # body already folded
+    before = body_digest(ORIGINAL_BODY)
+    after = body_digest(REVISED_BODY)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True),
+        IssueComment(id="IC_marker",
+                     body=marker_first_line("IC_v", before, after) + "\n\nprov.",
+                     login="switchboard-agent[bot]",
+                     created_at=datetime(2026, 8, 1, 13, tzinfo=UTC)),
+    ]
+    baseline = (len(tracker.body_writes), len(tracker.comments))
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "STRANDED FOLD" in err
+    assert "status=already_folded_stranded" in err
+    assert (len(tracker.body_writes), len(tracker.comments)) == baseline
+    assert _status_labels(issue) == ["status:drafting"]   # no relabel (b)
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}   # consumed
+
+
+async def test_human_transition_between_poll_and_apply_wins(
+        tmp_path, monkeypatch, capfd):
+    """Codex review (PR #132): the poll snapshot said drafting, but a human
+    moved the issue before apply's fresh read. Only closure was checked; a
+    stale approval must never rewrite the body after a newer human transition.
+    The fresh read's labels gate the body write."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True)]
+
+    real_fetch = tracker.fetch_issue_states_by_ids
+
+    async def flip_then_fetch(ids):
+        issue.labels = ["status:decision"]
+        _recompute_state_from_labels(issue)
+        return await real_fetch(ids)
+
+    monkeypatch.setattr(tracker, "fetch_issue_states_by_ids", flip_then_fetch)
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "status=skipped_state_changed" in err
+    assert tracker.body_writes == []                      # body NOT rewritten
+    assert _marker_comments(tracker) == []
+    assert _status_labels(issue) == ["status:decision"]   # newer transition wins
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}   # consumed
+
+
+async def test_marker_from_non_bot_author_cannot_suppress_the_fold(
+        tmp_path, monkeypatch):
+    """Codex review (PR #132): with the App identity configured, marker
+    recognition requires the bot author — any other participant posting the
+    deterministic prefix must not consume a legitimate approved fold as
+    already_folded."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    spoof = marker_first_line("IC_v", before, body_digest(REVISED_BODY))
+    comments = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True),
+        IssueComment(id="IC_spoof", body=spoof + "\n",
+                     login="mallory",
+                     created_at=datetime(2026, 8, 1, 13, tzinfo=UTC)),
+    ]
+    tracker.issue_comments["126"] = comments
+    signal = FoldSignal(
+        issue_id=issue.id, issue_identifier="126", verdict_comment_id="IC_v",
+        body_sha1=before, channel="reaction", approved=True,
+        operator_login=OPERATOR, source_node_id="RE_IC_v",
+    )
+
+    outcome = await apply_fold_signal(
+        tracker, signal, issue=issue, bot_login="switchboard-agent[bot]")
+    assert outcome.status == "applied"
+    assert tracker.body_writes == [(issue.id, REVISED_BODY)]
+
+    # Unconfigured (GITHUB_TOKEN mode) the author is not checked — the
+    # single-operator premise — so the same spoof would suppress; that
+    # behaviour is exercised by the marker tests above via login-bearing
+    # markers accepted with bot_login=None.
 
 
 async def test_a_comment_quoting_the_marker_does_not_suppress_the_fold(

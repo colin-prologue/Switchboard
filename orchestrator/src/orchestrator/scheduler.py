@@ -570,7 +570,9 @@ class Orchestrator:
                 # re-emittable so the next poll resumes it; every decided
                 # outcome (applied, refused, vetoed, skipped, diverged,
                 # terminal relabel failure) consumes.
-                outcome = await apply_fold_signal(tracker, signal, issue=issue)
+                outcome = await apply_fold_signal(
+                    tracker, signal, issue=issue, bot_login=bot_login
+                )
                 log("fold apply", issue_identifier=signal.issue_identifier,
                     verdict_comment_id=signal.verdict_comment_id,
                     **outcome.log_fields())
