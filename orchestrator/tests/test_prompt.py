@@ -251,3 +251,31 @@ def test_every_verdict_carries_the_body_sha1_block():
     # PASS posts a comment too — otherwise the next re-triage has nothing to
     # compare against and the fast-path can never fire on a PASSed ticket.
     assert "That includes PASS" in out
+
+
+# --- worker fold prohibition (issue #51 part a) -------------------------------
+
+
+def test_worker_prompt_forbids_agents_from_signalling_a_fold():
+    """The operator's approval channel must be operator-only.
+
+    `fold.operator_logins` filters by login, but the prompt-side prohibition is
+    the belt to that suspenders: an agent that reacts 👍 on the verdict for its
+    OWN ticket would fold it and defeat Gate A. Detection is read-only, so
+    nothing downstream re-checks authorship — the rule has to reach the worker.
+    """
+    out = render_prompt(_real_base_body(), make_issue(labels=["status:todo"]), attempt=None)
+    assert "## How to work it" in out  # the worker branch, not the verifier's
+    assert "Never signal a fold." in out
+    # Both channels named explicitly, so neither reads as the permitted one.
+    assert "/fold" in out and "/no-fold" in out
+    assert "Never react to a verdict comment" in out
+
+
+def test_fold_prohibition_lives_in_the_worker_branch_only():
+    """The verifier AUTHORS verdict comments; it is not the audience for a rule
+    about approving them, and the branches must stay cleanly separated."""
+    verifier = render_prompt(
+        _real_base_body(), make_issue(labels=["status:triage"]), attempt=None
+    )
+    assert "Never signal a fold." not in verifier

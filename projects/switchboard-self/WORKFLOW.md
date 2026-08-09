@@ -40,6 +40,17 @@ agent:
   # updated by a human). Caps are diagnostic checkpoints, not kill switches.
   max_sessions_per_issue: 3
 
+# Owned extension (issue #51): operator identity for fold-signal DETECTION.
+# Only 👍/👎 reactions and `/fold` // `/no-fold` comments from these GitHub
+# logins count as approval of a `## Triage verdict` comment. Read by the
+# scheduler's fold sub-poll ONLY — it never affects dispatch eligibility, and
+# detection performs zero GitHub writes. An empty list (the default) disables
+# detection entirely, costing zero API calls. The bot identity
+# ($SB_APP_BOT_LOGIN) is never an operator: agents do not approve their own
+# verdicts.
+fold:
+  operator_logins: []
+
 # Pass-through execution block for the Claude adapter (see spec/SPEC.md §1).
 # --verbose is required by the CLI for stream-json in -p mode. Documented
 # permission posture (core §10.5): file edits auto-accepted (bounded by the
@@ -269,6 +280,11 @@ once the verdict is routed.
    Do not re-derive or inline them.
 3. **Honor the contract in the issue body.** The acceptance criteria are your
    definition of done and the non-goals are hard boundaries. Do not exceed scope.
+   **Never signal a fold.** 👍/👎 reactions on a `## Triage verdict` comment and
+   `/fold` // `/no-fold` replies are the OPERATOR's approval channel (issue
+   #51). Never react to a verdict comment and never post `/fold` or `/no-fold`
+   — an agent-authored approval would fold its own ticket's verdict and defeat
+   Gate A. Raise concerns in ordinary prose on the PR or the issue instead.
 4. **Implement** on the current branch. Keep commits scoped and conventional.
 5. **Verify** against the acceptance criteria before handing off. Run the repo's
    checks/tests. Do not hand off red. Your permission allowlist admits exactly

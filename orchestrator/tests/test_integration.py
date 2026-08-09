@@ -40,7 +40,9 @@ from orchestrator.scheduler import (
 )
 from orchestrator.types import (
     BlockerRef,
+    CommentReaction,
     Continuation,
+    IssueComment,
     FailureClass,
     Issue,
     TrackerError,
@@ -109,6 +111,7 @@ class FakeTracker:
         self.labels_added: list[tuple[str, tuple[str, ...]]] = []
         self.labels_removed: list[tuple[str, tuple[str, ...]]] = []
         self.open_prs: dict[str, list[dict]] = {}
+        self.issue_comments: dict[str, list] = {}  # issue number -> IssueComment
         self.sole_status_swaps: list[tuple[str, str]] = []
         self.add_labels_error: TrackerError | None = None  # set to simulate a write failure
         self.remove_labels_error: TrackerError | None = None
@@ -118,6 +121,21 @@ class FakeTracker:
 
     async def fetch_issues_by_states(self, state_names):
         return list(self.terminal) if state_names else []
+
+    async def fetch_open_issues_by_status(self, status_names):
+        # Conformance note (OBS-023), issue #51: the real method derives its
+        # result by filtering the SAME open-issue set on the normalized
+        # `issue.state` — it does not maintain a separate per-status index. A
+        # filterless fake would green-wash the defect this method exists to fix
+        # (gate states are invisible to fetch_candidate_issues because they are
+        # not active states), so the fake filters the same way.
+        wanted = {s.strip().lower() for s in status_names if s and s.strip()}
+        if not wanted:
+            return []
+        return [i for i in self.candidates if i.state in wanted]
+
+    async def fetch_issue_comments(self, issue_number):
+        return list(self.issue_comments.get(str(issue_number), []))
 
     async def fetch_issue_states_by_ids(self, ids):
         return [self.states[i] for i in ids if i in self.states]
@@ -2226,3 +2244,70 @@ async def test_invalid_evidence_is_diagnostic_not_transition(
     err = capfd.readouterr().err
     assert "handoff evidence rejected" in err
     assert "head_mismatch" in err
+
+
+# --- fold-signal sub-poll (issue #51 part a) ----------------------------------
+
+
+async def test_fold_signal_surfaces_once_per_process_and_writes_nothing(
+    tmp_path, monkeypatch, capfd
+):
+    """A 👍 on a verdict comment of a `status:decision` issue surfaces exactly
+    once per process lifetime, with zero tracker writes.
+
+    The issue is in a GATE state, so `fetch_candidate_issues` never returns it —
+    the poller reaches it only through `fetch_open_issues_by_status`, and the
+    fake filters client-side exactly as the real tracker does.
+    """
+    tmpl = WORKFLOW_TMPL.replace(
+        "polling:", "fold:\n  operator_logins: [\"Colin-Prologue\"]\n\npolling:"
+    )
+    orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, workflow_tmpl=tmpl)
+    monkeypatch.setenv("SB_APP_BOT_LOGIN", "switchboard-agent[bot]")
+
+    issue = make_issue(51, state="decision")
+    tracker.candidates = [issue]
+    tracker.issue_comments["51"] = [
+        IssueComment(
+            id="IC_verdict",
+            body="## Triage verdict\nbody-sha1: " + "a" * 40 + "\n\nNEEDS DECISION",
+            login="switchboard-agent[bot]",
+            created_at=datetime(2026, 8, 1, tzinfo=UTC),
+            reactions=(
+                CommentReaction(
+                    id="RE_1", content="THUMBS_UP", login="colin-prologue",
+                    created_at=datetime(2026, 8, 1, 1, tzinfo=UTC),
+                ),
+            ),
+        ),
+    ]
+
+    await orch._tick()
+    err = capfd.readouterr().err
+    assert "fold signal detected" in err
+    assert "verdict_comment_id=IC_verdict" in err
+    assert orch.fold_signals_seen == {"RE_1"}
+
+    # A gate-state issue is never dispatched, and part (a) writes NOTHING.
+    assert runner.turns == []
+    assert (tracker.comments, tracker.labels_added, tracker.labels_removed) == ([], [], [])
+
+    # Second poll (interval forced open): the same standing reaction must not
+    # re-emit within one process lifetime.
+    orch._fold_last_poll_at = None
+    await orch._tick()
+    assert "fold signal detected" not in capfd.readouterr().err
+    assert orch.fold_signals_seen == {"RE_1"}
+
+
+async def test_fold_poll_disabled_by_default_makes_no_calls(harness, monkeypatch):
+    """Empty `fold.operator_logins` (the shipped default) = detection off."""
+    orch, tracker, _, _ = harness
+
+    async def boom(*_args, **_kwargs):  # pragma: no cover - must never run
+        raise AssertionError("fold poll ran with an empty operator allowlist")
+
+    tracker.fetch_open_issues_by_status = boom
+    tracker.candidates = [make_issue(52, state="decision")]
+    await orch._tick()
+    assert orch.fold_signals_seen == set()
