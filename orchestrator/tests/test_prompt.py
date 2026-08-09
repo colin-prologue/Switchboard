@@ -164,3 +164,84 @@ def test_triage_needs_work_removes_marker_in_same_command():
     # Routing back to drafting drops the provenance marker in the same command.
     assert "--remove-label status:triage,gate:triage-passed" in line
     assert "--add-label status:drafting" in line
+
+
+# --- NEEDS DECISION + unchanged-body fast-path (issue #55) --------------------
+
+def _verifier_prompt() -> str:
+    return render_prompt(_real_base_body(), make_issue(labels=["status:triage"]), attempt=None)
+
+
+def test_body_hash_command_is_embedded_verbatim():
+    """The ONE literal command, byte-for-byte. `git hash-object` is allowlisted
+    under Bash(git:*); `shasum` is NOT, and a denied command strands the
+    session. Any drift here (a jq variant, a different digest tool) breaks the
+    cross-session comparability the fast-path depends on."""
+    # In the template, verbatim with the Liquid placeholder...
+    template = _real_base_body()
+    assert (
+        "gh issue view {{ issue.identifier }} --repo acme/widgets "
+        "--json body -q .body | git hash-object --stdin"
+    ) in template
+    # ...and in the rendered prompt the agent actually reads, with the issue
+    # number substituted and nothing else changed.
+    out = _verifier_prompt()
+    assert (
+        "gh issue view 42 --repo acme/widgets "
+        "--json body -q .body | git hash-object --stdin"
+    ) in out
+    # The allowlist trap is named so no session substitutes a denied variant.
+    assert "`shasum` is **not**" in out
+
+
+def test_needs_decision_verdict_present_with_routing_and_structure():
+    out = _verifier_prompt()
+    assert "NEEDS DECISION" in out
+    # Routes triage -> decision, and only that (no marker churn on this edge).
+    line = next(l for l in out.splitlines()
+                if "gh issue edit" in l and "status:decision" in l)
+    assert "--remove-label status:triage" in line
+    assert "--add-label status:decision" in line
+    assert "gate:triage-passed" not in line
+    # Required comment structure per Mechanics 1.
+    for required in (
+        "## Triage verdict",
+        "body-sha1:",
+        "steelmanned",
+        "acceptance-criteria implications",
+        "reply on this issue with the chosen option",
+    ):
+        assert required in out, f"missing decision-request element: {required!r}"
+
+
+def test_needs_decision_boundary_against_needs_work_is_stated():
+    out = _verifier_prompt()
+    assert "determinate answer" in out
+    assert "unmade human decision" in out
+
+
+def test_fast_path_covers_all_five_table_rows():
+    out = _verifier_prompt()
+    assert "Unchanged-body fast-path" in out
+    table = out.split("Unchanged-body fast-path", 1)[1]
+    rows = [l for l in table.splitlines() if l.startswith("| ")]
+    joined = "\n".join(rows)
+    # NEEDS WORK / SPLIT -> drafting + marker cleared; NEEDS DECISION -> decision;
+    # PASS -> todo + marker in the same command; no-hash -> full review.
+    assert joined.count(
+        "--remove-label status:triage,gate:triage-passed --add-label status:drafting"
+    ) == 2
+    assert "--remove-label status:triage --add-label status:decision" in joined
+    assert "--remove-label status:triage --add-label status:todo,gate:triage-passed" in joined
+    no_hash = [r for r in rows if "no parseable" in r]
+    assert no_hash and "full review" in no_hash[0], (
+        "the retrofit fall-through row must send pre-#55 verdicts to a full review"
+    )
+
+
+def test_every_verdict_carries_the_body_sha1_block():
+    out = _verifier_prompt()
+    assert "body-sha1: <the 40-hex digest from Step 0>" in out
+    # PASS posts a comment too — otherwise the next re-triage has nothing to
+    # compare against and the fast-path can never fire on a PASSed ticket.
+    assert "That includes PASS" in out

@@ -95,6 +95,10 @@ mklabel "status:triage"       "006B75" "Adversarial ticket verification before d
 mklabel "status:todo"         "0E8A16" "Approved & dispatchable"
 mklabel "status:in-progress"  "1D76DB" "Agent working"
 mklabel "status:plan-review"  "D93F0B" "Gate B: plan/ADR awaiting approval (not dispatched)"
+# #55: waiting-on-operator gate. Triage routes here on a NEEDS DECISION verdict
+# (the ticket is blocked on an unmade human decision, which a verifier must not
+# make). Gate BY OMISSION from active_states — no orchestrator code reads it.
+mklabel "status:decision"     "C2E0C6" "Waiting on operator: triage asked a Gate-A question (not dispatched)"
 mklabel "status:human-review" "5319E7" "Gate C: implementation done, awaiting human merge"
 # C2 (2026-07-05): status:blocked is advisory only — the orchestrator gates on
 # GitHub-native blocked-by, NOT this label. Reworded so it no longer collides
