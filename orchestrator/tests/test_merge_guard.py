@@ -262,3 +262,29 @@ def test_config_injected_force_is_denied(command, tmp_path):
 def test_benign_config_and_attached_repo_are_allowed(command, tmp_path):
     r = _run_bash(command, tmp_path)
     assert r.returncode == 0
+
+
+# --- case-folded config keys + mirror-by-config (round 7, PR #136) ------------
+
+@pytest.mark.parametrize("command", [
+    "git -c remote.origin.Push=+HEAD:refs/heads/main push origin",
+    "git -c Remote.origin.PUSH=+HEAD:refs/heads/main push origin",
+    "git -cremote.origin.Push=+HEAD:refs/heads/main push origin",
+    "git --config-env remote.origin.PUSH=FORCE_VAR push origin",
+    "git -c remote.origin.mirror=true push origin",
+    "git -c Remote.origin.Mirror=true push origin",
+    "git -cremote.origin.mirror=true push origin",
+    "git --config-env remote.origin.mirror=MIRROR_VAR push origin",
+])
+def test_casefolded_and_mirror_config_are_denied(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+
+
+@pytest.mark.parametrize("command", [
+    "git -c remote.origin.pushurl=https://x push origin",  # .pushurl is not .push
+    "git -c mirror.something=true push origin",            # not remote.<name>.mirror
+])
+def test_near_miss_config_keys_are_allowed(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0

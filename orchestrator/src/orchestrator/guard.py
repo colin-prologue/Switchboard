@@ -179,10 +179,19 @@ def _denied_shape(command: str) -> str | None:
             if value is not None:
                 key = value.split("=", 1)[0]
                 val = value.split("=", 1)[1] if "=" in value else ""
-                if key.endswith(".push") and (
+                # config variable names are case-insensitive
+                # (`remote.origin.Push` works — codex review r7, PR #136)
+                key_cf = key.lower()
+                if key_cf.endswith(".push") and (
                     val.startswith("+") or source == "--config-env"
                 ):
                     return f"git -c {key}=+... (force via push config)"
+                # remote.<name>.mirror=true is `push --mirror` by config
+                # (codex review r7 demonstrated it deleting remote refs);
+                # deny for any value — no legitimate worker sets it, and a
+                # --config-env value is unreadable here anyway
+                if key_cf.startswith("remote.") and key_cf.endswith(".mirror"):
+                    return f"git -c {key}=... (mirror via remote config)"
             gi += 1
         rest = _skip_flags(tokens[1:], _GIT_GLOBAL_VALUE_FLAGS)
         if rest[:1] == ["push"]:
