@@ -212,10 +212,14 @@ def _denied_shape(command: str) -> str | None:
             positionals = 0
             while i < len(args):
                 tok = args[i]
-                # a bare -o/--push-option consumes the NEXT token as its
-                # value (codex review, PR #136 — `git push -o +foo` is a
-                # push option, not a force refspec)
-                if tok in ("-o", "--push-option"):
+                # a bare value-taking push option consumes the NEXT token as
+                # its value (codex review, PR #136 — `git push -o +foo` is a
+                # push option, not a force refspec; r11 — a separated
+                # `--receive-pack git-receive-pack` value counted as the
+                # repository operand shifts a `+remote` repo into refspec
+                # position)
+                if tok in ("-o", "--push-option", "--receive-pack", "--exec",
+                           "--repo", "--recurse-submodules"):
                     i += 2
                     continue
                 # any --force* prefix: covers --force, --force-with-lease

@@ -244,6 +244,16 @@ def test_repository_operand_starting_with_plus_is_not_a_refspec(tmp_path):
     # ...a refspec AFTER the repository still denies
     r2 = _run_bash("git push +remote +main", tmp_path)
     assert r2.returncode == 2
+    # a separated push-option value must not count as the repository
+    # operand (round 11: --receive-pack's value shifted +remote into
+    # refspec position)
+    r3 = _run_bash(
+        "git push --dry-run --receive-pack git-receive-pack +remote HEAD",
+        tmp_path)
+    assert r3.returncode == 0
+    r4 = _run_bash(
+        "git push --receive-pack git-receive-pack origin +main", tmp_path)
+    assert r4.returncode == 2
 
 
 # --- config-injected force + attached repo selector (round 6, PR #136) --------
