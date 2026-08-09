@@ -33,8 +33,10 @@ from orchestrator.provider_circuit import CircuitState, ProviderCircuit
 from orchestrator.scheduler import (
     CLAIM_RELEASE_COMMENT,
     CONTINUATION_PROMPT,
+    IMPLEMENT_ROLE,
     IN_PROGRESS_LABEL,
     TODO_LABEL,
+    VERIFY_ROLE,
     Orchestrator,
     ProviderWaitEntry,
 )
@@ -488,9 +490,9 @@ async def test_gated_states_never_dispatched(harness):
     tracker.states = {"node-4": make_issue(4, "human review")}  # done after 1 turn
     await orch._tick()
     assert set(orch.running) <= {"node-4"}
-    assert orch.sessions_per_issue.get("node-4") == 1
+    assert orch.sessions_for_issue("node-4") == {IMPLEMENT_ROLE: 1}
     for gated in ("node-1", "node-2", "node-3"):
-        assert gated not in orch.sessions_per_issue
+        assert orch.sessions_for_issue(gated) == {}
     await wait_for(lambda: not orch.running)
 
 
@@ -504,8 +506,8 @@ async def test_blocked_todo_never_dispatched(harness):
     ]
     tracker.states = {"node-2": make_issue(2, "human review")}
     await orch._tick()
-    assert "node-1" not in orch.sessions_per_issue
-    assert orch.sessions_per_issue.get("node-2") == 1
+    assert orch.sessions_for_issue("node-1") == {}
+    assert orch.sessions_for_issue("node-2") == {IMPLEMENT_ROLE: 1}
     await wait_for(lambda: not orch.running)
 
 
@@ -591,12 +593,17 @@ async def test_session_cap_parks_issue(harness):
     tracker.states = {"node-1": issue}
 
     await orch._tick()  # session 1: normal exit, issue still active -> continuation
-    await wait_for(lambda: orch.sessions_per_issue.get("node-1") == 2)  # session 2
+    await wait_for(                                                    # session 2
+        lambda: orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 2})
     await wait_for(lambda: "node-1" in orch.parked)  # cap 2 exhausted -> parked
 
     assert len(tracker.comments) == 1                 # exactly one notification
     assert tracker.comments[0][0] == "node-1"
     assert "parked" in tracker.comments[0][1].lower()
+    # issue #35: the comment names WHICH budget ran out (the label set cannot —
+    # there is exactly one park label).
+    assert "implement budget exhausted (2/2 implement sessions)" \
+        in tracker.comments[0][1]
     # issue #14: the todo dispatch made the claim visible (status:in-progress),
     # then park clears it and adds the durable status:parked marker — the
     # one-status-label contract holds across the transition.
@@ -613,7 +620,7 @@ async def test_session_cap_parks_issue(harness):
     assert "node-1" not in orch.retry_attempts
 
     await orch._tick()                                # still parked: no re-dispatch
-    assert orch.sessions_per_issue.get("node-1", 0) == 2
+    assert orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 2}
     assert len(tracker.comments) == 1
     assert len(tracker.labels_added) == 2             # not re-labelled past park
 
@@ -621,7 +628,7 @@ async def test_session_cap_parks_issue(harness):
     # label — not updatedAt — is authoritative, so the issue STAYS parked.
     await orch._tick()
     assert "node-1" in orch.parked
-    assert orch.sessions_per_issue.get("node-1", 0) == 2
+    assert orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 2}
     assert len(tracker.comments) == 1
 
     # human removes the status:parked label -> unparked, counter reset, dispatchable
@@ -632,7 +639,7 @@ async def test_session_cap_parks_issue(harness):
     assert "node-1" not in orch.parked
     # counter reset on unpark: the re-dispatch is a FRESH session 1, not a
     # continuation of the pre-park count (which would immediately re-park).
-    assert orch.sessions_per_issue.get("node-1") == 1
+    assert orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 1}
     await wait_for(lambda: not orch.running)
     await wait_for(lambda: not orch.running)
 
@@ -658,7 +665,7 @@ async def test_parked_issue_not_redispatched_after_restart(tmp_path, monkeypatch
     assert runner.turns == []                            # never dispatched
     assert "node-1" not in orch.running
     assert "node-1" not in orch.claimed
-    assert orch.sessions_per_issue.get("node-1", 0) == 0  # no fresh cap granted
+    assert orch.sessions_for_issue("node-1") == {}        # no fresh cap granted
     assert tracker.comments == []                        # no duplicate park comment
 
 
@@ -679,12 +686,14 @@ async def test_park_label_write_failure_holds_at_cap_without_looping(harness):
     tracker.states = {"node-1": issue}
 
     await orch._tick()
-    await wait_for(lambda: orch.sessions_per_issue.get("node-1") == 2)  # ran to cap
+    await wait_for(                                                    # ran to cap
+        lambda: orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 2})
     for _ in range(4):                                # keep ticking; write keeps failing
         await orch._tick()
         await asyncio.sleep(0.02)
 
-    assert orch.sessions_per_issue.get("node-1") == 2  # counter held at cap, NOT reset
+    # counter held at cap, NOT reset
+    assert orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 2}
     assert len(runner.turns) == 2                      # no bonus sessions past the cap
     assert len(tracker.comments) == 1                  # notified once, no spam
     assert "node-1" not in orch.parked                 # not durably parked (label absent)
@@ -715,7 +724,7 @@ async def test_park_missing_label_halts_dispatch(harness):
     tracker.states["node-2"] = make_issue(2, "human review")
     await orch._tick()
     assert "node-2" not in orch.running
-    assert "node-2" not in orch.sessions_per_issue
+    assert orch.sessions_for_issue("node-2") == {}
 
 
 async def test_active_to_active_state_change_ends_session(tmp_path, monkeypatch):
@@ -737,6 +746,110 @@ async def test_active_to_active_state_change_ends_session(tmp_path, monkeypatch)
                    and "node-1" not in orch.claimed)
     assert len(runner.turns) == 1      # no continuation turns after the relabel
     assert runner.turns[0][1] is None  # and that turn was a fresh session
+
+
+# --- per-role session budgets (issue #35 / AgDR-033) --------------------------
+
+
+class VerifierPassRunner:
+    """Models the triage verifier routing a PASS, at the real verifier's fidelity.
+
+    On its `pass_on_turn`-th turn it writes the verdict the way the real verifier
+    does: BOTH `status:todo` and `gate:triage-passed` in ONE `add_labels` call,
+    then `status:triage` removed. The marker is not optional set dressing — a
+    PASS modelled without it is refused by the dispatch guard (`_missing_marker`,
+    which runs BEFORE the cap gate), so the issue would never reach the cap and
+    the test would pass on unfixed code. Holds on `hold_on_turn` so the
+    downstream implementer session is observable mid-flight.
+    """
+
+    provider_id = "fake"
+
+    def __init__(self, tracker, issue_id, pass_on_turn, hold_on_turn=None):
+        self.turn_timeout_ms = 5000
+        self.stall_timeout_ms = 0
+        self.max_budget_usd: float | None = None
+        self.tracker = tracker
+        self.issue_id = issue_id
+        self.pass_on_turn = pass_on_turn
+        self.hold_on_turn = hold_on_turn
+        self.release = asyncio.Event()
+        self.turns: list[tuple[str, str | None, str]] = []
+
+    async def run_turn(self, workspace, prompt, resume_session_id, on_event,
+                       issue_id, agent_token=None):
+        n = len(self.turns) + 1
+        self.turns.append((issue_id, resume_session_id, prompt))
+        if n == self.pass_on_turn:
+            await self.tracker.add_labels(
+                self.issue_id, ["status:todo", "gate:triage-passed"])
+            await self.tracker.remove_labels(self.issue_id, ["status:triage"])
+        if n == self.hold_on_turn:
+            await self.release.wait()
+        return TurnResult(status="succeeded", session_id=f"sess-{n}",
+                          cost_usd=0.01,
+                          usage={"input_tokens": 1, "output_tokens": 1},
+                          num_turns=1)
+
+
+async def test_verify_spend_leaves_implementer_budget_intact(tmp_path, monkeypatch):
+    """AC (issue #35): verifier and implementer sessions are capped SEPARATELY.
+
+    A ticket that burns its FULL verify budget at `status:triage` must still get
+    a full implementer budget once triage PASSes. On the role-agnostic counter
+    the third dispatch found spent == cap and parked the ticket the moment it
+    became implementable (live: #30, #15, #57).
+    """
+    tmpl = WORKFLOW_TMPL.replace(
+        'active_states: ["todo", "in progress"]',
+        'active_states: ["triage", "todo", "in progress"]')
+    runner = VerifierPassRunner(None, "node-1", pass_on_turn=2, hold_on_turn=3)
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, tmpl, runner=runner)
+    runner.tracker = tracker
+    issue = make_issue(1, "triage")
+    # ONE Issue object on both fetch paths: the verifier's label write is visible
+    # to the worker's between-turn refresh AND the next poll, as on real GitHub.
+    tracker.candidates = [issue]
+    tracker.states = {"node-1": issue}
+
+    await orch._tick()                       # verify session 1 (max_turns: 1)
+    # verify session 2 routes PASS mid-turn; the role pin ends it at the turn
+    # boundary and the continuation re-dispatches into the implementer role.
+    await wait_for(lambda: len(runner.turns) == 3)
+
+    # POSITIVE discriminator, not absence-of-park: the issue is RUNNING, and the
+    # implementer counter is a fresh 1 while the verify spend stands at its cap.
+    assert "node-1" in orch.running
+    assert orch.sessions_for_issue("node-1") == {VERIFY_ROLE: 2, IMPLEMENT_ROLE: 1}
+    assert issue.labels == ["status:todo", "gate:triage-passed"]
+    assert tracker.comments == []            # never parked, never refused
+    assert "node-1" not in orch.parked
+
+    runner.release.set()
+    tracker.candidates = []                  # quiesce the continuation retry
+    await wait_for(lambda: not orch.running)
+
+
+async def test_verify_budget_exhaustion_park_comment_names_the_budget(
+        tmp_path, monkeypatch):
+    """AC (issue #35): there is exactly one park label, so the park COMMENT is
+    the only place a reader can learn which budget ran out."""
+    tmpl = WORKFLOW_TMPL.replace(
+        'active_states: ["todo", "in progress"]',
+        'active_states: ["triage", "todo", "in progress"]')
+    orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+    issue = make_issue(1, "triage")          # verifier never routes a verdict
+    tracker.candidates = [issue]
+    tracker.states = {"node-1": issue}
+
+    await orch._tick()
+    await wait_for(lambda: "node-1" in orch.parked)
+
+    assert orch.sessions_for_issue("node-1") == {VERIFY_ROLE: 2}
+    assert len(tracker.comments) == 1
+    assert "verify budget exhausted (2/2 verify sessions)" in tracker.comments[0][1]
+    # Label set unchanged: the sole park label, no new status:* vocabulary.
+    assert tracker.labels_added == [("node-1", ("status:parked",))]
 
 
 async def test_next_turn_token_refresh_remains_reconcilable(tmp_path, monkeypatch):
@@ -1401,7 +1514,7 @@ async def test_codex_provider_failure_waits_without_burning_retry_or_session(
     await wait_for(lambda: issue.id in orch.provider_waiting)
 
     assert issue.id not in orch.retry_attempts
-    assert issue.id not in orch.sessions_per_issue
+    assert orch.sessions_for_issue(issue.id) == {}
     assert issue.id in orch.claimed
     assert issue.id not in orch.parked
     assert orch.provider_waiting[issue.id].retry_attempt is None
@@ -1699,7 +1812,8 @@ async def test_restart_outage_is_bounded_by_provider_capacity_and_refunds_batch(
 
     await orch._tick()
     assert len(orch.running) == 2
-    assert set(orch.sessions_per_issue) == {issues[0].id, issues[1].id}
+    assert set(orch.sessions_per_issue) == {
+        (issues[0].id, IMPLEMENT_ROLE), (issues[1].id, IMPLEMENT_ROLE)}
     codex.release.set()
     await wait_for(lambda: len(orch.provider_waiting) == 2)
 
@@ -1713,7 +1827,7 @@ async def test_restart_outage_is_bounded_by_provider_capacity_and_refunds_batch(
     await asyncio.sleep(0)
     assert len(orch.provider_waiting) == 2
     assert codex_calls == 2
-    assert all(issue.id not in orch.sessions_per_issue for issue in issues)
+    assert all(orch.sessions_for_issue(issue.id) == {} for issue in issues)
 
 
 async def test_retry_maturing_during_open_circuit_preserves_attempt_in_wait(
@@ -1743,7 +1857,7 @@ async def test_retry_maturing_during_open_circuit_preserves_attempt_in_wait(
     assert issue.id in orch.claimed
     assert issue.id in orch.provider_waiting
     assert orch.provider_waiting[issue.id].retry_attempt == 4
-    assert issue.id not in orch.sessions_per_issue
+    assert orch.sessions_for_issue(issue.id) == {}
     assert runner.turns == []
 
 
@@ -1987,8 +2101,8 @@ async def test_todo_dispatch_label_write_costs_no_session(tmp_path, monkeypatch)
     await wait_for(lambda: not orch.running and not orch.retry_attempts
                    and "node-1" not in orch.claimed)
     assert len(runner.turns) == 3                       # ONE session, no forced break
-    todo_sessions = orch.sessions_per_issue.get("node-1")
-    assert todo_sessions == 1
+    todo_sessions = orch.sessions_for_issue("node-1")
+    assert todo_sessions == {IMPLEMENT_ROLE: 1}
     assert tracker.labels_added == [("node-1", ("status:in-progress",))]   # once
     assert tracker.labels_removed == [("node-1", ("status:todo",))]        # once
 
@@ -2001,7 +2115,7 @@ async def test_todo_dispatch_label_write_costs_no_session(tmp_path, monkeypatch)
     await wait_for(lambda: not orch2.running and not orch2.retry_attempts
                    and "node-1" not in orch2.claimed)
     assert len(runner2.turns) == 3
-    assert orch2.sessions_per_issue.get("node-1") == todo_sessions   # PARITY
+    assert orch2.sessions_for_issue("node-1") == todo_sessions      # PARITY
     assert tracker2.labels_added == []                  # already in-progress: no write
     assert tracker2.labels_removed == []
 
@@ -2026,7 +2140,8 @@ async def test_failure_retries_do_not_reflap_in_progress_label(tmp_path, monkeyp
     await orch._tick()
     await wait_for(lambda: "node-1" in orch.parked)     # 3 failed sessions -> park
 
-    assert orch.sessions_per_issue.get("node-1") == 3   # cap spent on failures
+    # cap spent on failures
+    assert orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 3}
     assert tracker.labels_added == [
         ("node-1", ("status:in-progress",)),            # first dispatch: claim visible
         ("node-1", ("status:parked",)),                 # durable park marker

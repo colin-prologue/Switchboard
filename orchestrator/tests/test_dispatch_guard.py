@@ -251,7 +251,7 @@ async def test_todo_without_marker_is_refused(harness):
     assert runner.turns == []                        # never dispatched
     assert "node-1" not in orch.running
     assert "node-1" not in orch.claimed
-    assert "node-1" not in orch.sessions_per_issue   # no session granted
+    assert orch.sessions_for_issue("node-1") == {}   # no session granted
     assert tracker.labels_added == []                # no label writes
     assert len(tracker.comments) == 1                # exactly one refusal comment
     assert tracker.comments[0][0] == "node-1"
@@ -276,7 +276,7 @@ async def test_todo_with_marker_dispatches_normally(harness):
 
     assert len(runner.turns) == 1                    # dispatched
     assert "node-1" in orch.claimed
-    assert orch.sessions_per_issue.get("node-1") == 1
+    assert orch.sessions_for_issue("node-1") == {"implement": 1}
     assert tracker.comments == []                    # no refusal comment
 
     runner.release.set()

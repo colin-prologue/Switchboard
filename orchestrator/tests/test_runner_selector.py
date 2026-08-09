@@ -440,7 +440,7 @@ async def test_open_circuit_refuses_before_new_mixed_assignment(
     assert tracker.operations == []
     assert issue.id not in orchestrator.claimed
     assert issue.id not in orchestrator.running
-    assert issue.id not in orchestrator.sessions_per_issue
+    assert orchestrator.sessions_for_issue(issue.id) == {}
     assert "provider:codex" not in issue.labels
 
 
