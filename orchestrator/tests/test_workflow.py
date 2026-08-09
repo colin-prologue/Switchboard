@@ -982,6 +982,11 @@ def test_workflow_prompt_pins_in_brief_block():
         assert "Keep the `Closes #N` line first" in text, f"{rel}: ordering rule absent"
         # Gate C consequence must be stated where the agent reads it.
         assert "is incomplete at the merge gate" in text, f"{rel}: gate consequence absent"
+        # The closing reference is instructed, not assumed — handoff.py rejects
+        # a PR that does not close this issue with `pr_linkage_missing`.
+        assert "a literal\n   closing reference, not prose that mentions the issue" in text, (
+            f"{rel}: Closes #N instruction absent"
+        )
 
 
 # --- decision-record numbering (self/.decisions) -------------------------------

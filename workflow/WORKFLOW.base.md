@@ -205,8 +205,12 @@ once the verdict is routed.
    the same PR: context, decision, rejected options steelmanned, blast radius,
    weakest point. A PR touching those layers with no AgDR is incomplete and
    will be bounced at the merge gate.
-7. **Hand off, don't self-merge.** Commit, push the branch, open a PR with `gh`
-   linking this issue, attach evidence of the criteria passing.
+7. **Hand off, don't self-merge.** Commit, push the branch, and open a PR with
+   `gh` whose body's FIRST line is `Closes #<this issue's number>` — a literal
+   closing reference, not prose that mentions the issue. The orchestrator
+   validates your handoff by resolving that reference, and rejects it with
+   `pr_linkage_missing` if the PR does not close this issue. Attach evidence of
+   the criteria passing.
 
    The PR body opens with an `## In brief` block — two fields, before any other
    section, for a reader who has none of your context:
