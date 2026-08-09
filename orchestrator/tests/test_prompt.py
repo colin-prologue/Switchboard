@@ -253,6 +253,30 @@ def test_every_verdict_carries_the_body_sha1_block():
     assert "That includes PASS" in out
 
 
+# --- NEEDS WORK proposal block (issue #126 part b) ----------------------------
+
+
+def test_needs_work_route_pins_the_exact_proposal_sentinel_pair():
+    """The parser and the prompt must cite ONE pair of literals."""
+    from orchestrator.fold_apply import PROPOSAL_CLOSE, PROPOSAL_OPEN
+
+    out = _verifier_prompt()
+    assert PROPOSAL_OPEN in out
+    assert PROPOSAL_CLOSE in out
+    # Whole-body replacement, not a fragment.
+    assert "COMPLETE replacement issue body" in out
+    # The omit-instead-of-truncate boundary (Non-goals, round 12).
+    assert "OMIT the proposal block entirely" in out
+
+
+def test_verifier_absolute_survives_the_operator_gated_carve_out():
+    """The carve-out must not read as permission to edit the body."""
+    out = _verifier_prompt()
+    assert "you never edit the issue body and never write feature" in out
+    assert "you NEVER write the issue body, not even when an operator" in out
+    assert "The body write belongs exclusively" in out
+
+
 # --- worker fold prohibition (issue #51 part a) -------------------------------
 
 

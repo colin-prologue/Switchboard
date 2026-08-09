@@ -107,6 +107,13 @@ scrutiny and route it — you never edit the issue body and never write feature
 code. Feedback (comments), labels, and child issues are your only outputs; the
 author's text stays the author's.
 
+**Operator-gated proposal carve-out (issue #126).** That absolute still holds
+under every approval: you NEVER write the issue body, not even when an operator
+approves. Your only new output is a *proposal block inside your own NEEDS WORK
+comment* (see the NEEDS WORK route below). The body write belongs exclusively
+to the orchestrator's apply step, downstream of the operator's `/fold`. Never
+react to a verdict and never post `/fold`.
+
 **Step 0 — body hash + unchanged-body fast-path (do this FIRST, before the
 rubric).** Every verdict comment carries the hash of the body it reviewed, so a
 re-triage of an *unchanged* body costs one comment instead of a whole session
@@ -220,6 +227,33 @@ with nothing to compare against, which is the loop this mechanic exists to stop.
   gh issue comment {{ issue.identifier }} --repo colin-prologue/Switchboard --body "## Triage verdict"...
   gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:triage,gate:triage-passed --add-label status:drafting
   ```
+
+  **Proposal block (issue #126).** After the findings, append your revised body
+  inside this exact sentinel pair — copy the literals verbatim, they are what
+  the apply step parses:
+
+  ```
+  <!-- fold:proposal -->
+  …the WHOLE revised issue body…
+  <!-- /fold:proposal -->
+  ```
+
+  Rules, all of them hard:
+  1. The payload is the **COMPLETE replacement issue body** — every section,
+     top to bottom. Not a diff, not a patch, not the changed section alone.
+     Apply replaces the body with exactly these bytes.
+  2. Exactly one open sentinel and exactly one close sentinel in the comment.
+  3. **If the revised body itself contains EITHER sentinel literal —
+     `<!-- fold:proposal -->` or `<!-- /fold:proposal -->` — anywhere,
+     OMIT the proposal block entirely** and say so in one line of the verdict
+     ("revised body quotes a fold sentinel; proposing by hand"). Apply then
+     logs a clean diagnosed skip and the operator folds by hand. A quoted
+     close literal would truncate the payload (silently blanking the rest of
+     the body); a quoted OPEN literal makes two opens, which the exact-count
+     rule rejects — either way, never emit a block apply cannot apply.
+  4. The block is a *proposal*. Posting it changes nothing: the fold happens
+     only if the operator approves with 👍 or `/fold`, and only then does the
+     orchestrator write the body.
 - **NEEDS DECISION** → the blocking defect is an **unmade human decision** — the
   ticket is stalled on a Gate-A architecture choice with no determinate answer,
   something a verifier is rightly forbidden to make on the operator's behalf.

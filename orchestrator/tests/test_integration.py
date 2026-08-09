@@ -23,12 +23,22 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import replace as dc_replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 import orchestrator.scheduler as scheduler_mod
+from orchestrator.fold import FoldSignal
+from orchestrator.fold_apply import (
+    FOLD_MARKER_PREFIX,
+    PROPOSAL_CLOSE,
+    PROPOSAL_OPEN,
+    apply_fold_signal,
+    body_digest,
+    marker_first_line,
+)
 from orchestrator.provider_circuit import CircuitState, ProviderCircuit
 from orchestrator.scheduler import (
     CLAIM_RELEASE_COMMENT,
@@ -117,6 +127,24 @@ class FakeTracker:
         self.sole_status_swaps: list[tuple[str, str]] = []
         self.add_labels_error: TrackerError | None = None  # set to simulate a write failure
         self.remove_labels_error: TrackerError | None = None
+        # --- fold apply seams (issue #126) ---------------------------------
+        # The body store IS `Issue.description` (fake fidelity, OBS-023: the
+        # real tracker has no separate body field and derives the digest from
+        # the same bytes `fetch_issue_states_by_ids` returns). These record and
+        # perturb writes; the fake stays derive-faithful by default.
+        self.body_writes: list[tuple[str, str]] = []
+        self.update_body_error: TrackerError | None = None
+        self.add_comment_error: TrackerError | None = None
+        # ONE-SHOT divergence injection: perturbs the STORED bytes for exactly
+        # one write. The only way a derive-faithful fake can exercise the
+        # verify-after-write branch (AC 1) without lying about anything else.
+        self.mangle_next_body_write = False
+        # Call-ordinal seam for fetch_issue_states_by_ids. Scope is per APPLY
+        # INVOCATION and the TEST owns that boundary — the fake cannot observe
+        # invocation boundaries, only method calls, so a test resets
+        # `states_calls` immediately before the apply it is arming.
+        self.states_calls = 0
+        self.states_error_at_ordinal: int | None = None
 
     async def fetch_candidate_issues(self):
         return list(self.candidates)
@@ -140,9 +168,35 @@ class FakeTracker:
         return list(self.issue_comments.get(str(issue_number), []))
 
     async def fetch_issue_states_by_ids(self, ids):
+        self.states_calls += 1
+        if self.states_error_at_ordinal == self.states_calls:
+            raise TrackerError("github_api_status", "injected read failure")
         return [self.states[i] for i in ids if i in self.states]
 
+    async def update_issue_body(self, issue_id, body):
+        """Mirror of `updateIssue(input: {id, body})` (issue #126).
+
+        Read-then-write, never an atomic swap: the fake models exactly what the
+        real mutation does, so the accepted TOCTOU residual stays visible to
+        tests instead of being fake-washed away. A body write bumps updatedAt
+        (the `test_integration.py:102` discipline).
+        """
+        if self.update_body_error is not None:
+            raise self.update_body_error
+        stored = body
+        if self.mangle_next_body_write:
+            # One-shot: the stored bytes differ from the intended bytes.
+            self.mangle_next_body_write = False
+            stored = body + "\nMANGLED BY THE SERVER"
+        self.body_writes.append((issue_id, body))
+        bump = datetime.now(UTC)
+        for issue in self._issues_with_id(issue_id):
+            issue.description = stored
+            issue.updated_at = bump
+
     async def add_issue_comment(self, issue_id, body):
+        if self.add_comment_error is not None:
+            raise self.add_comment_error
         self.comments.append((issue_id, body))
         # Mimic GitHub: commenting bumps the issue's updatedAt. Parking no longer
         # keys off updatedAt (the label is authoritative), but the bump is real,
@@ -2432,3 +2486,791 @@ async def test_fold_poll_disabled_by_default_makes_no_calls(harness, monkeypatch
     tracker.candidates = [make_issue(52, state="decision")]
     await orch._tick()
     assert orch.fold_signals_seen == set()
+
+
+# --- fold-signal APPLY (issue #126 part b) ------------------------------------
+#
+# Detection is part (a); everything below exercises the WRITE half against the
+# FakeTracker. The scenarios are organised around the one invariant that makes
+# the loop safe: the fold-applied MARKER — not the body digest — is what says a
+# fold happened, because a completed fold's after-digest survives an untouched
+# re-triage round and therefore cannot distinguish "resume" from "done weeks
+# ago".
+
+ORIGINAL_BODY = "# Issue 126\n\nThe body the operator approved.\n"
+
+# A whole-body replacement that quotes a ``` fence — the payload class the
+# sentinel pair exists to survive.
+REVISED_BODY = (
+    "# Issue 126 (folded)\n"
+    "\n"
+    "## Mechanics\n"
+    "\n"
+    "```python\n"
+    "assert body_digest(payload) == after_sha1\n"
+    "```\n"
+)
+
+OPERATOR = "colin-prologue"
+
+
+def _fold_harness(tmp_path, monkeypatch, *, state="drafting", body=ORIGINAL_BODY):
+    """An orchestrator whose fold poll is armed, plus one gate-state issue.
+
+    Credential shape matters (PR #129): setting only SB_APP_BOT_LOGIN makes the
+    App set partial and validate_dispatch aborts the tick before the fold poll.
+    """
+    tmpl = WORKFLOW_TMPL.replace(
+        "polling:", 'fold:\n  operator_logins: ["Colin-Prologue"]\n\npolling:')
+    orch, tracker, _runner, _ = _build_harness(
+        tmp_path, monkeypatch, workflow_tmpl=tmpl)
+    for var in ("SB_APP_ID", "SB_APP_INSTALLATION_ID", "SB_APP_PRIVATE_KEY_FILE",
+                "SB_APP_BOT_LOGIN", "SB_APP_BOT_USER_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    issue = make_issue(126, state=state)
+    issue.description = body
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+    return orch, tracker, issue
+
+
+def _verdict(cid, *, sha1, proposal=None, minute=1, thumbs_up=False):
+    parts = ["## Triage verdict", f"body-sha1: {sha1}", "",
+             "NEEDS WORK — findings above."]
+    if proposal is not None:
+        parts += ["", PROPOSAL_OPEN, proposal, PROPOSAL_CLOSE]
+    reactions = ()
+    if thumbs_up:
+        reactions = (CommentReaction(
+            id=f"RE_{cid}", content="THUMBS_UP", login=OPERATOR,
+            created_at=datetime(2026, 8, 1, 12, minute, tzinfo=UTC)),)
+    return IssueComment(
+        id=cid, body="\n".join(parts), login="switchboard-agent[bot]",
+        created_at=datetime(2026, 8, 1, 12, minute, tzinfo=UTC),
+        reactions=reactions,
+    )
+
+
+def _vetoed(verdict):
+    return dc_replace(verdict, reactions=(CommentReaction(
+        id="RE_veto", content="THUMBS_DOWN", login=OPERATOR,
+        created_at=datetime(2026, 8, 1, 13, tzinfo=UTC)),))
+
+
+def _operator_comment(cid, text, *, minute=5):
+    return IssueComment(
+        id=cid, body=text, login=OPERATOR,
+        created_at=datetime(2026, 8, 1, 12, minute, tzinfo=UTC))
+
+
+async def _fold_poll(orch, tracker):
+    """One fold sub-poll with the cadence gate forced open.
+
+    Called directly rather than through `_tick` so the `states_calls` ordinal
+    seam means exactly what Mechanics 12 says it means — the TEST owns the
+    per-invocation boundary, and a dispatch pass in the same tick would shift
+    the ordinals under it.
+    """
+    orch._fold_last_poll_at = None
+    return await orch._poll_fold_signals(tracker)
+
+
+def _marker_comments(tracker):
+    return [body for _id, body in tracker.comments
+            if body.startswith(FOLD_MARKER_PREFIX)]
+
+
+def _status_labels(issue):
+    return sorted(lbl for lbl in issue.labels if lbl.startswith("status:"))
+
+
+# --- the happy path + the relabel contract (AC 1, AC 2 provenance) ------------
+
+
+async def test_approved_fold_writes_body_then_marker_then_relabels(
+        tmp_path, monkeypatch):
+    """Write order body -> marker -> relabel, and the marker's recorded values.
+
+    `before:` is the digest the OPERATOR approved (signal.body_sha1); `after:`
+    is a FRESH Step-0 computation over the stored body — asserted, not stated.
+    """
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True)]
+
+    # The relabel must go through the cited helper with the drafting-only
+    # expected set — the helper's DEFAULT set would refuse a drafting issue.
+    seen = {}
+    real_swap = tracker.set_sole_status_label
+
+    async def spy(issue_id, label, expected_status=None):
+        seen["args"] = (issue_id, label, expected_status)
+        return await real_swap(issue_id, label, expected_status=expected_status)
+
+    tracker.set_sole_status_label = spy
+
+    await _fold_poll(orch, tracker)
+
+    assert tracker.body_writes == [(issue.id, REVISED_BODY)]
+    assert issue.description == REVISED_BODY
+    assert seen["args"] == (issue.id, "status:triage", ("status:drafting",))
+    assert _status_labels(issue) == ["status:triage"]
+
+    markers = _marker_comments(tracker)
+    assert len(markers) == 1
+    after = body_digest(issue.description)   # fresh Step-0 over the STORED bytes
+    assert markers[0].splitlines()[0] == (
+        f"<!-- switchboard:fold-applied verdict:IC_v "
+        f"before:{before} after:{after} -->")
+    assert after == body_digest(REVISED_BODY)
+    assert before != after
+
+
+# --- CAS refusal on a true mismatch (AC 1) ------------------------------------
+
+
+async def test_body_changed_under_the_fold_is_refused_and_consumed(
+        tmp_path, monkeypatch, capfd):
+    """The fake recomputes the digest from the MUTATED body (read-then-write,
+    never an atomic swap), so this is a real mismatch, not a staged one."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY),
+                 proposal=REVISED_BODY, thumbs_up=True)]
+    # A third party edited the body between approval and apply.
+    issue.description = ORIGINAL_BODY + "\nsomeone else edited this.\n"
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+    assert "status=refused_clobber" in err
+    assert "bound_comment_id=IC_v" in err
+    assert (tracker.body_writes, tracker.comments,
+            tracker.sole_status_swaps) == ([], [], [])
+    assert _status_labels(issue) == ["status:drafting"]
+
+    # Consumed: a decided outcome, so the next poll must not re-emit.
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}
+    await _fold_poll(orch, tracker)
+    assert "fold signal detected" not in capfd.readouterr().err
+    assert tracker.body_writes == []
+
+
+# --- verify-after-write divergence (AC 1) -------------------------------------
+
+
+async def test_verify_after_write_divergence_is_reported_not_claimed(
+        tmp_path, monkeypatch, capfd):
+    """Induced with the one-shot `mangle_next_body_write`: the fake stays
+    derive-faithful everywhere else, so this is the only honest way to reach the
+    branch. No marker, no relabel — and CONSUMED, because a re-emission's digest
+    would match neither before- nor after-sha1 and would just refuse as a
+    clobber one cycle later."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY),
+                 proposal=REVISED_BODY, thumbs_up=True)]
+    tracker.mangle_next_body_write = True
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "verify-after-write DIVERGENCE" in err
+    assert len(tracker.body_writes) == 1
+    assert _marker_comments(tracker) == []                # marker ABSENT
+    assert tracker.comments == []
+    assert _status_labels(issue) == ["status:drafting"]   # label unchanged
+    assert tracker.sole_status_swaps == []
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}   # consumed
+
+
+# --- partial-fold states (AC 2) -----------------------------------------------
+
+
+async def test_marker_failure_after_body_write_resumes_on_the_next_poll(
+        tmp_path, monkeypatch):
+    """(i) The body landed, the marker did not. The re-entry rule reads the
+    current digest as after-sha1 and RESUMES marker+relabel — no second body
+    write. `before:` is asserted against `signal.body_sha1`, which in a resume
+    is the only source left: the pre-fold body no longer exists to re-read."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True)]
+    tracker.add_comment_error = TrackerError("github_api_status", "comment 502")
+
+    await _fold_poll(orch, tracker)
+    assert len(tracker.body_writes) == 1
+    assert tracker.comments == []
+    assert _status_labels(issue) == ["status:drafting"]
+    assert orch.fold_signals_seen == set()          # re-emittable, not consumed
+
+    tracker.add_comment_error = None
+    await _fold_poll(orch, tracker)
+
+    assert len(tracker.body_writes) == 1            # body NOT rewritten
+    markers = _marker_comments(tracker)
+    assert len(markers) == 1
+    after = body_digest(issue.description)
+    assert markers[0].splitlines()[0] == (
+        f"<!-- switchboard:fold-applied verdict:IC_v "
+        f"before:{before} after:{after} -->")
+    assert _status_labels(issue) == ["status:triage"]
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}
+
+
+async def test_relabel_failure_is_terminal_and_logged_not_resumed(
+        tmp_path, monkeypatch, capfd):
+    """(ii) Round-6 decision (b): the marker means COMPLETE-OR-TERMINAL. Body
+    and marker are durable, the issue stays at drafting for a hand relabel, and
+    a post-restart re-emission hits marker-first and writes nothing."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY),
+                 proposal=REVISED_BODY, thumbs_up=True)]
+    tracker.add_labels_error = TrackerError("github_api_status", "label 502")
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "RELABEL FAILED after body+marker" in err
+    assert len(tracker.body_writes) == 1
+    marker_body = _marker_comments(tracker)[0]
+    assert _status_labels(issue) == ["status:drafting"]   # label unchanged
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}   # consumed, not retried
+
+    # Restart: the per-process dedupe set is gone; the DURABLE marker is the
+    # real cross-restart dedupe, so it must be on the thread apply re-reads.
+    tracker.issue_comments["126"] = tracker.issue_comments["126"] + [
+        IssueComment(id="IC_marker", body=marker_body,
+                     login="switchboard-agent[bot]",
+                     created_at=datetime(2026, 8, 1, 13, tzinfo=UTC))]
+    tracker.add_labels_error = None
+    orch.fold_signals_seen.clear()
+    await _fold_poll(orch, tracker)
+
+    assert len(tracker.body_writes) == 1
+    assert len(tracker.comments) == 1
+    assert _status_labels(issue) == ["status:drafting"]   # still not relabelled
+    assert "status=already_folded" in capfd.readouterr().err
+
+
+async def test_completed_fold_re_emitted_after_a_re_triage_round_writes_nothing(
+        tmp_path, monkeypatch, capfd):
+    """(iii) fold -> re-triage NEEDS WORK -> relabel back to drafting leaves the
+    body digest at after-sha1, so digests alone cannot tell "resume a partial
+    fold" from "done weeks ago". Marker-first is what can."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True)]
+
+    await _fold_poll(orch, tracker)
+    assert _status_labels(issue) == ["status:triage"]
+    marker_body = _marker_comments(tracker)[0]
+    after = body_digest(issue.description)
+    assert marker_body.splitlines()[0] == (
+        f"<!-- switchboard:fold-applied verdict:IC_v "
+        f"before:{before} after:{after} -->")
+
+    # The marker comment is now part of the thread the next poll re-reads.
+    tracker.issue_comments["126"] = tracker.issue_comments["126"] + [
+        IssueComment(id="IC_marker", body=marker_body,
+                     login="switchboard-agent[bot]",
+                     created_at=datetime(2026, 8, 1, 13, tzinfo=UTC))]
+    # A later re-triage round routed NEEDS WORK and put it back at drafting with
+    # the body untouched — so the digest still equals after-sha1. The re-triage
+    # POSTS ITS VERDICT (newer than the marker): that newer verdict is what
+    # discriminates this quiet case from a STRANDED fold (codex review, PR #132).
+    tracker.issue_comments["126"] = tracker.issue_comments["126"] + [
+        IssueComment(id="IC_v2",
+                     body=f"## Triage verdict\nbody-sha1: {after}\n\n"
+                          "NEEDS WORK — round 2 findings.",
+                     login="switchboard-agent[bot]",
+                     created_at=datetime(2026, 8, 1, 14, tzinfo=UTC))]
+    issue.labels = ["status:drafting"]
+    _recompute_state_from_labels(issue)
+    orch.fold_signals_seen.clear()          # restart
+    baseline = (len(tracker.body_writes), len(tracker.comments))
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert (len(tracker.body_writes), len(tracker.comments)) == baseline
+    assert _status_labels(issue) == ["status:drafting"]   # NOT re-relabelled
+    assert "status=already_folded" in err
+    assert "STRANDED" not in err            # the quiet case stays quiet
+
+
+async def test_stranded_fold_marker_present_no_newer_verdict_is_loud(
+        tmp_path, monkeypatch, capfd):
+    """Codex review (PR #132): a commit-ambiguous marker post (`addComment`
+    committed, response lost) leaves body+marker durable and the relabel
+    never-run. The next poll's marker-first must not consume that SILENTLY:
+    marker present + still drafting + NO verdict newer than the marker ==
+    stranded, and the diagnostic matches the relabel-failure one. Still zero
+    writes and no relabel (round-6 decision (b))."""
+    orch, tracker, issue = _fold_harness(
+        tmp_path, monkeypatch, body=REVISED_BODY)   # body already folded
+    before = body_digest(ORIGINAL_BODY)
+    after = body_digest(REVISED_BODY)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True),
+        IssueComment(id="IC_marker",
+                     body=marker_first_line("IC_v", before, after) + "\n\nprov.",
+                     login="switchboard-agent[bot]",
+                     created_at=datetime(2026, 8, 1, 13, tzinfo=UTC)),
+    ]
+    baseline = (len(tracker.body_writes), len(tracker.comments))
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "STRANDED FOLD" in err
+    assert "status=already_folded_stranded" in err
+    assert (len(tracker.body_writes), len(tracker.comments)) == baseline
+    assert _status_labels(issue) == ["status:drafting"]   # no relabel (b)
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}   # consumed
+
+
+async def test_human_transition_between_poll_and_apply_wins(
+        tmp_path, monkeypatch, capfd):
+    """Codex review (PR #132): the poll snapshot said drafting, but a human
+    moved the issue before apply's fresh read. Only closure was checked; a
+    stale approval must never rewrite the body after a newer human transition.
+    The fresh read's labels gate the body write."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True)]
+
+    real_fetch = tracker.fetch_issue_states_by_ids
+
+    async def flip_then_fetch(ids):
+        # The sharper case (codex re-review): a MID-SWAP dual-label state.
+        # Membership on status:drafting would pass; only the sole-status
+        # check (mirroring set_sole_status_label's preemption semantics)
+        # refuses it before the body write.
+        issue.labels = ["status:drafting", "status:decision"]
+        _recompute_state_from_labels(issue)
+        return await real_fetch(ids)
+
+    monkeypatch.setattr(tracker, "fetch_issue_states_by_ids", flip_then_fetch)
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "status=skipped_state_changed" in err
+    assert tracker.body_writes == []                      # body NOT rewritten
+    assert _marker_comments(tracker) == []
+    assert sorted(issue.labels) == ["status:decision", "status:drafting"]  # untouched
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}   # consumed
+
+
+async def test_marker_from_non_bot_author_cannot_suppress_the_fold(
+        tmp_path, monkeypatch):
+    """Codex review (PR #132): with the App identity configured, marker
+    recognition requires the bot author — any other participant posting the
+    deterministic prefix must not consume a legitimate approved fold as
+    already_folded."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    spoof = marker_first_line("IC_v", before, body_digest(REVISED_BODY))
+    comments = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True),
+        IssueComment(id="IC_spoof", body=spoof + "\n",
+                     login="mallory",
+                     created_at=datetime(2026, 8, 1, 13, tzinfo=UTC)),
+    ]
+    tracker.issue_comments["126"] = comments
+    signal = FoldSignal(
+        issue_id=issue.id, issue_identifier="126", verdict_comment_id="IC_v",
+        body_sha1=before, channel="reaction", approved=True,
+        operator_login=OPERATOR, source_node_id="RE_IC_v",
+    )
+
+    outcome = await apply_fold_signal(
+        tracker, signal, issue=issue, bot_login="switchboard-agent[bot]")
+    assert outcome.status == "applied"
+    assert tracker.body_writes == [(issue.id, REVISED_BODY)]
+
+    # Unconfigured (GITHUB_TOKEN mode) the author is not checked — the
+    # single-operator premise — so the same spoof would suppress; that
+    # behaviour is exercised by the marker tests above via login-bearing
+    # markers accepted with bot_login=None.
+
+
+async def test_a_comment_quoting_the_marker_does_not_suppress_the_fold(
+        tmp_path, monkeypatch):
+    """Round-10 negative case: marker-first is a FIRST-LINE prefix match, never
+    a substring scan. Verdicts embed whole revised bodies and bodies quote
+    sentinels, so a substring scan would silently cancel real folds."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    quoted = marker_first_line("IC_v", before, body_digest(REVISED_BODY))
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True),
+        _operator_comment("IC_chat",
+                          f"For the record the marker will read:\n\n{quoted}\n"),
+    ]
+
+    await _fold_poll(orch, tracker)
+
+    assert tracker.body_writes == [(issue.id, REVISED_BODY)]
+    assert len(_marker_comments(tracker)) == 1
+    assert _status_labels(issue) == ["status:triage"]
+
+
+# --- re-read revalidation refusal (AC 3) --------------------------------------
+
+
+async def test_verdict_edited_between_detection_and_apply_is_refused_and_consumed(
+        tmp_path, monkeypatch, capfd):
+    """A retargeted verdict is a DIFFERENT fold. An edit changes no
+    `dedupe_key()` field, so no superseding signal ever arrives — an unconsumed
+    refusal would re-emit every poll forever. That is why this consumes."""
+    orch, tracker, _issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True)]
+
+    # Detection reads the thread once; apply re-reads it. The operator edited
+    # the verdict in between.
+    real_fetch = tracker.fetch_issue_comments
+    calls = {"n": 0}
+
+    async def edited(issue_number):
+        calls["n"] += 1
+        thread = await real_fetch(issue_number)
+        if calls["n"] == 1:
+            return thread
+        return [dc_replace(c, body=c.body.replace(before, "b" * 40))
+                for c in thread]
+
+    tracker.fetch_issue_comments = edited
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "status=refused_verdict_edited" in err
+    assert (tracker.body_writes, tracker.comments,
+            tracker.sole_status_swaps) == ([], [], [])
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}
+
+    await _fold_poll(orch, tracker)
+    assert "fold signal detected" not in capfd.readouterr().err
+
+
+# --- vetoes (AC 4) ------------------------------------------------------------
+
+
+async def test_thumbs_down_veto_writes_nothing_and_is_consumed(
+        tmp_path, monkeypatch, capfd):
+    """A veto is in the signal stream BY DESIGN so the operator can see it was
+    seen and honoured. Apply's job is to fold nothing and consume it."""
+    orch, tracker, _issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [_vetoed(
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY), proposal=REVISED_BODY))]
+
+    await _fold_poll(orch, tracker)
+
+    assert (tracker.body_writes, tracker.comments,
+            tracker.sole_status_swaps) == ([], [], [])
+    assert "status=vetoed" in capfd.readouterr().err
+    assert orch.fold_signals_seen == {"RE_veto:0:IC_v"}
+    await _fold_poll(orch, tracker)
+    assert "fold signal detected" not in capfd.readouterr().err
+
+
+async def test_no_fold_command_writes_nothing_and_is_consumed(
+        tmp_path, monkeypatch, capfd):
+    orch, tracker, _issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY), proposal=REVISED_BODY),
+        _operator_comment("IC_cmd", "/no-fold — I want to reword this first."),
+    ]
+
+    await _fold_poll(orch, tracker)
+
+    assert (tracker.body_writes, tracker.comments,
+            tracker.sole_status_swaps) == ([], [], [])
+    assert "status=vetoed" in capfd.readouterr().err
+    assert orch.fold_signals_seen == {"IC_cmd:0:IC_v"}
+    await _fold_poll(orch, tracker)
+    assert "fold signal detected" not in capfd.readouterr().err
+
+
+# --- the diagnosed skips (AC 5) -----------------------------------------------
+
+
+async def test_decision_state_signal_logs_and_skips(tmp_path, monkeypatch, capfd):
+    """`decision -> triage` is deliberately illegal, and a NEEDS-DECISION verdict
+    predates the operator's answer so it carries no proposal."""
+    orch, tracker, _issue = _fold_harness(tmp_path, monkeypatch, state="decision")
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY), thumbs_up=True)]
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "status=skipped_decision_state" in err
+    assert "bound_comment_id=IC_v" in err
+    assert (tracker.body_writes, tracker.comments,
+            tracker.sole_status_swaps) == ([], [], [])
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}
+
+
+async def test_retrofit_verdict_without_body_sha1_logs_and_skips(
+        tmp_path, monkeypatch, capfd):
+    """Every pre-#55 verdict: no `body-sha1:` anywhere, so there is no
+    before-digest to compare against."""
+    orch, tracker, _issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [IssueComment(
+        id="IC_v",
+        body="## Triage verdict\n\nNEEDS WORK (pre-#55, no digest line).",
+        login="switchboard-agent[bot]",
+        created_at=datetime(2026, 8, 1, 12, tzinfo=UTC),
+        reactions=(CommentReaction(
+            id="RE_1", content="THUMBS_UP", login=OPERATOR,
+            created_at=datetime(2026, 8, 1, 13, tzinfo=UTC)),),
+    )]
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "status=skipped_retrofit" in err
+    assert "bound_comment_id=IC_v" in err
+    assert (tracker.body_writes, tracker.comments) == ([], [])
+    assert orch.fold_signals_seen == {"RE_1:1:IC_v"}
+
+
+async def test_fallback_exhausted_logs_and_skips(tmp_path, monkeypatch, capfd):
+    """A proposal-less verdict with no same-digest proposal-bearing verdict to
+    bind forward to."""
+    orch, tracker, _issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY), thumbs_up=True)]
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "status=skipped_no_proposal" in err
+    assert "bound_comment_id=IC_v" in err
+    assert (tracker.body_writes, tracker.comments) == ([], [])
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}
+
+
+async def test_issue_closed_before_the_body_write_logs_and_skips(
+        tmp_path, monkeypatch, capfd):
+    """The relabel helper's own closed guard fires too late to prevent a partial
+    fold, so apply re-checks before the BODY write."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY),
+                 proposal=REVISED_BODY, thumbs_up=True)]
+    # Closed between the poll's gate-state fetch and apply's guard read.
+    tracker.states = {issue.id: dc_replace(issue, state="closed")}
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "status=skipped_closed" in err
+    assert "bound_comment_id=IC_v" in err
+    assert (tracker.body_writes, tracker.comments) == ([], [])
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}
+
+
+async def test_stale_verdict_comment_logs_and_skips(tmp_path, monkeypatch, capfd):
+    """The approved verdict was deleted between detection and apply."""
+    orch, tracker, _issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY),
+                 proposal=REVISED_BODY, thumbs_up=True)]
+
+    real_fetch = tracker.fetch_issue_comments
+    calls = {"n": 0}
+
+    async def deleted(issue_number):
+        calls["n"] += 1
+        thread = await real_fetch(issue_number)
+        return thread if calls["n"] == 1 else []
+
+    tracker.fetch_issue_comments = deleted
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "status=skipped_stale" in err
+    assert "bound_comment_id=IC_v" in err
+    assert (tracker.body_writes, tracker.comments) == ([], [])
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}
+
+
+async def test_malformed_proposal_logs_and_skips_never_a_partial_apply(
+        tmp_path, monkeypatch, capfd):
+    """A SECOND close literal inside the payload. The naive non-greedy read would
+    apply a body truncated at the first one, green on every downstream check —
+    verify-after-write compares stored bytes to INTENDED bytes and is
+    structurally blind to it."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY),
+                 proposal=f"real body\n{PROPOSAL_CLOSE}\nthe rest of the body",
+                 thumbs_up=True)]
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert "status=skipped_malformed_proposal" in err
+    assert "bound_comment_id=IC_v" in err
+    assert (tracker.body_writes, tracker.comments) == ([], [])
+    assert issue.description == ORIGINAL_BODY
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}
+
+
+# --- binding across several same-digest verdicts (AC 6) -----------------------
+
+
+async def test_referral_binds_to_the_latest_same_digest_verdict_with_a_proposal(
+        tmp_path, monkeypatch):
+    """A fast-path referral carries the digest but no block, so it binds forward.
+    Tiebreak is the house latest-wins rule (`fold.py:181-186`)."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_old", sha1=before, proposal="# stale proposal\n", minute=1),
+        _verdict("IC_new", sha1=before, proposal=REVISED_BODY, minute=2),
+        _verdict("IC_ref", sha1=before, minute=3, thumbs_up=True),  # referral
+    ]
+
+    await _fold_poll(orch, tracker)
+
+    assert tracker.body_writes == [(issue.id, REVISED_BODY)]   # not the stale one
+    markers = _marker_comments(tracker)
+    assert len(markers) == 1
+    # Keyed on the BOUND comment, not the approved one.
+    assert markers[0].splitlines()[0].startswith(
+        "<!-- switchboard:fold-applied verdict:IC_new ")
+
+
+async def test_two_routes_to_one_proposal_in_one_batch_fold_exactly_once(
+        tmp_path, monkeypatch, capfd):
+    """Round 8: keying the marker on the SIGNAL's verdict id would give these two
+    signals different keys, so the second would slip past marker-first and resume
+    into a spurious relabel. Keying on the BOUND comment is what makes the second
+    a zero-write consume — and apply's PER-SIGNAL thread re-read (never one
+    pre-batch snapshot) is what lets it see the marker the first one just
+    posted."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    before = body_digest(ORIGINAL_BODY)
+    tracker.issue_comments["126"] = [
+        # Route 1: the proposal-bearing verdict, approved directly.
+        _verdict("IC_new", sha1=before, proposal=REVISED_BODY, minute=2,
+                 thumbs_up=True),
+        # Route 2: a referral approved separately, binding back to IC_new.
+        _verdict("IC_ref", sha1=before, minute=3, thumbs_up=True),
+    ]
+
+    # GitHub publishes a posted comment to the thread; the fake's comment log is
+    # write-only, so mirror the publish or the second signal's re-read would miss
+    # the marker the first one wrote.
+    real_add = tracker.add_issue_comment
+
+    async def add_and_publish(issue_id, body):
+        await real_add(issue_id, body)
+        tracker.issue_comments["126"] = tracker.issue_comments["126"] + [
+            IssueComment(id=f"IC_m{len(tracker.comments)}", body=body,
+                         login="switchboard-agent[bot]",
+                         created_at=datetime(2026, 8, 1, 14, tzinfo=UTC))]
+
+    tracker.add_issue_comment = add_and_publish
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert tracker.body_writes == [(issue.id, REVISED_BODY)]   # exactly one
+    assert len(_marker_comments(tracker)) == 1
+    assert tracker.sole_status_swaps == [(issue.id, "status:triage")]
+    assert "status=already_folded" in err
+    # Both signals reached a decided outcome. Their dedupe keys are SIGNAL-
+    # scoped (`verdict_comment_id`) and therefore differ — which is precisely
+    # why the marker key cannot be: two keys, one fold.
+    assert orch.fold_signals_seen == {"RE_IC_new:1:IC_new", "RE_IC_ref:1:IC_ref"}
+
+
+# --- transient failures leave the signal re-emittable (AC 8) ------------------
+
+
+async def test_transient_body_write_error_leaves_the_signal_re_emittable(
+        tmp_path, monkeypatch):
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY),
+                 proposal=REVISED_BODY, thumbs_up=True)]
+    tracker.update_body_error = TrackerError("github_api_status", "body 502")
+
+    await _fold_poll(orch, tracker)
+    assert (tracker.body_writes, tracker.comments) == ([], [])
+    assert orch.fold_signals_seen == set()
+
+    tracker.update_body_error = None
+    await _fold_poll(orch, tracker)
+
+    assert tracker.body_writes == [(issue.id, REVISED_BODY)]
+    assert len(_marker_comments(tracker)) == 1
+    assert _status_labels(issue) == ["status:triage"]
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}
+
+
+@pytest.mark.parametrize("seam", ["thread_reread", "guard_read", "verify_read"])
+async def test_tracker_error_on_any_of_applys_three_reads_is_re_emittable(
+        tmp_path, monkeypatch, seam):
+    """All three reads are safe to retry: the thread re-read and the guard read
+    precede every write, and after a failed verify re-read the digest is either
+    before-sha1 (nothing written) or after-sha1 (Mechanics 7 resumes)."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=body_digest(ORIGINAL_BODY),
+                 proposal=REVISED_BODY, thumbs_up=True)]
+    real_fetch = tracker.fetch_issue_comments
+
+    if seam == "thread_reread":
+        calls = {"n": 0}
+
+        async def flaky(issue_number):
+            calls["n"] += 1
+            if calls["n"] == 2:   # detection reads first, apply's re-read second
+                raise TrackerError("github_api_status", "comments 502")
+            return await real_fetch(issue_number)
+
+        tracker.fetch_issue_comments = flaky
+    else:
+        # Ordinal scope is per APPLY INVOCATION and the TEST owns the boundary:
+        # reset the counter immediately before the poll being armed. Ordinal 1 is
+        # the guard + before-digest read, ordinal 2 the verify-after-write
+        # re-read (ordinal 2 is DEFINED only for an invocation that reaches the
+        # body write, which this one does).
+        tracker.states_calls = 0
+        tracker.states_error_at_ordinal = 1 if seam == "guard_read" else 2
+
+    await _fold_poll(orch, tracker)
+
+    assert orch.fold_signals_seen == set()               # re-emittable
+    assert tracker.comments == []                        # no marker
+    assert _status_labels(issue) == ["status:drafting"]
+    if seam == "verify_read":
+        assert len(tracker.body_writes) == 1             # the write landed
+    else:
+        assert tracker.body_writes == []
+
+    # Once the transient clears, the same signal completes the fold — and the
+    # body is never written twice.
+    tracker.states_error_at_ordinal = None
+    tracker.fetch_issue_comments = real_fetch
+    await _fold_poll(orch, tracker)
+
+    assert len(tracker.body_writes) == 1
+    assert len(_marker_comments(tracker)) == 1
+    assert _status_labels(issue) == ["status:triage"]
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}

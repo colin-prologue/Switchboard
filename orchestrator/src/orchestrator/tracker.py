@@ -149,6 +149,19 @@ mutation($subjectId: ID!, $body: String!) {
 """
 
 
+# update_issue_body: the fold apply step's ONE net-new write (issue #126 part b).
+# GitHub has no conditional update, so this is the write half of a
+# read-compare-write, never a compare-and-swap; the TOCTOU window is an accepted
+# residual and verify-after-write is the check that survives it.
+UPDATE_ISSUE_BODY_MUTATION = """
+mutation($id: ID!, $body: String!) {
+  updateIssue(input: {id: $id, body: $body}) {
+    issue { id }
+  }
+}
+"""
+
+
 COMMENT_REACTIONS_PAGE_QUERY = """
 query($commentId: ID!, $cursor: String) {
   node(id: $commentId) {
@@ -425,6 +438,18 @@ class GitHubTracker:
         extension that needs a single write path).
         """
         await self._request(ADD_COMMENT_MUTATION, {"subjectId": issue_id, "body": body})
+
+    async def update_issue_body(self, issue_id: str, body: str) -> None:
+        """Replace an issue's body (issue #126: the fold apply step).
+
+        The only net-new tracker surface part (b) needs — the single-issue body
+        READ already exists (`fetch_issue_states_by_ids`, whose `_ISSUE_FIELDS`
+        requests `body`). Like `add_issue_comment` and the label mutations, a
+        sanctioned exception to the core §11.5 no-tracker-writes boundary: the
+        operator's `/fold` is an explicit instruction to edit the body, and the
+        caller (`fold_apply`) owns the read-compare-write around it.
+        """
+        await self._request(UPDATE_ISSUE_BODY_MUTATION, {"id": issue_id, "body": body})
 
     async def add_labels(self, issue_id: str, label_names: list[str]) -> None:
         """Apply labels to an issue (SPEC.md §4 owned extension: durable park).

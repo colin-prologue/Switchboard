@@ -22,6 +22,7 @@ from orchestrator.tracker import (
     ISSUES_BY_IDS_QUERY,
     LABEL_ID_QUERY,
     REMOVE_LABELS_MUTATION,
+    UPDATE_ISSUE_BODY_MUTATION,
     GitHubTracker,
 )
 from orchestrator.types import TrackerConfig, TrackerError
@@ -483,6 +484,32 @@ async def test_add_issue_comment_posts_mutation():
     assert captured["body"]["variables"] == {
         "subjectId": "I_1",
         "body": "Parking this issue after 3 sessions.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_issue_body_posts_mutation_with_id_and_body():
+    """issue #126: pins the fold apply step's ONE net-new mutation shape.
+
+    GraphQL shape errors are invisible to a fake by definition (see the
+    ISSUE_COMMENTS_QUERY note at tracker.py:101-105), so the real request is
+    asserted against the stubbed transport — the same convention as
+    add_issue_comment / add_labels / remove_labels.
+    """
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request_body(request)
+        return graphql_response({"updateIssue": {"issue": {"id": "I_1"}}})
+
+    tracker, transport = make_tracker(handler)
+    await tracker.update_issue_body("I_1", "# Folded body\n\nrevised.")
+
+    assert transport.call_count == 1
+    assert captured["body"]["query"] == UPDATE_ISSUE_BODY_MUTATION
+    assert captured["body"]["variables"] == {
+        "id": "I_1",
+        "body": "# Folded body\n\nrevised.",
     }
 
 

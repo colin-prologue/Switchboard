@@ -28,6 +28,15 @@ edges:
   - from: drafting
     to: triage
     actor: human
+  # The operator-approved fold (#51 detect / #126 apply). Same edge, different
+  # actor: apply rewrites the body from the verdict's proposal block, posts the
+  # durable `switchboard:fold-applied` marker comment, then relabels. The
+  # relabel is the TERMINAL act — it evicts the issue from the fold poll set
+  # (scheduler.FOLD_POLL_STATES), so every failable step precedes it.
+  - from: drafting
+    to: triage
+    actor: fold
+    note: "operator /fold or 👍 approved; apply folded the proposal into the body"
 
   # --- Triage: adversarial ticket verification (active state, AgDR-006) ------
   # PASS stamps the durable provenance marker in the SAME gh edit as the state
