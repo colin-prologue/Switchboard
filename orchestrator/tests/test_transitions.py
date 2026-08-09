@@ -109,6 +109,16 @@ def test_decision_adds_exactly_two_edges_and_no_requires_marker():
     assert "decision" not in _raw_table()["requires_marker"]
 
 
+# --- the fold edge (issue #126 part b) ---------------------------------------
+
+def test_drafting_to_triage_has_exactly_two_edges_human_and_fold():
+    """Apply relabels drafting -> triage, so the table must record a second
+    actor on that edge. The human edge is KEPT — a hand fold still exists."""
+    edges = [e for e in _edges() if e["from"] == "drafting" and e["to"] == "triage"]
+    assert len(edges) == 2, f"expected exactly two drafting -> triage edges, got {edges}"
+    assert {e["actor"] for e in edges} == {"human", "fold"}
+
+
 def test_degraded_todo_to_human_review_edge_annotated():
     degraded = [e for e in _edges() if e.get("degraded")]
     match = [e for e in degraded if e["from"] == "todo" and e["to"] == "human-review"]

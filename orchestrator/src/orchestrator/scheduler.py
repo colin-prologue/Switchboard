@@ -30,6 +30,7 @@ import httpx
 
 from .agent_runner import AgentRunner
 from .fold import FoldSignal, detect_fold_signals
+from .fold_apply import apply_fold_signal
 from .log import log
 from .handoff import snapshot_evidence, validate_handoff
 from .prompt import render_prompt
@@ -235,11 +236,11 @@ class Orchestrator:
         self._requires_marker: dict[str, list[str]] = load_requires_marker()
         self._marker_refused: set[str] = set()  # refusal comment posted once per issue
 
-        # Fold-signal detection (issue #51 part a). Dedupe is per PROCESS
-        # LIFETIME, keyed on the deciding comment/reaction node id: a restart
-        # re-emits every still-standing signal, which is accepted and documented
-        # — part (b)'s durable fold marker on the issue is the real dedupe. Part
-        # (a) performs zero writes, so a re-emission costs one log line.
+        # Fold-signal dedupe (issue #51 part a, rewired by #126 part b). Per
+        # PROCESS LIFETIME, keyed on the EFFECTIVE decision; a restart re-emits
+        # every still-standing signal, which is accepted because part (b)'s
+        # durable fold-applied marker on the issue is the real, cross-restart
+        # dedupe. A key is written only after apply reaches a DECIDED outcome.
         self.fold_signals_seen: set[str] = set()
         self._fold_last_poll_at: datetime | None = None
 
@@ -500,14 +501,17 @@ class Orchestrator:
     # -- fold-signal sub-poll (issue #51 part a) --------------------------------
 
     async def _poll_fold_signals(self, tracker: GitHubTracker) -> list[FoldSignal]:
-        """Surface new operator fold signals on gate-state issues. Read-only.
+        """Detect new operator fold signals on gate-state issues and apply them.
 
         Runs at the tail of a tick so it can never delay dispatch, and at
         FOLD_POLL_INTERVAL_MS rather than every tick. Disabled (zero API calls)
         when `fold.operator_logins` is empty, which is the default.
 
-        Part (a) only *detects*: every signal is logged and returned; the apply
-        step that edits the body and relabels is part (b).
+        Detection (part a) is read-only; `apply_fold_signal` (part b, issue
+        #126) is what writes — and only for an APPROVED signal that survives
+        binding, marker-first, and the before-digest comparison. Apply performs
+        its OWN thread re-read per signal, so a signal sees the writes earlier
+        signals in this same batch performed.
         """
         cfg = self._cfg
         assert cfg is not None
@@ -559,8 +563,19 @@ class Orchestrator:
                 key = signal.dedupe_key()
                 if key in self.fold_signals_seen:
                     continue
-                self.fold_signals_seen.add(key)
                 log("fold signal detected", **signal.log_fields())
+                # Issue #126 (part b): consumption moved OUT of detection to
+                # after the DECIDED outcome. A transient tracker failure on a
+                # read, the body write, or the marker post leaves the signal
+                # re-emittable so the next poll resumes it; every decided
+                # outcome (applied, refused, vetoed, skipped, diverged,
+                # terminal relabel failure) consumes.
+                outcome = await apply_fold_signal(tracker, signal, issue=issue)
+                log("fold apply", issue_identifier=signal.issue_identifier,
+                    verdict_comment_id=signal.verdict_comment_id,
+                    **outcome.log_fields())
+                if outcome.consume:
+                    self.fold_signals_seen.add(key)
                 fresh.append(signal)
         return fresh
 
