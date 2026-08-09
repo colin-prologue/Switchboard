@@ -81,8 +81,10 @@ edges:
   # --- in-progress: an agent is working it -----------------------------------
   - from: in-progress
     to: human-review
-    actor: worker
-    note: "worker handoff at completion (workflow/WORKFLOW.base.md)"
+    actor: orchestrator
+    note: "orchestrator-owned terminal handoff after provider success +
+      validated .run/handoff-evidence.json (issue #61 / AgDR-028); workers
+      write evidence, never status labels"
   - from: in-progress
     to: todo
     actor: orchestrator

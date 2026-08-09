@@ -29,6 +29,7 @@ import httpx
 
 from .agent_runner import AgentRunner
 from .log import log
+from .handoff import snapshot_evidence, validate_handoff
 from .prompt import render_prompt
 from .provider_circuit import (
     CircuitState,
@@ -73,6 +74,7 @@ PARK_LABEL = "status:parked"
 # applied when a `todo` issue is first claimed and cleared when the claim dies.
 TODO_LABEL = "status:todo"
 IN_PROGRESS_LABEL = "status:in-progress"
+HUMAN_REVIEW_LABEL = "status:human-review"
 
 # Posted when the orchestrator releases a live claim mid-run and reverts the
 # board (claim-release path only — the startup sweep is comment-free per
@@ -689,6 +691,9 @@ class Orchestrator:
                 # Fresh (cached) mint per turn: a session spanning the hourly
                 # installation-token expiry always injects a valid bot token.
                 agent_token = await self._agent_token(runner.turn_timeout_ms)
+                # issue #61 freshness: evidence must be (re)written during the
+                # turn that succeeds; leftovers from failed turns are stale.
+                evidence_snapshot = snapshot_evidence(ws.path)
                 result = await runner.run_turn(
                     ws.path, prompt, resume_session_id=session_id,
                     on_event=self._on_agent_event, issue_id=issue.id,
@@ -726,6 +731,41 @@ class Orchestrator:
                         # cannot be misclassified as abandoned.
                         entry.turn_succeeded = True
                     session_id = result.session_id or session_id
+                    # issue #61: terminal-safe handoff. Evidence is checked ONLY
+                    # here — after the provider turn returned terminal success —
+                    # so evidence written mid-turn (the Stage 7 race) is inert,
+                    # and every failure/cancel/timeout path above bypasses this
+                    # entirely: no path but validated-success can expose
+                    # status:human-review. Rejections are diagnostics, never
+                    # transitions; the workspace is preserved and the session
+                    # continues so the worker can repair within its budget.
+                    evidence, rejection = await validate_handoff(
+                        tracker, ws.path, issue.identifier,
+                        prior_snapshot=evidence_snapshot)
+                    if evidence is not None:
+                        try:
+                            await tracker.set_sole_status_label(
+                                issue.id, HUMAN_REVIEW_LABEL)
+                        except TrackerError as exc:
+                            # Verified-write failed: leave state untouched and
+                            # end the session; claim release reverts the claim
+                            # label and re-dispatch retries the handoff.
+                            log("handoff label swap failed; issue state "
+                                "untouched", issue_id=issue.id,
+                                issue_identifier=issue.identifier,
+                                error=str(exc))
+                            break
+                        log("handoff evidence validated; issue moved to "
+                            "human-review", issue_id=issue.id,
+                            issue_identifier=issue.identifier,
+                            pr_number=evidence.pr_number,
+                            head_sha=evidence.head_sha)
+                        break
+                    if rejection is not None:
+                        log("handoff evidence rejected; no transition",
+                            issue_id=issue.id,
+                            issue_identifier=issue.identifier,
+                            reason=rejection.reason, detail=rejection.detail)
 
                 try:  # §16.5: re-check tracker state between turns
                     refreshed = await tracker.fetch_issue_states_by_ids([issue.id])

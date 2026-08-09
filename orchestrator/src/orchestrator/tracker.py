@@ -111,6 +111,37 @@ mutation($subjectId: ID!, $body: String!) {
 }
 """
 
+
+OPEN_PRS_FOR_BRANCH_QUERY = """
+query($owner: String!, $name: String!, $headRef: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(headRefName: $headRef, states: [OPEN], first: 5) {
+      nodes {
+        number
+        headRefOid
+        closingIssuesReferences(first: 50) {
+          pageInfo { hasNextPage endCursor }
+          nodes { number }
+        }
+      }
+    }
+  }
+}
+"""
+
+CLOSING_REFS_PAGE_QUERY = """
+query($owner: String!, $name: String!, $prNumber: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $prNumber) {
+      closingIssuesReferences(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { number }
+      }
+    }
+  }
+}
+"""
+
 LABEL_ID_QUERY = """
 query($owner: String!, $name: String!, $label: String!) {
   repository(owner: $owner, name: $name) {
@@ -283,6 +314,246 @@ class GitHubTracker:
         await self._request(
             REMOVE_LABELS_MUTATION, {"labelableId": issue_id, "labelIds": label_ids}
         )
+
+    async def fetch_open_prs(self, head_ref: str) -> list[dict]:
+        """Open PRs whose head branch is `head_ref` (issue #61 handoff evidence).
+
+        Returns `[{"number": int, "head_sha": str}]`. The handoff validator
+        requires exactly one and matches its head oid against the evidence sha,
+        proving the workspace commit was pushed and the PR is current.
+        """
+        owner, repo = self._split_repo()
+        data = await self._request(
+            OPEN_PRS_FOR_BRANCH_QUERY,
+            {"owner": owner, "name": repo, "headRef": head_ref},
+        )
+        nodes = (
+            ((data.get("repository") or {}).get("pullRequests") or {}).get("nodes")
+            or []
+        )
+        out: list[dict] = []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            number = node.get("number")
+            head_sha = node.get("headRefOid")
+            refs = node.get("closingIssuesReferences") or {}
+            closes = [
+                c["number"] for c in (refs.get("nodes") or [])
+                if isinstance(c, dict) and isinstance(c.get("number"), int)
+            ]
+            # PR #115 review round 4: a PR closing more issues than one page
+            # must not truncate — a missed reference would reject valid
+            # linkage and burn worker retries. Paginate the connection.
+            page = refs.get("pageInfo") or {}
+            while page.get("hasNextPage") and isinstance(number, int):
+                more = await self._request(
+                    CLOSING_REFS_PAGE_QUERY,
+                    {"owner": owner, "name": repo, "prNumber": number,
+                     "cursor": page.get("endCursor")},
+                )
+                refs = (
+                    (more.get("repository") or {}).get("pullRequest") or {}
+                ).get("closingIssuesReferences") or {}
+                closes.extend(
+                    c["number"] for c in (refs.get("nodes") or [])
+                    if isinstance(c, dict) and isinstance(c.get("number"), int)
+                )
+                page = refs.get("pageInfo") or {}
+            if isinstance(number, int) and isinstance(head_sha, str):
+                out.append({
+                    "number": number, "head_sha": head_sha, "closes": closes,
+                })
+        return out
+
+    async def set_sole_status_label(
+        self,
+        issue_id: str,
+        label: str,
+        expected_status: tuple[str, ...] = ("status:in-progress", "status:todo"),
+    ) -> None:
+        """Issue #61: the orchestrator-owned terminal handoff transition.
+
+        Make `label` the issue's ONLY `status:*` label — one tracker mutation
+        from the orchestrator's perspective (add + removals inside), followed
+        by a mandatory read-back verification: a textual claim of a transition
+        is not evidence the transition happened (issue #44 failure class).
+        Raises TrackerError("handoff_label_verify_failed") when the read-back
+        does not show exactly `[label]`.
+        """
+        issues = await self.fetch_issue_states_by_ids([issue_id])
+        if not issues:
+            raise TrackerError(
+                "handoff_label_verify_failed",
+                f"issue {issue_id} not fetchable before status swap",
+            )
+        # Preemption guard (PR #115 review round 4): a human transition or
+        # closure landing between provider success and this fetch must WIN —
+        # never clobber it. The swap proceeds only from the expected active
+        # claim state: an open issue whose sole status label is one of
+        # `expected_status`.
+        fetched = issues[0]
+        if fetched.state.lower() == "closed":
+            raise TrackerError(
+                "handoff_preempted",
+                "issue was closed before the handoff swap; leaving it alone",
+            )
+        current_status = sorted(
+            l for l in fetched.labels if l.startswith("status:")
+        )
+        if len(current_status) != 1 or current_status[0] not in expected_status:
+            raise TrackerError(
+                "handoff_preempted",
+                f"issue status {current_status} is not an expected active "
+                f"claim state {sorted(expected_status)}; a newer transition "
+                f"wins and the handoff is refused",
+            )
+        current = fetched.labels
+        added_now = label not in current
+        if added_now:
+            try:
+                await self.add_labels(issue_id, [label])
+            except TrackerError as exc:
+                # The add is commit-ambiguous too (PR #115 round 6): it may
+                # have applied with the response lost, leaving a dual state
+                # normalization resolves to human-review — suppressing the
+                # retry that would repair it. Read back before deciding.
+                try:
+                    check = await self.fetch_issue_states_by_ids([issue_id])
+                except TrackerError as read_exc:
+                    raise TrackerError(
+                        "handoff_swap_uncertain",
+                        f"label add failed and the read-back also failed; no "
+                        f"further mutation attempted — inspect the issue by "
+                        f"hand: add={exc}, readback={read_exc}",
+                    ) from exc
+                applied = bool(check) and label in check[0].labels
+                if not applied:
+                    raise  # clean failure: nothing mutated, retry can rerun
+                # The add landed despite the error — continue the swap.
+        stale = [l for l in current if l.startswith("status:") and l != label]
+        if stale:
+            try:
+                await self.remove_labels(issue_id, stale)
+            except TrackerError as exc:
+                # A failed removal is COMMIT-AMBIGUOUS (PR #115 round 5): the
+                # mutation may have applied with the response lost. Blindly
+                # rolling back the added label would then strand the issue
+                # with NO status label — invisible to fetch_candidate_issues,
+                # worse than dual. Read back before compensating.
+                try:
+                    check = await self.fetch_issue_states_by_ids([issue_id])
+                except TrackerError as read_exc:
+                    raise TrackerError(
+                        "handoff_swap_uncertain",
+                        f"stale-removal failed and the read-back also failed; "
+                        f"no further mutation attempted — inspect the issue "
+                        f"by hand: swap={exc}, readback={read_exc}",
+                    ) from exc
+                after = check[0].labels if check else []
+                status_after = sorted(
+                    l for l in after if l.startswith("status:")
+                )
+                if status_after == [label]:
+                    # The removal actually applied. Before accepting, apply
+                    # the closure yield here too (PR #115 round 8): this
+                    # early return skips the final state check, and a closure
+                    # landing by now must win, not be logged as success.
+                    if check and check[0].state.lower() == "closed":
+                        try:
+                            await self.remove_labels(issue_id, [label])
+                        except TrackerError:
+                            pass
+                        raise TrackerError(
+                            "handoff_preempted",
+                            "issue closed before the ambiguous-removal "
+                            "read-back; closure wins, handoff label "
+                            "withdrawn (best-effort)",
+                        ) from exc
+                    # Swap complete on an open issue.
+                    return
+                # Removal genuinely did not apply: partial swap (dual state,
+                # sorted-first normalization would deactivate the issue —
+                # round 3). Compensate by removing the label we just added so
+                # the issue returns to its pre-call state and can retry.
+                if added_now and label in after:
+                    try:
+                        await self.remove_labels(issue_id, [label])
+                    except TrackerError as rollback_exc:
+                        raise TrackerError(
+                            "handoff_label_rollback_failed",
+                            f"partial swap AND rollback failed; issue is in a "
+                            f"dual-status state needing operator repair: "
+                            f"swap={exc}, rollback={rollback_exc}",
+                        ) from exc
+                raise
+
+        # Final read-back with bounded retry (PR #115 round 7): both
+        # mutations may have applied — abandoning the handoff on a transient
+        # read failure would leave a completed board transition unlogged (the
+        # checkpoint asserts the success line). Ambiguity after retries is
+        # named, not silent.
+        verify = None
+        read_exc: TrackerError | None = None
+        for _ in range(3):
+            try:
+                verify = await self.fetch_issue_states_by_ids([issue_id])
+                break
+            except TrackerError as exc:
+                read_exc = exc
+        if verify is None:
+            raise TrackerError(
+                "handoff_swap_uncertain",
+                f"both label mutations were issued but the final read-back "
+                f"failed 3x; the board may already show the transition — "
+                f"inspect by hand: {read_exc}",
+            ) from read_exc
+        fetched_final = verify[0] if verify else None
+        after = fetched_final.labels if fetched_final else []
+        # Closure yield (PR #115 round 7): a human closing the issue between
+        # the preemption check and here is a terminal transition that WINS —
+        # never report a successful handoff on a closed issue. Compensate our
+        # label best-effort (label noise on a closed issue is cosmetic).
+        if fetched_final is not None and fetched_final.state.lower() == "closed":
+            if label in after:
+                try:
+                    await self.remove_labels(issue_id, [label])
+                except TrackerError:
+                    pass
+            raise TrackerError(
+                "handoff_preempted",
+                "issue was closed during the swap; the closure wins and the "
+                "handoff label was withdrawn (best-effort)",
+            )
+        status_after = sorted(l for l in after if l.startswith("status:"))
+        if status_after != [label]:
+            # A concurrent transition landed between the preemption fetch and
+            # here (PR #115 round 6): e.g. a human moved in-progress -> todo
+            # mid-swap, so we removed only the stale label captured earlier
+            # and the issue now shows their status alongside ours — where
+            # ours wins normalization and suppresses their intent. The other
+            # actor's transition wins: remove OUR label, then report
+            # preemption so the session ends without claiming success.
+            if label in after and len(status_after) > 1:
+                try:
+                    await self.remove_labels(issue_id, [label])
+                except TrackerError as rollback_exc:
+                    raise TrackerError(
+                        "handoff_label_rollback_failed",
+                        f"concurrent transition during swap AND rollback "
+                        f"failed; dual-status state needs operator repair: "
+                        f"{status_after}, rollback={rollback_exc}",
+                    )
+                raise TrackerError(
+                    "handoff_preempted",
+                    f"concurrent transition landed during the swap "
+                    f"({status_after}); our label was removed and the newer "
+                    f"transition wins",
+                )
+            raise TrackerError(
+                "handoff_label_verify_failed",
+                f"post-swap status labels {status_after} != [{label!r}]",
+            )
 
     async def _resolve_label_id(self, name: str) -> str:
         if name in self._label_id_cache:

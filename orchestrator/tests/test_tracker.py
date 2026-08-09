@@ -701,3 +701,298 @@ async def test_mint_failure_surfaces_as_tracker_error():
     with pytest.raises(TrackerError) as exc:
         await tracker.fetch_issue_states_by_ids(["I_1"])
     assert exc.value.code == "github_api_request"
+
+
+# --- issue #61: set_sole_status_label partial-swap rollback -------------------
+
+
+@pytest.mark.asyncio
+async def test_sole_status_swap_rolls_back_added_label_when_remove_fails():
+    """PR #115 round 3: add-then-remove-fails must not strand a dual-status
+    issue (sorted-first normalization would deactivate it). The method removes
+    the label it just added, restoring the pre-call state, then raises."""
+    state = {"remove_calls": 0, "added": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "removeLabelsFromLabelable" in body:
+            state["remove_calls"] += 1
+            if state["remove_calls"] == 1:
+                # stale-removal fails AND genuinely does not apply
+                return graphql_response(errors=[{"message": "boom"}])
+            return graphql_response(data={"removeLabelsFromLabelable": {"clientMutationId": None}})
+        if "addLabelsToLabelable" in body:
+            state["add_ids"] = json.loads(body)["variables"]["labelIds"]
+            state["added"] = True
+            return graphql_response(data={"addLabelsToLabelable": {"clientMutationId": None}})
+        if "label(name:" in body or '"label"' in body:
+            name = json.loads(body)["variables"]["label"]
+            return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
+        # issue state fetch — stateful: shows the applied add so the round-5
+        # read-back sees the true dual state and proceeds to rollback
+        labels = ["status:in-progress", "gate:triage-passed"]
+        if state["added"]:
+            labels = ["status:in-progress", "status:human-review", "gate:triage-passed"]
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1, labels=labels,
+        )]})
+
+    tracker, transport = make_tracker(handler)
+    with pytest.raises(TrackerError):
+        await tracker.set_sole_status_label("node-1", "status:human-review")
+    # remove was attempted twice: the failing stale-removal, then the rollback
+    assert state["remove_calls"] == 2
+    # the rollback removed exactly the label the method had just added
+    assert state["add_ids"] == ["id-status:human-review"]
+
+
+@pytest.mark.asyncio
+async def test_sole_status_swap_refuses_when_human_transition_preempted():
+    """PR #115 round 4: a human moving the issue (or closing it) between
+    provider success and the swap fetch must win — no mutations."""
+    mutations = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "Labelable" in body:
+            mutations["count"] += 1
+            return graphql_response(data={})
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1,
+            labels=["status:drafting"],  # human re-scoped it mid-turn
+        )]})
+
+    tracker, _ = make_tracker(handler)
+    with pytest.raises(TrackerError) as exc:
+        await tracker.set_sole_status_label("node-1", "status:human-review")
+    assert exc.value.code == "handoff_preempted"
+    assert mutations["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_open_prs_paginates_closing_references():
+    """PR #115 round 4: closing refs beyond the first page must be collected,
+    not truncated into a false pr_linkage_missing."""
+    state = {"pages": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        if "pullRequests(headRefName" in request.content.decode():
+            return graphql_response(data={"repository": {"pullRequests": {"nodes": [{
+                "number": 9,
+                "headRefOid": "abc",
+                "closingIssuesReferences": {
+                    "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+                    "nodes": [{"number": n} for n in range(1, 51)],
+                },
+            }]}}})
+        state["pages"] += 1
+        assert body["variables"]["prNumber"] == 9
+        return graphql_response(data={"repository": {"pullRequest": {
+            "closingIssuesReferences": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"number": 61}],
+            },
+        }}})
+
+    tracker, _ = make_tracker(handler)
+    prs = await tracker.fetch_open_prs("switchboard/issue-61")
+    assert state["pages"] == 1
+    assert prs[0]["number"] == 9
+    assert 61 in prs[0]["closes"] and 50 in prs[0]["closes"]
+
+
+@pytest.mark.asyncio
+async def test_sole_status_swap_detects_applied_removal_despite_error():
+    """PR #115 round 5: a stale-removal that APPLIED but errored (lost
+    response) must be detected by read-back and treated as a completed swap —
+    never rolled back into a no-status stranded issue."""
+    state = {"removed": False, "remove_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "removeLabelsFromLabelable" in body:
+            state["remove_calls"] += 1
+            state["removed"] = True  # the mutation APPLIES...
+            return graphql_response(errors=[{"message": "response lost"}])  # ...but errors
+        if "addLabelsToLabelable" in body:
+            return graphql_response(data={"addLabelsToLabelable": {"clientMutationId": None}})
+        if '"label"' in body:
+            name = json.loads(body)["variables"]["label"]
+            return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
+        labels = ["gate:triage-passed", "status:human-review"] if state["removed"] \
+            else ["status:in-progress", "gate:triage-passed"]
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1, labels=labels,
+        )]})
+
+    tracker, _ = make_tracker(handler)
+    # completes without raising: read-back shows the swap landed
+    await tracker.set_sole_status_label("node-1", "status:human-review")
+    assert state["remove_calls"] == 1  # no rollback removal was attempted
+
+
+@pytest.mark.asyncio
+async def test_sole_status_swap_continues_when_ambiguous_add_actually_applied():
+    """PR #115 round 6: an add that APPLIED but errored must not abort the
+    swap into a dual state — read-back detects it and the swap completes."""
+    state = {"added": False, "removed": False, "add_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "addLabelsToLabelable" in body:
+            state["add_calls"] += 1
+            state["added"] = True  # applies...
+            return graphql_response(errors=[{"message": "response lost"}])  # ...but errors
+        if "removeLabelsFromLabelable" in body:
+            state["removed"] = True
+            return graphql_response(data={"removeLabelsFromLabelable": {"clientMutationId": None}})
+        if '"label"' in body:
+            name = json.loads(body)["variables"]["label"]
+            return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
+        labels = ["status:in-progress", "gate:triage-passed"]
+        if state["added"]:
+            labels = ["status:human-review", "gate:triage-passed"] if state["removed"] \
+                else ["status:in-progress", "status:human-review", "gate:triage-passed"]
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1, labels=labels,
+        )]})
+
+    tracker, _ = make_tracker(handler)
+    await tracker.set_sole_status_label("node-1", "status:human-review")
+    assert state["add_calls"] == 1 and state["removed"]
+
+
+@pytest.mark.asyncio
+async def test_sole_status_swap_yields_to_concurrent_transition_at_verify():
+    """PR #115 round 6: a human transition landing mid-swap wins — the swap
+    removes its own label and reports preemption, never leaving human-review
+    to suppress the human's status."""
+    state = {"remove_calls": [], "phase": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "addLabelsToLabelable" in body:
+            return graphql_response(data={"addLabelsToLabelable": {"clientMutationId": None}})
+        if "removeLabelsFromLabelable" in body:
+            state["remove_calls"].append(json.loads(body)["variables"]["labelIds"])
+            return graphql_response(data={"removeLabelsFromLabelable": {"clientMutationId": None}})
+        if '"label"' in body:
+            name = json.loads(body)["variables"]["label"]
+            return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
+        state["phase"] += 1
+        if state["phase"] == 1:  # preemption fetch: expected claim state
+            labels = ["status:in-progress", "gate:triage-passed"]
+        else:  # verify fetch: human moved it to todo mid-swap
+            labels = ["status:todo", "status:human-review", "gate:triage-passed"]
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1, labels=labels,
+        )]})
+
+    tracker, _ = make_tracker(handler)
+    with pytest.raises(TrackerError) as exc:
+        await tracker.set_sole_status_label("node-1", "status:human-review")
+    assert exc.value.code == "handoff_preempted"
+    # final removal was OUR label, yielding to the human's status:todo
+    assert state["remove_calls"][-1] == ["id-status:human-review"]
+
+
+@pytest.mark.asyncio
+async def test_sole_status_swap_retries_transient_final_readback():
+    """PR #115 round 7: a transient final read-back failure must not abandon
+    a completed swap — bounded retry recovers the success path."""
+    state = {"phase": 0, "verify_failures": 0, "removed": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "addLabelsToLabelable" in body:
+            return graphql_response(data={"addLabelsToLabelable": {"clientMutationId": None}})
+        if "removeLabelsFromLabelable" in body:
+            state["removed"] = True
+            return graphql_response(data={"removeLabelsFromLabelable": {"clientMutationId": None}})
+        if '"label"' in body:
+            name = json.loads(body)["variables"]["label"]
+            return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
+        state["phase"] += 1
+        if state["phase"] == 1:  # preemption fetch
+            return graphql_response(data={"nodes": [issue_node(
+                id_="node-1", number=1,
+                labels=["status:in-progress", "gate:triage-passed"])]})
+        if state["verify_failures"] < 2:  # first two read-backs: transient failure
+            state["verify_failures"] += 1
+            return graphql_response(errors=[{"message": "timeout"}])
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1,
+            labels=["status:human-review", "gate:triage-passed"])]})
+
+    tracker, _ = make_tracker(handler)
+    await tracker.set_sole_status_label("node-1", "status:human-review")
+    assert state["verify_failures"] == 2 and state["removed"]
+
+
+@pytest.mark.asyncio
+async def test_sole_status_swap_yields_when_issue_closes_mid_swap():
+    """PR #115 round 7: closure between the preemption check and the final
+    read-back wins — no success on a closed issue, our label withdrawn."""
+    state = {"phase": 0, "remove_calls": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "addLabelsToLabelable" in body:
+            return graphql_response(data={"addLabelsToLabelable": {"clientMutationId": None}})
+        if "removeLabelsFromLabelable" in body:
+            state["remove_calls"].append(json.loads(body)["variables"]["labelIds"])
+            return graphql_response(data={"removeLabelsFromLabelable": {"clientMutationId": None}})
+        if '"label"' in body:
+            name = json.loads(body)["variables"]["label"]
+            return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
+        state["phase"] += 1
+        if state["phase"] == 1:
+            return graphql_response(data={"nodes": [issue_node(
+                id_="node-1", number=1,
+                labels=["status:in-progress", "gate:triage-passed"])]})
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1, state="CLOSED",
+            labels=["status:human-review", "gate:triage-passed"])]})
+
+    tracker, _ = make_tracker(handler)
+    with pytest.raises(TrackerError) as exc:
+        await tracker.set_sole_status_label("node-1", "status:human-review")
+    assert exc.value.code == "handoff_preempted"
+    assert state["remove_calls"][-1] == ["id-status:human-review"]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_removal_readback_yields_to_closure():
+    """PR #115 round 8: the ambiguous-removal early return must apply the
+    closure yield too — an applied-but-errored removal read back on a closed
+    issue is preemption, not success."""
+    state = {"removed": False, "remove_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        if "removeLabelsFromLabelable" in body:
+            state["remove_calls"] += 1
+            if state["remove_calls"] == 1:
+                state["removed"] = True  # applies but errors
+                return graphql_response(errors=[{"message": "response lost"}])
+            return graphql_response(data={"removeLabelsFromLabelable": {"clientMutationId": None}})
+        if "addLabelsToLabelable" in body:
+            return graphql_response(data={"addLabelsToLabelable": {"clientMutationId": None}})
+        if '"label"' in body:
+            name = json.loads(body)["variables"]["label"]
+            return graphql_response(data={"repository": {"label": {"id": f"id-{name}"}}})
+        if not state["removed"]:  # preemption fetch: open, expected claim
+            return graphql_response(data={"nodes": [issue_node(
+                id_="node-1", number=1,
+                labels=["status:in-progress", "gate:triage-passed"])]})
+        # ambiguity read-back: removal applied AND the issue closed meanwhile
+        return graphql_response(data={"nodes": [issue_node(
+            id_="node-1", number=1, state="CLOSED",
+            labels=["status:human-review", "gate:triage-passed"])]})
+
+    tracker, _ = make_tracker(handler)
+    with pytest.raises(TrackerError) as exc:
+        await tracker.set_sole_status_label("node-1", "status:human-review")
+    assert exc.value.code == "handoff_preempted"
+    assert state["remove_calls"] == 2  # withdrawal of our label on the closed issue
