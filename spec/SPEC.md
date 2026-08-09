@@ -138,10 +138,13 @@ Normalized outputs must match the core's issue domain model.
 
 **State mapping is the one real semantic gap.** Model state as `status:*` labels:
 the adapter normalizes a `status:todo` label into `state: "todo"`. Gate states
-(`status:drafting`, `status:plan-review`, `status:human-review`) are **not** in
-`active_states`, so the orchestrator never dispatches a gated ticket and parks at a
-handoff state — the human gate is enforced by state, costing zero orchestrator
-code. See `methodology/METHODOLOGY.md`.
+(`status:drafting`, `status:decision`, `status:plan-review`, `status:human-review`)
+are **not** in `active_states`, so the orchestrator never dispatches a gated ticket
+and parks at a handoff state — the human gate is enforced by state, costing zero
+orchestrator code. Gating is by **omission**: adding a gate state is a label plus
+docs, never an `active_states` edit (`status:decision`, issue #55, was added this
+way — the `active_states` line is byte-identical). See
+`methodology/METHODOLOGY.md`.
 
 **EMU note:** native issue dependencies are recent; if cross-repo blocked-by is
 restricted in your org, fall back to a `status:blocked` label (non-active, so

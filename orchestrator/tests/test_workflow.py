@@ -907,6 +907,41 @@ def test_real_workflow_base_file_loads_after_placeholder_substitution(tmp_path: 
     assert "issue.identifier" in defn.prompt_template
 
 
+# --- status:decision is a gate BY OMISSION (issue #55) ------------------------
+#
+# Adding a gate state must cost zero config: `active_states` is an allowlist, so
+# a state simply absent from it is never dispatched. This test is the regression
+# that fails if someone "helpfully" adds "decision" to the list.
+
+def test_decision_is_not_an_active_state(tmp_path: Path):
+    real_path = Path(__file__).resolve().parents[2] / "workflow" / "WORKFLOW.base.md"
+    substituted = (
+        real_path.read_text(encoding="utf-8")
+        .replace("{{REPO}}", "acme/widgets")
+        .replace("{{WORKSPACE_ROOT}}", "/tmp/symphony_workspaces/acme-widgets")
+        .replace("{{MAX_AGENTS}}", "10")
+        .replace("{{CONVENTION_ROOT}}", "")
+    )
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(substituted)
+
+    cfg = Config(load_workflow(p), tmp_path)
+    assert "decision" not in cfg.tracker().active_states
+    # The whole allowlist, pinned: gates are the states NOT here.
+    assert cfg.tracker().active_states == ["triage", "todo", "in progress"]
+
+
+def test_active_states_line_is_byte_identical_in_base_and_composed():
+    """#55 added a gate state without touching this line. Both files must still
+    carry the exact same `active_states` declaration."""
+    repo_root = Path(__file__).resolve().parents[2]
+    expected = '  active_states: ["triage", "todo", "in progress"]'
+    for rel in ("workflow/WORKFLOW.base.md", "projects/switchboard-self/WORKFLOW.md"):
+        lines = (repo_root / rel).read_text(encoding="utf-8").splitlines()
+        matches = [l for l in lines if l.strip().startswith("active_states:")]
+        assert matches == [expected], f"{rel}: active_states drifted -> {matches}"
+
+
 # --- base <-> composed conformance (issue #44) --------------------------------
 #
 # register-project.sh composes projects/switchboard-self/WORKFLOW.md from

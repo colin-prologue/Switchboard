@@ -96,6 +96,38 @@ scrutiny and route it — you never edit the issue body and never write feature
 code. Feedback (comments), labels, and child issues are your only outputs; the
 author's text stays the author's.
 
+**Step 0 — body hash + unchanged-body fast-path (do this FIRST, before the
+rubric).** Every verdict comment carries the hash of the body it reviewed, so a
+re-triage of an *unchanged* body costs one comment instead of a whole session
+(issue #15 burned five sessions producing five concurring verdicts on one
+unedited body). Compute the current body hash with this exact command — copy it
+verbatim, do not substitute a variant (`git hash-object` is on the worker
+allowlist; `shasum` is **not**, and a denied command strands the session):
+
+```
+gh issue view {{ issue.identifier }} --repo {{REPO}} --json body -q .body > .run/triage-body.md
+git hash-object .run/triage-body.md
+```
+
+**Review `.run/triage-body.md`, not the issue text rendered into this prompt** —
+the prompt copy was snapshotted at dispatch and may be stale by the time you
+run. The fetched file and its digest are captured together, so the hash your
+verdict carries is the hash of the exact bytes you reviewed (a verdict must
+never claim coverage of content it did not see).
+
+Then read the most recent `## Triage verdict` comment on this issue
+(`gh issue view {{ issue.identifier }} --repo {{REPO}} --comments`) and look at
+its second line, the `body-sha1:` block. Route on the comparison:
+
+- **Hashes match** → the body is byte-identical to the one the last verdict
+  already reviewed. Do **not** re-review: skip the rubric entirely and go
+  straight to "Unchanged-body fast-path" at the end of this section.
+- **Hashes differ** → the body changed → full review: continue to the rubric.
+- **No prior `## Triage verdict` comment, or the most recent one carries no
+  parseable `body-sha1:` line** (every verdict written before this mechanic
+  existed) → full review: continue to the rubric. A missing hash is never a
+  match — this is the retrofit fall-through.
+
 **Rubric (minimum checks — investigate the workspace to test each):**
 
 1. **Assumptions** — are they falsifiable and stated? Flag any silent premise the
@@ -142,26 +174,85 @@ name the class in the verdict so drafting and triage share one vocabulary; see
    won't gate dispatch — flag it so the edge gets added rather than concluding it
    "lives only in prose."
 
+**Every verdict posts a comment, and every verdict comment starts with the same
+fixed two lines** — the heading is the grep anchor, the hash is what the next
+session's Step 0 reads:
+
+```
+## Triage verdict
+body-sha1: <the 40-hex digest from Step 0>
+```
+
+That includes PASS: a verdict that posts no comment leaves the next re-triage
+with nothing to compare against, which is the loop this mechanic exists to stop.
+
 **Verdict routing (pick exactly one):**
 
-- **PASS** → relabel to `status:todo` (now dispatchable) and stamp the
-  `gate:triage-passed` provenance marker in the SAME command — it is the durable
-  proof triage promoted this issue, and the orchestrator dispatch guard refuses
-  to claim a `status:todo` that lacks it (issue #29). Remove `status:triage`.
+- **PASS** → no blocking defect. Post the `## Triage verdict` comment (heading,
+  `body-sha1:` line, one line stating the ticket passed), then relabel to
+  `status:todo` (now dispatchable) and stamp the `gate:triage-passed` provenance
+  marker in the SAME command — it is the durable proof triage promoted this
+  issue, and the orchestrator dispatch guard refuses to claim a `status:todo`
+  that lacks it (issue #29). Remove `status:triage`.
   ```
   gh issue edit {{ issue.identifier }} --repo {{REPO}} --remove-label status:triage --add-label status:todo,gate:triage-passed
   ```
-- **NEEDS WORK** → post a feedback comment whose first line is the exact heading
-  `## Triage verdict` (grep-able), listing each failed rubric check and the fix,
-  then relabel to `status:drafting`. Clear `gate:triage-passed` in the same
-  command (every route back to drafting drops the marker — idempotent if absent).
+- **NEEDS WORK** → the blocking defect is a **specification error with a
+  determinate answer** (an unstated assumption, an unbounded criterion, a
+  drifted citation — the author can fix it without anyone choosing anything).
+  Post a feedback comment whose first line is the exact heading
+  `## Triage verdict` (grep-able) and whose second line is the `body-sha1:`
+  block, listing each failed rubric check and the fix, then relabel to
+  `status:drafting`. Clear `gate:triage-passed` in the same command (every route
+  back to drafting drops the marker — idempotent if absent).
   ```
   gh issue comment {{ issue.identifier }} --repo {{REPO}} --body "## Triage verdict"...
   gh issue edit {{ issue.identifier }} --repo {{REPO}} --remove-label status:triage,gate:triage-passed --add-label status:drafting
   ```
+- **NEEDS DECISION** → the blocking defect is an **unmade human decision** — the
+  ticket is stalled on a Gate-A architecture choice with no determinate answer,
+  something a verifier is rightly forbidden to make on the operator's behalf.
+  This is the narrow class: if the answer is determinate once someone looks it
+  up, that is NEEDS WORK; only a genuine unmade choice is NEEDS DECISION.
+  Without this route the same body gets re-triaged to the same verdict every
+  session and the unblocking conversation happens outside the ticket (issue #15).
+  Post a comment whose first line is the exact heading `## Triage verdict` (it
+  IS a verdict comment) and whose second line is the `body-sha1:` block,
+  followed by the decision request:
+  1. **The question** — one sentence, the choice the operator must make.
+  2. **The options** — each one steelmanned (the strongest case *for* it, not a
+     strawman set around a preferred answer).
+  3. **Per-option acceptance-criteria implications** — for each option, what the
+     ticket's criteria become if it is chosen.
+  4. The closing line: **"reply on this issue with the chosen option."**
+
+  Then route `status:triage` → `status:decision`. `status:decision` is a gate
+  (it is not in `active_states`), so the ticket waits for the operator — nothing
+  auto-selects an option and silence never defaults.
+  ```
+  gh issue comment {{ issue.identifier }} --repo {{REPO}} --body "## Triage verdict"...
+  gh issue edit {{ issue.identifier }} --repo {{REPO}} --remove-label status:triage --add-label status:decision
+  ```
 - **SPLIT** → file child issues at `status:drafting` with drafted bodies, chain
   each to this parent with native blocked-by, and park this parent at
-  `status:drafting`. Post a `## Triage verdict` comment linking the children.
+  `status:drafting`. Post a `## Triage verdict` comment (heading, `body-sha1:`
+  line) linking the children.
+
+**Unchanged-body fast-path (only when Step 0 found matching hashes).** Post ONE
+referral comment — first line `## Triage verdict`, second line the same
+`body-sha1:` block, then a single line naming the prior verdict's class and
+linking that comment ("body unchanged since <url>; re-routing per its
+<CLASS> verdict") — then re-route immediately per the class below. No rubric, no
+re-review, no new findings, no second opinion. Each row's flags complete
+`gh issue edit {{ issue.identifier }} --repo {{REPO}} …`:
+
+| prior verdict class | fast-path re-route flags |
+|---|---|
+| NEEDS WORK | `--remove-label status:triage,gate:triage-passed --add-label status:drafting` |
+| NEEDS DECISION | `--remove-label status:triage --add-label status:decision` |
+| PASS | `--remove-label status:triage --add-label status:todo,gate:triage-passed` (one command, marker included) |
+| SPLIT | `--remove-label status:triage,gate:triage-passed --add-label status:drafting` |
+| no parseable `body-sha1:` line on the latest verdict | **not a fast-path case** — do the full review (retrofit fall-through) |
 
 The verifier never implements; feedback and splits only. Do not open a PR. Stop
 once the verdict is routed.

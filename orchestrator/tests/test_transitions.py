@@ -72,6 +72,43 @@ def test_fail_review_edges_are_inactive_and_gated_on_20b():
         assert e.get("requires") == "#20b", f"fail-review edge not gated on #20b: {e}"
 
 
+# --- NEEDS DECISION: the two decision edges (issue #55) -----------------------
+
+def test_triage_to_decision_edge_matches_needs_decision_verdict():
+    edges = [e for e in _edges() if e["from"] == "triage" and e["to"] == "decision"]
+    assert len(edges) == 1, f"expected exactly one triage -> decision edge, got {edges}"
+    assert edges[0] == {
+        "from": "triage",
+        "to": "decision",
+        "actor": "triage-verifier",
+        "verdict": "needs-decision",
+    }
+
+
+def test_decision_to_drafting_edge_is_the_human_fold_path():
+    edges = [e for e in _edges() if e["from"] == "decision"]
+    assert len(edges) == 1, f"decision must have exactly one edge out, got {edges}"
+    edge = edges[0]
+    assert edge["to"] == "drafting"
+    assert edge["actor"] == "human"
+    assert edge["verdict"] == "answered"
+    assert edge["remove_marker"] == "gate:triage-passed"
+    assert "#51" in edge["note"]
+
+
+def test_decision_to_triage_is_illegal():
+    """The answer must be folded into the body first; the fold path is the
+    existing drafting -> triage edge, not a shortcut back into triage."""
+    assert not [e for e in _edges() if e["from"] == "decision" and e["to"] == "triage"]
+
+
+def test_decision_adds_exactly_two_edges_and_no_requires_marker():
+    touching = [e for e in _edges() if "decision" in (e["from"], e["to"])]
+    assert len(touching) == 2, f"expected exactly two decision edges, got {touching}"
+    # requires_marker keys only `todo` — a gate state never gates on a marker.
+    assert "decision" not in _raw_table()["requires_marker"]
+
+
 def test_degraded_todo_to_human_review_edge_annotated():
     degraded = [e for e in _edges() if e.get("degraded")]
     match = [e for e in degraded if e["from"] == "todo" and e["to"] == "human-review"]

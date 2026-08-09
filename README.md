@@ -68,6 +68,7 @@ the state machine — the orchestrator dispatches **active** states and parks at
 | `status:triage`       | **yes** | Adversarial ticket verification — dispatched to a verifier session |
 | `status:todo`         | **yes** | Approved, unblocked, dispatchable                                 |
 | `status:in-progress`  | **yes** | An agent is working it                                            |
+| `status:decision`     | no      | Waiting-on-operator gate — triage found an unmade human decision; reply with your choice, fold it, relabel to drafting |
 | `status:plan-review`  | no      | Gate B handoff — plan/ADR awaiting human approval                 |
 | `status:human-review` | no      | Gate C handoff — implementation done, awaiting human merge        |
 | `status:blocked`      | no      | Parked (fallback when native dependencies aren't available)       |
@@ -83,6 +84,7 @@ flowchart TD
 
     drafting["status:drafting — gate"]
     triage["status:triage — active<br/>(verifier session)"]
+    decision["status:decision — gate<br/>(operator answers in-ticket)"]
     todo["status:todo — active"]
     inprog["status:in-progress — active<br/>(implementer session)"]
     planrev["status:plan-review — gate"]
@@ -98,6 +100,8 @@ flowchart TD
     triage -->|"PASS"| todo
     triage -->|"NEEDS WORK:<br/>'## Triage verdict' comment"| drafting
     triage -->|"SPLIT: children filed at drafting<br/>+ blocked-by chain; parent parks here"| drafting
+    triage -->|"NEEDS DECISION:<br/>question posted in-ticket"| decision
+    decision -->|"operator answers;<br/>fold + relabel"| drafting
     todo -->|"dispatched when<br/>no open blockers"| inprog
     inprog -->|"Gate B: plan + ADR<br/>(architecture work only)"| planrev
     planrev -->|"human approves plan"| todo
