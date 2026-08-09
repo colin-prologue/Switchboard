@@ -232,3 +232,11 @@ def test_separated_body_value_is_not_an_approval(tmp_path):
     # ...but an --approve OUTSIDE a body value still denies
     r2 = _run_bash("gh pr review 12 --body ok --approve", tmp_path)
     assert r2.returncode == 2
+
+
+def test_repository_operand_starting_with_plus_is_not_a_refspec(tmp_path):
+    r = _run_bash("git push --dry-run +remote HEAD", tmp_path)
+    assert r.returncode == 0
+    # ...a refspec AFTER the repository still denies
+    r2 = _run_bash("git push +remote +main", tmp_path)
+    assert r2.returncode == 2

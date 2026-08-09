@@ -156,6 +156,7 @@ def _denied_shape(command: str) -> str | None:
         if rest[:1] == ["push"]:
             args = rest[1:]
             i = 0
+            positionals = 0
             while i < len(args):
                 tok = args[i]
                 # a bare -o/--push-option consumes the NEXT token as its
@@ -181,8 +182,17 @@ def _denied_shape(command: str) -> str | None:
                 # push-option VALUE and does not (o takes a value)
                 if tok == "-f" or _bundled_bool(tok, "f", "o"):
                     return f"git push {tok} (force)"
-                if len(tok) > 1 and tok.startswith("+"):
-                    return f"git push {tok} (force refspec)"
+                if not tok.startswith("-"):
+                    positionals += 1
+                    # the FIRST positional is the <repository> operand
+                    # (codex review r5, PR #136: `git push [<options>]
+                    # [<repository> [<refspec>...]]` — a remote named
+                    # `+remote` is not a refspec); only subsequent
+                    # positionals are refspecs. A force refspec with no
+                    # repository operand is not a thing git accepts, so
+                    # this does not weaken the deny.
+                    if positionals >= 2 and len(tok) > 1 and tok.startswith("+"):
+                        return f"git push {tok} (force refspec)"
                 i += 1
     return None
 
