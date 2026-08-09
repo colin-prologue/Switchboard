@@ -2848,7 +2848,11 @@ async def test_human_transition_between_poll_and_apply_wins(
     real_fetch = tracker.fetch_issue_states_by_ids
 
     async def flip_then_fetch(ids):
-        issue.labels = ["status:decision"]
+        # The sharper case (codex re-review): a MID-SWAP dual-label state.
+        # Membership on status:drafting would pass; only the sole-status
+        # check (mirroring set_sole_status_label's preemption semantics)
+        # refuses it before the body write.
+        issue.labels = ["status:drafting", "status:decision"]
         _recompute_state_from_labels(issue)
         return await real_fetch(ids)
 
@@ -2860,7 +2864,7 @@ async def test_human_transition_between_poll_and_apply_wins(
     assert "status=skipped_state_changed" in err
     assert tracker.body_writes == []                      # body NOT rewritten
     assert _marker_comments(tracker) == []
-    assert _status_labels(issue) == ["status:decision"]   # newer transition wins
+    assert sorted(issue.labels) == ["status:decision", "status:drafting"]  # untouched
     assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}   # consumed
 
 

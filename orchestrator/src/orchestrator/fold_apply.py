@@ -383,15 +383,19 @@ async def apply_fold_signal(
         # fold, so the closed check runs before the BODY write.
         return _decided("skipped_closed", "issue was closed before the body write",
                         bound_comment_id=bound.id)
-    if DRAFTING_LABEL not in current.labels:
+    status_now = [l for l in current.labels if l.startswith("status:")]
+    if status_now != [DRAFTING_LABEL]:
         # A human transition landed between the poll's snapshot and this fresh
-        # read (e.g. drafting -> decision). The relabel helper would refuse at
-        # the end, but by then the body would already be rewritten — a stale
-        # approval must never modify an issue after a newer human transition.
+        # read (e.g. drafting -> decision, or a mid-swap dual-label state).
+        # SOLE status required, mirroring the terminal helper's own preemption
+        # semantics (`set_sole_status_label` treats anything but exactly one
+        # expected status as preempted) — the relabel would refuse at the end,
+        # but by then the body would already be rewritten; a stale approval
+        # must never modify an issue after a newer human transition.
         return _decided(
             "skipped_state_changed",
-            f"issue left {DRAFTING_LABEL} before the body write "
-            f"(labels now: {', '.join(current.labels) or 'none'}); "
+            f"issue is not solely at {DRAFTING_LABEL} before the body write "
+            f"(status labels now: {', '.join(status_now) or 'none'}); "
             f"the newer transition wins",
             bound_comment_id=bound.id,
         )
