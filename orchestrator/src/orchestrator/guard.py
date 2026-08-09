@@ -101,6 +101,22 @@ def _skip_flags(tokens: list[str], value_takers: tuple[str, ...]) -> list[str]:
 
 
 _GH_VALUE_FLAGS = ("-R", "--repo")
+_PUSH_VALUE_OPTIONS = ("--push-option", "--receive-pack", "--exec", "--repo",
+                       "--recurse-submodules")
+
+
+def _push_value_option(tok: str) -> bool:
+    """True when tok is a bare value-taking push option whose VALUE is the
+    next token — exact, or a git-style unambiguous long-option abbreviation
+    (codex review r13, PR #136: `--recei` abbreviates `--receive-pack`). A
+    prefix ambiguous within this list is ambiguous for git too (no other
+    push option shares these stems), so git rejects the command itself and
+    not consuming is safe. `=` forms are self-contained."""
+    if tok == "-o":
+        return True
+    if not tok.startswith("--") or "=" in tok or len(tok) < 4:
+        return False
+    return sum(1 for o in _PUSH_VALUE_OPTIONS if o.startswith(tok)) == 1
 _GIT_GLOBAL_VALUE_FLAGS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
                            "--exec-path", "--config-env", "--attr-source")
 
@@ -223,8 +239,7 @@ def _denied_shape(command: str) -> str | None:
                 # `--receive-pack git-receive-pack` value counted as the
                 # repository operand shifts a `+remote` repo into refspec
                 # position)
-                if tok in ("-o", "--push-option", "--receive-pack", "--exec",
-                           "--repo", "--recurse-submodules"):
+                if _push_value_option(tok):
                     i += 2
                     continue
                 # any --force* prefix: covers --force, --force-with-lease

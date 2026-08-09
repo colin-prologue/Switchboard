@@ -254,6 +254,16 @@ def test_repository_operand_starting_with_plus_is_not_a_refspec(tmp_path):
     r4 = _run_bash(
         "git push --receive-pack git-receive-pack origin +main", tmp_path)
     assert r4.returncode == 2
+    # round 13: git-style abbreviations of value-taking options consume too
+    r5 = _run_bash(
+        "git push --dry-run --recei git-receive-pack +remote HEAD", tmp_path)
+    assert r5.returncode == 0
+    r6 = _run_bash("git push --recei git-receive-pack origin +main", tmp_path)
+    assert r6.returncode == 2
+    # an in-list-ambiguous prefix is not consumed (git rejects it anyway),
+    # so a force refspec after it still denies
+    r7 = _run_bash("git push --rec x origin +main", tmp_path)
+    assert r7.returncode == 2
 
 
 # --- config-injected force + attached repo selector (round 6, PR #136) --------
