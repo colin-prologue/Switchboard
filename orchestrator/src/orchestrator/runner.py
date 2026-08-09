@@ -11,9 +11,11 @@ invariant 1, core §9.5) and a 10 MB max protocol-line size. Approval/sandbox
 posture (core §10.5) is delegated entirely to the configured Claude CLI
 command (non-interactive permission mode + PreToolUse hooks are the caller's
 responsibility, per SPEC.md §1); this module has no approval logic of its own
-and treats any non-"success" terminal result as a failed attempt, which is
-this implementation's documented equivalent of "user-input-required = hard
-failure" (core §10.5, §10.6).
+and treats any terminal result that is not a clean success as a failed attempt,
+which is this implementation's documented equivalent of "user-input-required =
+hard failure" (core §10.5, §10.6). "Clean" is not `subtype` alone: a result
+carrying its own `is_error: true` fails the turn even when its subtype says
+"success" (issue #116 / AgDR-032).
 
 stdlib only.
 """
@@ -114,6 +116,26 @@ def _structured_error_text(msg: dict) -> str:
         return value[:NOTIFICATION_TEXT_CHARS]
     if isinstance(value, dict) and isinstance(value.get("message"), str):
         return value["message"][:NOTIFICATION_TEXT_CHARS]
+    return ""
+
+
+def _gated_error_text(msg: dict) -> str:
+    """Classification input for a terminal result claimed by the `is_error`
+    gate (issue #116).
+
+    Deliberately NOT `_structured_error_text`: the terminal record carries no
+    top-level `error` key at all — the `"error": "authentication_failed"` value
+    sits on the ASSISTANT record, which is never classification input — so that
+    extractor returns "" here. Precedence is `result` then `terminal_reason`:
+    `result` is the richer CLI-authored error text (ground truth: "Not logged
+    in · Please run /login"), `terminal_reason` the fallback when `result` is
+    absent. Used ONLY by the gate branch — on a gated record, `result` is the
+    CLI's own error text, not model prose.
+    """
+    for key in ("result", "terminal_reason"):
+        value = msg.get(key)
+        if isinstance(value, str) and value.strip():
+            return value[:NOTIFICATION_TEXT_CHARS]
     return ""
 
 
@@ -352,12 +374,54 @@ class ClaudeRunner:
                 if msg_type == "result":
                     session_id = msg.get("session_id", session_id)
                     subtype = msg.get("subtype")
+                    # issue #116: the terminal record's OWN outcome fields.
+                    # Ground truth (tests/fixtures/claude_cli_auth_logged_out
+                    # .jsonl, claude-code 2.1.226): a logged-out run terminates
+                    # with subtype "success" AND `is_error: true`, so subtype
+                    # alone cannot decide the outcome. An ABSENT `is_error` is
+                    # false — a CLI version that drops the field must not fail
+                    # every turn.
+                    is_error = bool(msg.get("is_error"))
+                    terminal_reason = msg.get("terminal_reason")
+                    if not isinstance(terminal_reason, str):
+                        terminal_reason = ""
                     cost_usd = msg.get("total_cost_usd", 0.0) or 0.0
                     usage = msg.get("usage") or {}
                     num_turns = msg.get("num_turns", 0) or 0
                     denials = msg.get("permission_denials") or []
 
-                    if subtype == "success":
+                    if subtype == "error_max_turns" and session_id is not None:
+                        # issue #47: `--max-turns` exhaustion is a benign early
+                        # stop, not a failure. The conversation is intact, so
+                        # the recovery is to resume this same session next turn.
+                        # (A missing session id — never initialized — falls
+                        # through to the failure branch below, defensively.)
+                        # ORDERED BEFORE the issue #116 `is_error` gate: an
+                        # early stop stays `incomplete` + RESUME_SESSION
+                        # whatever `is_error` says, so the gate can never turn a
+                        # resumable stop into a failure (a blanket
+                        # is_error => failure would).
+                        emit(
+                            "turn_incomplete",
+                            {
+                                "subtype": subtype,
+                                "total_cost_usd": cost_usd,
+                                "num_turns": num_turns,
+                                "permission_denials": denials,
+                            },
+                            pid,
+                            usage=usage,
+                        )
+                        result = TurnResult(
+                            status="incomplete",
+                            session_id=session_id,
+                            error=subtype,
+                            continuation=Continuation.RESUME_SESSION,
+                            cost_usd=cost_usd,
+                            usage=usage,
+                            num_turns=num_turns,
+                        )
+                    elif subtype == "success" and not is_error:
                         emit(
                             "turn_completed",
                             {
@@ -376,16 +440,23 @@ class ClaudeRunner:
                             usage=usage,
                             num_turns=num_turns,
                         )
-                    elif subtype == "error_max_turns" and session_id is not None:
-                        # issue #47: `--max-turns` exhaustion is a benign early
-                        # stop, not a failure. The conversation is intact, so
-                        # the recovery is to resume this same session next turn.
-                        # (A missing session id — never initialized — falls
-                        # through to the failure branch below, defensively.)
+                    elif subtype == "success":
+                        # issue #116 outcome gate: a result that would otherwise
+                        # be counted a success, but whose own record says
+                        # `is_error: true`. Pre-#116 this returned `succeeded`,
+                        # so a logged-out CLI burned every session on no-op
+                        # "successes" and RESET the provider circuit. The gate
+                        # is text-independent (the outcome comes from the
+                        # structured field alone); the CLASS below is the
+                        # separate, second step. On a gated record the CLI, not
+                        # the model, authored `result` — that is the trust
+                        # boundary this branch draws.
                         emit(
-                            "turn_incomplete",
+                            "turn_failed",
                             {
                                 "subtype": subtype,
+                                "is_error": True,
+                                "terminal_reason": terminal_reason,
                                 "total_cost_usd": cost_usd,
                                 "num_turns": num_turns,
                                 "permission_denials": denials,
@@ -394,10 +465,14 @@ class ClaudeRunner:
                             usage=usage,
                         )
                         result = TurnResult(
-                            status="incomplete",
+                            status="failed",
                             session_id=session_id,
-                            error=subtype,
-                            continuation=Continuation.RESUME_SESSION,
+                            # never None: WorkerFailure(result.error or ...)
+                            error=terminal_reason or subtype or "failed",
+                            failure_class=classify_claude_failure(
+                                code=terminal_reason,
+                                detail=_gated_error_text(msg),
+                            ),
                             cost_usd=cost_usd,
                             usage=usage,
                             num_turns=num_turns,

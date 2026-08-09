@@ -56,10 +56,14 @@ covered by hand-written "real-looking" fixtures.
 What it proves (issue #116): the logged-out CLI emits an event with
 `"error": "authentication_failed"` (`is_api_error_message: true`) — a code
 present in NEITHER `_CLAUDE_CODES` entry (`authentication_expired` /
-`authentication_required`) — and a terminal result whose `result` text
-("Not logged in · Please run /login") would match the existing
-`\bnot logged in\b` pattern but is never passed to classification
-(`runner.py` `_structured_error_text` reads `msg["error"]` only). Captured as a
+`authentication_required`) — on the ASSISTANT record, while its TERMINAL
+record carries `subtype: "success"` with `is_error: true`,
+`terminal_reason: "api_error"`, and `result: "Not logged in · Please run
+/login"`. Pre-#116 the runner branched on `subtype` alone, so the run returned
+`succeeded` and classification was never reached; the runner now takes the
+outcome from the record's own `is_error` and classifies the gated record over
+`result` (falling back to `terminal_reason`), where the existing
+`\bnot logged in\b` pattern matches. Captured as a
 deliberate zero-token isolated probe: contains no conversation content or
 secrets (the after_run transcript-privacy policy governs session transcripts,
 not probe fixtures — #109 precedent).
@@ -68,3 +72,8 @@ not probe fixtures — #109 precedent).
 |---|---|
 | authentication (logged out) | **verified** — this fixture |
 | usage/plan limit, credits, rate limit, unavailable | UNVERIFIED — not safely reproducible on demand |
+
+The `is_error` outcome gate (issue #116) catches all four unverified
+conditions regardless of their per-condition strings — they fail the turn as
+`WORKER_FAILURE` (retry with backoff) until real text is captured and a
+matching pattern is added.

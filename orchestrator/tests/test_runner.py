@@ -22,6 +22,11 @@ from orchestrator.runner import ClaudeRunner
 from orchestrator.types import AgentEvent, ClaudeConfig, Continuation, FailureClass
 
 FIXTURE = str(Path(__file__).resolve().parent / "fake_claude.py")
+# issue #116 ground truth — real claude-code 2.1.226 output captured logged
+# out (see fixtures/README.md). Replayed verbatim; never hand-edited.
+AUTH_LOGGED_OUT_CAPTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "claude_cli_auth_logged_out.jsonl"
+)
 
 
 def make_cfg(
@@ -285,11 +290,17 @@ async def test_provider_diagnostic_does_not_enter_normalized_error(
     assert secret not in (result.error or "")
 
 
-async def test_model_result_text_cannot_create_provider_failure_class(
+async def test_model_result_text_cannot_create_provider_class_on_ungated_result(
     workspace: Path, monkeypatch
 ) -> None:
-    # error_max_turns now resolves to `incomplete` (issue #47): model result
-    # text on a benign early stop must not leak a provider failure class.
+    """Narrowed invariant (issue #116): model result text cannot create a
+    provider failure class on any result the `is_error` gate does NOT claim.
+
+    Doubles as the branch-ordering regression: the fake's `error_max_turns`
+    record carries `is_error: true`, and the #47 branch is ordered ahead of the
+    gate, so this stays `incomplete` + RESUME_SESSION and never classifies —
+    even though its text would match a provider pattern.
+    """
     monkeypatch.setenv("FAKE_SCENARIO", "error_max_turns")
     monkeypatch.setenv(
         "FAKE_CLAUDE_RESULT_TEXT",
@@ -301,7 +312,128 @@ async def test_model_result_text_cannot_create_provider_failure_class(
     )
 
     assert result.status == "incomplete"
+    assert result.continuation is Continuation.RESUME_SESSION
+    assert result.session_id == "sess-err"
     assert result.failure_class is None
+
+
+async def test_logged_out_capture_fails_with_provider_authentication(
+    workspace: Path, monkeypatch
+) -> None:
+    """Issue #116, replaying the committed ground-truth capture verbatim.
+
+    A logged-out claude-code 2.1.226 terminates with `subtype: "success"` and
+    `is_error: true`. Pre-#116 the runner branched on subtype alone and
+    returned `succeeded`, so classification was never reached: the session was
+    burned on a no-op turn and the provider circuit was RESET by the worker's
+    clean exit. The outcome now comes from the record's own `is_error`.
+    """
+    monkeypatch.setenv("FAKE_SCENARIO", "replay_fixture")
+    monkeypatch.setenv("FAKE_CLAUDE_FIXTURE", str(AUTH_LOGGED_OUT_CAPTURE))
+    recorder = EventRecorder()
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, recorder, "issue-116"
+    )
+
+    assert result.status == "failed"
+    assert result.error == "api_error"  # terminal_reason, never None
+    assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION
+    assert result.session_id == "7c08bd33-23f4-426e-985b-218140f37abc"
+    assert "turn_completed" not in recorder.names
+    failures = [e for _, e in recorder.events if e.event == "turn_failed"]
+    assert len(failures) == 1
+    assert failures[0].payload["subtype"] == "success"
+    assert failures[0].payload["is_error"] is True
+
+
+async def test_gated_result_with_unrecognized_text_is_worker_failure(
+    workspace: Path, monkeypatch
+) -> None:
+    """Negative space (issue #116): the gate decides the OUTCOME, never the
+    CLASS. An `is_error` result whose text matches no pattern must fail as
+    WORKER_FAILURE so it retries with backoff, rather than latching the
+    provider circuit the way a blanket is_error => AUTH would on any transient
+    API 5xx."""
+    monkeypatch.setenv("FAKE_SCENARIO", "gated_success")
+    monkeypatch.setenv("FAKE_CLAUDE_TERMINAL_REASON", "api_error")
+    monkeypatch.setenv("FAKE_CLAUDE_RESULT_TEXT", "API Error: 503 upstream hiccup")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-116"
+    )
+
+    assert result.status == "failed"
+    assert result.error == "api_error"
+    assert result.failure_class is FailureClass.WORKER_FAILURE
+
+
+async def test_gated_result_text_selects_its_matching_class_by_design(
+    workspace: Path, monkeypatch
+) -> None:
+    """The accepted trust boundary, pinned (issue #116): on a record the gate
+    DOES claim, `result` is CLI-authored error text and is classification
+    input — so gated text matching a non-auth pattern resolves to that class.
+    This is the decision, not an accident: if it is ever reversed, this test is
+    the one that must be argued with."""
+    monkeypatch.setenv("FAKE_SCENARIO", "gated_success")
+    monkeypatch.setenv("FAKE_CLAUDE_TERMINAL_REASON", "api_error")
+    monkeypatch.setenv("FAKE_CLAUDE_RESULT_TEXT", "Rate limit exceeded · retry later")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-116"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_class is FailureClass.PROVIDER_RATE_LIMIT
+
+
+async def test_gated_result_falls_back_to_terminal_reason_when_result_absent(
+    workspace: Path, monkeypatch
+) -> None:
+    """`detail = result or terminal_reason` — the fallback leg."""
+    monkeypatch.setenv("FAKE_SCENARIO", "gated_success")
+    monkeypatch.setenv("FAKE_CLAUDE_TERMINAL_REASON", "Authentication required")
+    monkeypatch.delenv("FAKE_CLAUDE_RESULT_TEXT", raising=False)
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-116"
+    )
+
+    assert result.status == "failed"
+    assert result.error == "Authentication required"
+    assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION
+
+
+async def test_auth_text_in_agent_prose_cannot_fail_a_successful_turn(
+    workspace: Path, monkeypatch
+) -> None:
+    """The decided boundary (issue #116): the auth signal is read from the
+    terminal record's OWN fields, never from assistant content. A run whose
+    agent merely quotes "Not logged in · Please run /login" has `is_error:
+    false` on its result record and is structurally excluded."""
+    monkeypatch.setenv("FAKE_SCENARIO", "auth_prose_success")
+    recorder = EventRecorder()
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, recorder, "issue-116"
+    )
+
+    assert result.status == "succeeded"
+    assert result.failure_class is None
+    assert "turn_failed" not in recorder.names
+
+
+def test_fixtures_readme_records_the_is_error_gate() -> None:
+    """Standing regression for the README's UNVERIFIED caveat (issue #116):
+    the four unverified claude conditions are still caught as failures by the
+    outcome gate regardless of their per-condition strings. `grep` is not on
+    the worker allowlist, so the check lives here."""
+    content = (Path(__file__).resolve().parent / "fixtures" / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert content.count("is_error") >= 2
 
 
 async def test_prompt_delivered_via_stdin(workspace: Path, monkeypatch, tmp_path: Path):

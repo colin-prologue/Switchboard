@@ -31,7 +31,7 @@ not exact JSON names. We implement that over the Claude CLI.
 | agent `command` (`codex app-server`)| `claude -p --output-format stream-json` (subprocess, line-delimited JSON)       |
 | thread/turn start                   | first `claude -p` invocation; capture `session_id` from the `system/init` event |
 | continuation turn (reuse thread)    | `claude -p --resume <session_id>` (same workspace)                              |
-| turn completed / failed             | terminal `result` message; map `result.subtype` → Succeeded / Failed            |
+| turn completed / failed             | terminal `result` message; map `result.subtype` → Succeeded / Failed, **gated by the record's own `is_error`** (AgDR-032, issue #116): a result that would otherwise be Succeeded but carries `is_error: true` is Failed, classified over `result` / `terminal_reason`. `error_max_turns` with a session id stays Incomplete + resume (AgDR-027) regardless of `is_error`; an absent `is_error` is false. |
 | `max_turns`                         | `--max-turns`                                                                   |
 | approval / auto-approve             | non-interactive permission mode + `--allowedTools`; a denial is surfaced to the agent (not an attempt-killer) — a session that cannot finish because of one ends in a non-success `result`, which fails the attempt. Never blocks on user input (core §10.5). Ratified 2026-07-03 (AgDR-004 addendum): this soft semantic is what shipped and was validated (PRs #13/#17). |
 | sandbox / safety invariants         | **PreToolUse hooks** vetoing tool calls outside the per-issue workspace (stronger than advisory sandbox) |
