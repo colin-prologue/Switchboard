@@ -290,3 +290,36 @@ def test_casefolded_and_mirror_config_are_denied(command, tmp_path):
 def test_near_miss_config_keys_are_allowed(command, tmp_path):
     r = _run_bash(command, tmp_path)
     assert r.returncode == 0
+
+
+# --- line continuations, non-push config, alias smuggling (round 9, PR #136) --
+
+@pytest.mark.parametrize("command", [
+    "gh \\\npr merge 12",
+    "git push \\\n-f origin branch",
+    "git \\\npush --mirror origin",
+])
+def test_backslash_newline_continuations_are_denied(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+
+
+@pytest.mark.parametrize("command", [
+    "git -c remote.origin.push=+main status",              # read-only command
+    "git -c remote.origin.mirror=true config --list",      # read-only command
+    "git --config-env remote.origin.push=VAR log",         # read-only command
+])
+def test_push_config_on_non_push_commands_is_allowed(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0
+
+
+@pytest.mark.parametrize("command", [
+    "git -c alias.x='push -f' x origin",                   # alias renames the verb
+    "git -c Alias.deploy=push deploy -f origin",
+    "git -calias.x=push x",
+    "git --config-env alias.x=CMD_VAR x",
+])
+def test_alias_config_is_denied(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2

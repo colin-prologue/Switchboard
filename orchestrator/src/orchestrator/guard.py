@@ -51,6 +51,10 @@ def _tokenize(command: str) -> list[str]:
     bare `pr` inside prose) and `+refs/heads/x` stays one token. An unbalanced
     quote falls back to a naive split — fail toward evaluation, never toward a
     silent allow."""
+    # bash removes backslash-newline before parsing, but shlex leaves the
+    # newline glued to the next token (`gh \<NL>pr merge` -> "\npr" — codex
+    # review r9, PR #136); match bash before tokenizing
+    command = command.replace("\\\n", "")
     try:
         return shlex.split(command)
     except ValueError:
@@ -154,12 +158,16 @@ def _denied_shape(command: str) -> str | None:
     if tokens[0] == "git":
         # Git accepts global options before the subcommand (`git -C . push`,
         # `git -c k=v push` — codex review, PR #136); locate `push` as the
-        # first non-flag token with global values consumed. Before consuming,
+        # first non-flag token with global values consumed. While consuming,
         # inspect -c / --config-env values: a `remote.<name>.push=+refspec`
         # config IS a force push smuggled through a global flag (codex
         # review r6 demonstrated it rewinding a remote), and a
         # --config-env indirection hides the value in an env var we cannot
-        # read — deny any push-config key outright there (fail toward deny).
+        # read. Push-config denials only apply when the located subcommand
+        # is actually `push` (codex review r9 — `git -c ... status` is
+        # read-only); alias configs deny unconditionally, since an alias
+        # renames a verb out from under the subcommand match entirely.
+        push_cfg_denial = None
         gi = 1
         while gi < len(tokens) and tokens[gi].startswith("-"):
             flag = tokens[gi]
@@ -182,18 +190,22 @@ def _denied_shape(command: str) -> str | None:
                 # config variable names are case-insensitive
                 # (`remote.origin.Push` works — codex review r7, PR #136)
                 key_cf = key.lower()
+                if key_cf.startswith("alias."):
+                    return f"git -c {key}=... (alias defined via config)"
                 if key_cf.endswith(".push") and (
                     val.startswith("+") or source == "--config-env"
                 ):
-                    return f"git -c {key}=+... (force via push config)"
+                    push_cfg_denial = f"git -c {key}=+... (force via push config)"
                 # remote.<name>.mirror=true is `push --mirror` by config
                 # (codex review r7 demonstrated it deleting remote refs);
                 # deny for any value — no legitimate worker sets it, and a
                 # --config-env value is unreadable here anyway
                 if key_cf.startswith("remote.") and key_cf.endswith(".mirror"):
-                    return f"git -c {key}=... (mirror via remote config)"
+                    push_cfg_denial = f"git -c {key}=... (mirror via remote config)"
             gi += 1
         rest = _skip_flags(tokens[1:], _GIT_GLOBAL_VALUE_FLAGS)
+        if push_cfg_denial and rest[:1] == ["push"]:
+            return push_cfg_denial
         if rest[:1] == ["push"]:
             args = rest[1:]
             i = 0
