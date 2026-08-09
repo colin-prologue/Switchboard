@@ -124,18 +124,28 @@ def _denied_shape(command: str) -> str | None:
                 verb, args = rest[0], rest[1:]
                 if verb in GH_PR_DENIED_VERBS:
                     return GH_PR_DENIED_VERBS[verb]
-                if verb == "review" and any(
-                    a == "--approve" or a == "-a"
-                    # explicit boolean form: --approve=true; =false is
-                    # over-denied deliberately (fail toward deny — a worker
-                    # has no reason to write it, and denial is soft)
-                    or a.startswith("--approve=")
-                    # bundled booleans, value-aware: `-am` denies, `-b=x`
-                    # and `-ba` do not (b takes a value; F is --body-file)
-                    or _bundled_bool(a, "a", "bF")
-                    for a in args
-                ):
-                    return "gh pr review --approve"
+                if verb == "review":
+                    i = 0
+                    while i < len(args):
+                        a = args[i]
+                        # bare body/body-file consume their SEPARATED value
+                        # (codex review r4, PR #136: `--body --approve` makes
+                        # `--approve` the literal body text, not an approval)
+                        if a in ("-b", "--body", "-F", "--body-file"):
+                            i += 2
+                            continue
+                        if (
+                            a == "--approve" or a == "-a"
+                            # explicit boolean form: --approve=true; =false is
+                            # over-denied deliberately (fail toward deny — a
+                            # worker has no reason to write it; denial is soft)
+                            or a.startswith("--approve=")
+                            # bundled booleans, value-aware: `-am` denies,
+                            # `-b=x`/`-ba` do not (b/F take values)
+                            or _bundled_bool(a, "a", "bF")
+                        ):
+                            return "gh pr review --approve"
+                        i += 1
         return None
 
     if tokens[0] == "git":
@@ -154,8 +164,19 @@ def _denied_shape(command: str) -> str | None:
                 if tok in ("-o", "--push-option"):
                     i += 2
                     continue
-                if tok == "--force" or tok.startswith("--force-with-lease"):
+                # any --force* prefix: covers --force, --force-with-lease
+                # (incl. its `=<ref>:<expect>` form), --force-if-includes,
+                # and git's UNAMBIGUOUS ABBREVIATIONS (`--force-w`,
+                # `--force-with-l` — codex review r4 demonstrated git 2.43
+                # accepts them and forces); shorter prefixes like `--forc`
+                # are ambiguous across the three --force* options and git
+                # rejects them, so no bypass exists below this prefix
+                if tok.startswith("--force"):
                     return f"git push {tok}"
+                # --mirror force-updates (and deletes) every ref; git accepts
+                # unambiguous abbreviations down to `--mi`
+                if tok != "--" and len(tok) >= 4 and "--mirror".startswith(tok):
+                    return f"git push {tok} (mirror)"
                 # value-aware bundle scan: `-fu`/`-uf` deny, `-ofoo` is the
                 # push-option VALUE and does not (o takes a value)
                 if tok == "-f" or _bundled_bool(tok, "f", "o"):

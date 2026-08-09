@@ -210,3 +210,25 @@ def test_separated_push_option_value_is_not_a_refspec(tmp_path):
     # ...but a real +refspec after the consumed option still denies
     r2 = _run_bash("git push -o opt origin +main", tmp_path)
     assert r2.returncode == 2
+
+
+# --- abbreviations, mirror, separated body values (round 4, PR #136) ----------
+
+@pytest.mark.parametrize("command", [
+    "git push --force-w origin branch",
+    "git push --force-with-l origin branch",
+    "git push --force-if-includes --force-with-lease origin branch",
+    "git push --mirror origin",
+    "git push --mir origin",
+])
+def test_abbreviations_and_mirror_are_denied(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+
+
+def test_separated_body_value_is_not_an_approval(tmp_path):
+    r = _run_bash("gh pr review 12 --comment --body --approve", tmp_path)
+    assert r.returncode == 0
+    # ...but an --approve OUTSIDE a body value still denies
+    r2 = _run_bash("gh pr review 12 --body ok --approve", tmp_path)
+    assert r2.returncode == 2
