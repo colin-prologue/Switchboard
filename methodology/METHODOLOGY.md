@@ -76,8 +76,11 @@ adversarial scrutiny so the implementing agent only ever sees contracts that
 survived independent review. It is an **active** state (Symphony dispatches it),
 but the dispatched session runs as a *verifier*, not an implementer — the
 `status:triage` branch in the workflow prompt swaps the role. It reuses the
-same dispatch machinery, session, and budget caps as an implementation session,
-plus one generic scheduler rule it leans on: sessions are *role-pinned* — when
+same dispatch machinery and session shape as an implementation session, but
+**not** the same budget: verify and implement sessions are capped independently
+(same cap value, separate counters — issue #35 / AgDR-030), so verification
+passes never eat the implementation budget. It also leans on one generic
+scheduler rule: sessions are *role-pinned* — when
 a worker's issue changes state (even active → active, e.g. a PASS relabel
 `status:triage → status:todo`), the session ends at the next turn boundary and
 normal re-dispatch starts a fresh session in the new role (SPEC.md §4).
