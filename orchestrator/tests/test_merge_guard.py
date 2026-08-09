@@ -167,3 +167,31 @@ def test_adjacent_short_flags_stay_allowed(command, tmp_path):
     r = _run_bash(command, tmp_path)
     assert r.returncode == 0
     assert r.stdout == ""
+
+
+# --- flag values and global options (codex review round 2, PR #136) -----------
+
+@pytest.mark.parametrize("command", [
+    "gh -R colin-prologue/Switchboard pr merge 12",
+    "gh --repo colin-prologue/Switchboard pr merge 12",
+    "gh pr -R colin-prologue/Switchboard merge 12",
+    "gh pr review 12 --approve=true",
+    "git -C . push -f origin branch",
+    "git -c user.name=x push --force origin branch",
+])
+def test_flag_values_and_globals_do_not_bypass(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr review 12 -c -b=thanks",       # attached body value carrying 'a'? no — but '=' stops the scan
+    "gh pr review 12 -ba",                # -b takes a value; 'a' is the VALUE
+    "gh pr review 12 -b amazing",
+    "git push -ofoo origin branch",       # -o's attached value carries 'f'
+    "git -C . push origin branch",        # global option, no force
+])
+def test_attached_values_are_not_flags(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0
+    assert r.stdout == ""

@@ -57,6 +57,50 @@ def _tokenize(command: str) -> list[str]:
         return command.split()
 
 
+def _bundled_bool(token: str, target: str, value_takers: str) -> bool:
+    """Whether a short-flag bundle carries boolean flag `target`.
+
+    pflag/git parse bundles left-to-right: booleans may stack until the first
+    value-taking flag, whose remaining chars (or `=…` suffix) are its VALUE,
+    not flags (codex review, PR #136 — `-b=thanks` and `-ofoo` are values and
+    must not be scanned for `a`/`f`). Scan stops at `=` or the first
+    value-taker.
+    """
+    if len(token) < 2 or token[0] != "-" or token[1] == "-":
+        return False
+    for ch in token[1:]:
+        if ch == "=" or ch in value_takers:
+            return False if ch != target else True
+        if ch == target:
+            return True
+    return False
+
+
+def _skip_flags(tokens: list[str], value_takers: tuple[str, ...]) -> list[str]:
+    """Drop leading flags AND the values of flags that take one.
+
+    `-R o/r` / `--repo o/r` consume the following token; `--repo=o/r` and
+    `-Ro/r` are self-contained (codex review, PR #136 — leaving a flag's
+    VALUE in subcommand position let `gh -R o/r pr merge` bypass the deny).
+    """
+    rest = list(tokens)
+    while rest and rest[0].startswith("-"):
+        flag = rest[0]
+        rest = rest[1:]
+        bare = flag.split("=", 1)[0]
+        if "=" not in flag and bare in value_takers and rest:
+            # attached short values (`-Ro/r`) are already self-contained:
+            # only a BARE value-taking flag consumes the next token.
+            if bare.startswith("--") or len(flag) == 2:
+                rest = rest[1:]
+    return rest
+
+
+_GH_VALUE_FLAGS = ("-R", "--repo")
+_GIT_GLOBAL_VALUE_FLAGS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                           "--exec-path")
+
+
 def _denied_shape(command: str) -> str | None:
     """Name the denied shape this command matches, or None.
 
@@ -70,39 +114,45 @@ def _denied_shape(command: str) -> str | None:
         return None
 
     if tokens[0] == "gh":
-        # Global flags may sit between `gh` and `pr`; the first non-flag token
-        # must be THIS command's subcommand, never a later `pr` in prose.
-        rest = tokens[1:]
-        while rest and rest[0].startswith("-"):
-            rest = rest[1:]
-        if rest[:1] == ["pr"] and len(rest) >= 2:
-            verb, args = rest[1], rest[2:]
-            if verb in GH_PR_DENIED_VERBS:
-                return GH_PR_DENIED_VERBS[verb]
-            if verb == "review" and any(
-                a == "--approve" or a == "-a"
-                # bundled short flags: `-am "lgtm"` carries the approve `a`
-                or (len(a) > 1 and a[0] == "-" and a[1] != "-" and "a" in a[1:])
-                for a in args
-            ):
-                return "gh pr review --approve"
+        # Flags (with their values) may sit between `gh` and `pr` AND between
+        # `pr` and the verb (`gh pr -R o/r merge` — codex review, PR #136);
+        # the verb is the first non-flag token after the `pr` subcommand.
+        rest = _skip_flags(tokens[1:], _GH_VALUE_FLAGS)
+        if rest[:1] == ["pr"]:
+            rest = _skip_flags(rest[1:], _GH_VALUE_FLAGS)
+            if rest:
+                verb, args = rest[0], rest[1:]
+                if verb in GH_PR_DENIED_VERBS:
+                    return GH_PR_DENIED_VERBS[verb]
+                if verb == "review" and any(
+                    a == "--approve" or a == "-a"
+                    # explicit boolean form: --approve=true; =false is
+                    # over-denied deliberately (fail toward deny — a worker
+                    # has no reason to write it, and denial is soft)
+                    or a.startswith("--approve=")
+                    # bundled booleans, value-aware: `-am` denies, `-b=x`
+                    # and `-ba` do not (b takes a value; F is --body-file)
+                    or _bundled_bool(a, "a", "bF")
+                    for a in args
+                ):
+                    return "gh pr review --approve"
         return None
 
-    if tokens[:2] == ["git", "push"]:
-        # `git push` takes no free-text argument, so a plain per-token scan is
-        # safe here (and word-boundary regexes cannot express `+refspec`).
-        for tok in tokens[2:]:
-            if tok == "--force" or tok.startswith("--force-with-lease"):
-                return f"git push {tok}"
-            if tok == "-f" or (
-                # bundled short options: `-fu` carries force (codex review,
-                # PR #136 — git accepts bundled shorts; whole-token equality
-                # missed them)
-                len(tok) > 1 and tok[0] == "-" and tok[1] != "-" and "f" in tok[1:]
-            ):
-                return f"git push {tok} (force)"
-            if len(tok) > 1 and tok.startswith("+"):
-                return f"git push {tok} (force refspec)"
+    if tokens[0] == "git":
+        # Git accepts global options before the subcommand (`git -C . push`,
+        # `git -c k=v push` — codex review, PR #136); locate `push` as the
+        # first non-flag token with global values consumed.
+        rest = _skip_flags(tokens[1:], _GIT_GLOBAL_VALUE_FLAGS)
+        if rest[:1] == ["push"]:
+            for tok in rest[1:]:
+                if tok == "--force" or tok.startswith("--force-with-lease"):
+                    return f"git push {tok}"
+                # value-aware bundle scan: `-fu`/`-uf` deny, `-ofoo` is the
+                # push-option VALUE and does not (o takes a value)
+                if tok == "-f" or _bundled_bool(tok, "f", "o"):
+                    return f"git push {tok} (force)"
+                if len(tok) > 1 and tok.startswith("+"):
+                    return f"git push {tok} (force refspec)"
     return None
 
 
