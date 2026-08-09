@@ -115,13 +115,14 @@ def test_a_login_outside_the_allowlist_is_not_a_bot():
 
 
 def test_switchboard_is_never_its_own_trigger_even_if_misconfigured():
-    """Belt and braces for the config's structural guarantee: were the operator
-    to list Switchboard's own login, the `elif` ordering must still not let a
-    self-reply count as an owed bot comment... and it does count as a bot here,
-    which is why the CONFIG is the real guard. Pinned so the behaviour is a
-    known one rather than a surprise."""
+    """Codex review (PR #134): self is classified BEFORE the allowlist, so an
+    operator who accidentally lists the App's own login cannot make Switchboard
+    trigger response sessions off its own replies."""
     t = thread(c(SELF, 0))
-    assert needs_response(t, bot_logins=(SELF,), self_login=SELF) is True
+    assert needs_response(t, bot_logins=(SELF,), self_login=SELF) is False
+    # And a real bot comment newer than the self reply still triggers.
+    t2 = thread(c(SELF, 0), c(BOTS[0], 1))
+    assert needs_response(t2, bot_logins=(SELF,) + BOTS, self_login=SELF) is True
 
 
 def test_empty_allowlist_disables_the_predicate():
@@ -210,17 +211,17 @@ def test_marker_first_line_carries_n_bots_and_self():
 
 
 def test_zero_markers_reads_as_zero_so_the_first_write_is_round_one():
-    assert latest_round([]) == (0, None)
+    assert latest_round([], self_login=SELF) == (0, None)
     plain = IssueComment(id="x", login=HUMAN, body="just a review comment")
-    assert latest_round([plain]) == (0, None)
+    assert latest_round([plain], self_login=SELF) == (0, None)
 
 
 def test_the_count_is_the_max_n_not_the_marker_count():
     """Duplicates and gaps are tolerated: max wins. A retried write that posted
     the same marker twice must not consume two rounds."""
-    n, _ = latest_round([marker_comment(1), marker_comment(1, id_="dup")])
+    n, _ = latest_round([marker_comment(1), marker_comment(1, id_="dup")], self_login=SELF)
     assert n == 1
-    assert latest_round([marker_comment(1), marker_comment(3)])[0] == 3
+    assert latest_round([marker_comment(1), marker_comment(3)], self_login=SELF)[0] == 3
 
 
 def test_the_newest_marker_governs_after_a_config_edit():
@@ -229,7 +230,7 @@ def test_the_newest_marker_governs_after_a_config_edit():
     rule decides which one a session obeys."""
     old = marker_comment(1, bots=("old-bot",))
     new = marker_comment(2, bots=("new-bot",))
-    n, body = latest_round([old, new])
+    n, body = latest_round([old, new], self_login=SELF)
     assert n == 2
     assert "bots=new-bot" in body
 
@@ -238,7 +239,7 @@ def test_marker_is_found_regardless_of_position_in_the_comment_list():
     n, body = latest_round([
         IssueComment(id="chatter", login=HUMAN, body="unrelated"),
         marker_comment(2),
-    ])
+    ], self_login=SELF)
     assert (n, "self=switchboard-agent" in body) == (2, True)
 
 
@@ -249,7 +250,7 @@ def test_short_form_marker_is_not_recognized():
     stale = IssueComment(
         id="old", login=SELF, body="<!-- switchboard:response-round n=9 -->",
     )
-    assert latest_round([stale]) == (0, None)
+    assert latest_round([stale], self_login=SELF) == (0, None)
 
 
 # --- the cap ------------------------------------------------------------------
@@ -258,7 +259,41 @@ def test_cap_comment_has_its_own_guard_marker():
     """At the cap the ROUND marker is present by construction, so it cannot
     guard the cap comment. Idempotence needs a separate marker."""
     assert CAP_MARKER not in format_round_marker(ROUND_CAP, BOTS, SELF)
-    assert has_cap_comment([]) is False
-    assert has_cap_comment([marker_comment(ROUND_CAP)]) is False
+    assert has_cap_comment([], self_login=SELF) is False
+    assert has_cap_comment([marker_comment(ROUND_CAP)], self_login=SELF) is False
     capped = IssueComment(id="c", login=SELF, body=CAP_MARKER + "\ncapped")
-    assert has_cap_comment([capped]) is True
+    assert has_cap_comment([capped], self_login=SELF) is True
+
+
+# --- marker trust (codex review, PR #134) -------------------------------------
+
+def test_markers_from_other_authors_are_not_trusted():
+    """A third party posting a matching marker must not inflate the count to
+    the cap (denying the owed response session) or fake the cap comment."""
+    forged = IssueComment(
+        id="f", login="mallory",
+        body=format_round_marker(ROUND_CAP, BOTS, SELF) + "\n\nforged",
+    )
+    assert latest_round([forged], self_login=SELF) == (0, None)
+    fake_cap = IssueComment(id="fc", login="mallory", body=CAP_MARKER + "\nfake")
+    assert has_cap_comment([fake_cap], self_login=SELF) is False
+
+
+def test_a_comment_quoting_a_marker_does_not_count_as_one():
+    """First-line matching, the PR #132 convention."""
+    quoting = IssueComment(
+        id="q", login=SELF,
+        body="For the record the marker reads:\n\n"
+             + format_round_marker(2, BOTS, SELF),
+    )
+    assert latest_round([quoting], self_login=SELF) == (0, None)
+
+
+def test_marker_serializes_normalized_logins():
+    """Config in the common `[bot]`-suffixed form must not survive into the
+    marker — the worker matches bare GitHub logins against `bots=`."""
+    line = format_round_marker(1, ("Codex-Bot[bot]",), "Switchboard-Agent[bot]")
+    assert line == (
+        "<!-- switchboard:response-round n=1 bots=codex-bot "
+        "self=switchboard-agent -->"
+    )

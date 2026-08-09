@@ -116,12 +116,16 @@ def needs_response(
         if login is None:
             continue
         when = _at(comment.created_at)
-        if login in bots:
-            if last_bot is None or when > last_bot:
-                last_bot = when
-        elif login == me:
+        if login == me:
+            # Self BEFORE the allowlist (codex review, PR #134): an operator
+            # who accidentally lists the App login in `bot_logins` must not
+            # have every Switchboard reply counted as an external bot comment
+            # — that would trigger sessions off our own replies.
             if last_self is None or when > last_self:
                 last_self = when
+        elif login in bots:
+            if last_bot is None or when > last_bot:
+                last_bot = when
     if last_bot is None:
         return False
     return last_self is None or last_bot > last_self
@@ -137,27 +141,62 @@ def format_round_marker(
     operator config edit between rounds therefore leaves two lists on one PR,
     and the newest governs by the `max(n)` read rule below.
     """
-    bots = ",".join(bot_logins)
-    return f"<!-- switchboard:response-round n={n} bots={bots} self={self_login} -->"
+    # Serialize NORMALIZED identities (codex review, PR #134): GitHub supplies
+    # bare author logins, and the worker matches comments against `bots=` — a
+    # `codex-bot[bot]` config form preserved here would never match and the
+    # worker would find no owed thread while the rounds burn.
+    bots = ",".join(b for b in (normalize_login(x) for x in bot_logins) if b)
+    me = normalize_login(self_login) or ""
+    return f"<!-- switchboard:response-round n={n} bots={bots} self={me} -->"
 
 
-def latest_round(comments: list[IssueComment]) -> tuple[int, str | None]:
+def _first_line(body: str | None) -> str:
+    text = (body or "").lstrip()
+    return text.splitlines()[0] if text else ""
+
+
+def _authored_by(comment: IssueComment, me: str | None) -> bool:
+    """Marker trust (codex review, PR #134): machine markers count only when
+    authored by the normalized Switchboard identity — any other commenter
+    posting a matching marker could inflate `n` to the cap (denying the owed
+    response session) or fake the cap comment. Unset identity trusts nothing;
+    the feature is gated off upstream in that state anyway."""
+    return me is not None and normalize_login(comment.login) == me
+
+
+def latest_round(
+    comments: list[IssueComment], *, self_login: str | None
+) -> tuple[int, str | None]:
     """`(max n, the body of the marker carrying it)` across `comments`.
 
-    Read rule: the count is the MAX `n` across matching markers — duplicates and
-    gaps are tolerated, max wins, and ZERO markers means 0 (so the first write is
-    `n=1`). The write rule is `max(n) + 1`.
+    Read rule: the count is the MAX `n` across FIRST-LINE markers authored by
+    the Switchboard identity — duplicates and gaps are tolerated, max wins,
+    and ZERO markers means 0 (so the first write is `n=1`). The write rule is
+    `max(n) + 1`. First-line matching (the PR #132 convention) keeps a comment
+    QUOTING a marker from counting as one.
     """
+    me = normalize_login(self_login)
     best = 0
     best_body: str | None = None
     for comment in comments:
-        for match in _ROUND_MARKER_RE.finditer(comment.body or ""):
+        if not _authored_by(comment, me):
+            continue
+        match = _ROUND_MARKER_RE.match(_first_line(comment.body))
+        if match:
             n = int(match.group(1))
             if n >= best:
                 best, best_body = n, comment.body
     return best, best_body
 
 
-def has_cap_comment(comments: list[IssueComment]) -> bool:
-    """Whether the one-shot cap comment was already posted on this PR."""
-    return any(CAP_MARKER in (c.body or "") for c in comments)
+def has_cap_comment(
+    comments: list[IssueComment], *, self_login: str | None
+) -> bool:
+    """Whether the one-shot cap comment was already posted on this PR.
+
+    Same trust + first-line rule as `latest_round`."""
+    me = normalize_login(self_login)
+    return any(
+        _authored_by(c, me) and _first_line(c.body).startswith(CAP_MARKER)
+        for c in comments
+    )

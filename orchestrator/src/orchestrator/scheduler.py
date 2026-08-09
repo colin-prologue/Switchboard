@@ -676,9 +676,9 @@ class Orchestrator:
             return False
 
         comments = await tracker.fetch_pr_comments(pr_number)
-        rounds, _ = latest_round(comments)
+        rounds, _ = latest_round(comments, self_login=self_login)
         if rounds >= ROUND_CAP:
-            if not has_cap_comment(comments):
+            if not has_cap_comment(comments, self_login=self_login):
                 await tracker.add_issue_comment(
                     pr_id,
                     REVIEW_CAP_COMMENT.format(marker=CAP_MARKER, cap=ROUND_CAP),
