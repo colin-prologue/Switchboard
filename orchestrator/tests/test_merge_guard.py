@@ -331,6 +331,9 @@ def test_push_config_on_non_push_commands_is_allowed(command, tmp_path):
     "git -c Alias.deploy=push deploy -f origin",
     "git -calias.x=push x",
     "git --config-env alias.x=CMD_VAR x",
+    "git -C . -c alias.x='push -f' x origin",              # r12: global value
+    "git --git-dir .git -c remote.origin.mirror=true push origin",
+    "git -C . --attr-source HEAD -c remote.origin.push=+x push origin",
 ])
 def test_alias_config_is_denied(command, tmp_path):
     r = _run_bash(command, tmp_path)

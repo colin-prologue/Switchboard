@@ -184,6 +184,11 @@ def _denied_shape(command: str) -> str | None:
                     # bare form: the value is the next token (`-c k=v`)
                     value = tokens[gi + 1]
                     gi += 1
+            elif flag in _GIT_GLOBAL_VALUE_FLAGS:
+                # a preceding bare value-taking global (`git -C . -c ...`)
+                # must not end the scan at its separated value (codex
+                # review r12, PR #136)
+                gi += 1
             if value is not None:
                 key = value.split("=", 1)[0]
                 val = value.split("=", 1)[1] if "=" in value else ""
