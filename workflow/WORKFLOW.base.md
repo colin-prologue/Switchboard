@@ -243,12 +243,14 @@ with nothing to compare against, which is the loop this mechanic exists to stop.
      top to bottom. Not a diff, not a patch, not the changed section alone.
      Apply replaces the body with exactly these bytes.
   2. Exactly one open sentinel and exactly one close sentinel in the comment.
-  3. **If the revised body itself contains the close literal
-     `<!-- /fold:proposal -->` anywhere, OMIT the proposal block entirely** and
-     say so in one line of the verdict ("revised body quotes the fold close
-     sentinel; proposing by hand"). Apply then logs a clean diagnosed skip and
-     the operator folds by hand. Never emit a block apply would have to
-     truncate — a truncated payload would silently blank the rest of the body.
+  3. **If the revised body itself contains EITHER sentinel literal —
+     `<!-- fold:proposal -->` or `<!-- /fold:proposal -->` — anywhere,
+     OMIT the proposal block entirely** and say so in one line of the verdict
+     ("revised body quotes a fold sentinel; proposing by hand"). Apply then
+     logs a clean diagnosed skip and the operator folds by hand. A quoted
+     close literal would truncate the payload (silently blanking the rest of
+     the body); a quoted OPEN literal makes two opens, which the exact-count
+     rule rejects — either way, never emit a block apply cannot apply.
   4. The block is a *proposal*. Posting it changes nothing: the fold happens
      only if the operator approves with 👍 or `/fold`, and only then does the
      orchestrator write the body.
