@@ -25,8 +25,11 @@ What it proves (issue #109 findings):
    (added by #109; prior auth patterns did not match, classifying a real auth
    outage as WORKER_FAILURE and keeping the provider circuit closed).
 4. Transient `Reconnecting... N/5` error events occur mid-turn before the CLI
-   recovers or terminally fails (WebSocket → HTTPS fallback). See the follow-up
-   ticket on early-break behavior in `codex_runner`.
+   recovers or terminally fails (WebSocket → HTTPS fallback). Fixed in issue
+   #114 / AgDR-030: `codex_runner` now treats `error` events as non-terminal
+   notifications and takes the verdict from `turn.failed` / `turn.completed` /
+   stream end. This file is replayed verbatim by the `replay_fixture`
+   scenario in `tests/fake_codex.py` to hold that behavior.
 
 ## Conditions verified vs unverified (codex)
 

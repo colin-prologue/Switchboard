@@ -157,14 +157,26 @@ structured `service_unavailable` result. The issue remains claimed without
 retry or session burn. After the fixed five-minute cooldown, exactly one
 half-open probe delegates the complete safety prefix to the real
 subscription-authenticated Codex CLI and completes the synthetic fixture task
-in the evidence workflow's single allowed scheduler turn. It then writes
-`.run/stage7-handoff-ready` instead of changing labels. The one-turn ceiling
-enters `after_run` immediately instead of launching a continuation while the
-issue remains active. The canary-specific hook requires that marker, a latest
-transcript ending in `turn.completed`, a clean pushed branch, a closing PR
-body, and exactly one open PR before it owns the `status:human-review`
-transition. Cancelled or incomplete turns retain the marker and cannot hand
-off.
+in the evidence workflow's single allowed scheduler turn. It then writes the
+production handoff evidence contract `.run/handoff-evidence.json` instead of
+changing labels. The one-turn ceiling enters `after_run` immediately instead of
+launching a continuation while the issue remains active. As of issue #61 /
+PR #115 (AgDR-028) the transition is **not** canary-owned: the production
+orchestrator validates that evidence — issue linkage, workspace HEAD matching
+`head_sha`, exactly one open PR for the branch with a matching head and
+closes-linkage — and performs the single `status:human-review` transition
+itself, and only after the provider turn returns terminal success
+(`orchestrator/src/orchestrator/handoff.py`). The canary-specific hook is now an
+artifact-capture passthrough (`scripts/stage7-circuit-after-run.sh`) and owns no
+label. Cancelled or incomplete turns never reach validation and cannot hand off.
+
+> **Historical note.** Before #115 this paragraph described a canary-only
+> mechanism: the agent wrote a `.run/stage7-handoff-ready` marker and the
+> hook checked that marker, a `turn.completed` transcript, a clean pushed
+> branch, a closing PR body, and a single open PR before performing the
+> `status:human-review` transition itself. That marker and that hook-owned
+> transition no longer exist. The checkpoint outcomes recorded below were
+> produced under the pre-#115 mechanism and are unchanged.
 
 Live issue
 [#16](https://github.com/colin-prologue/switchboard-mixed-canary/issues/16)
