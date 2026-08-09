@@ -10,7 +10,10 @@
   evidence contract `.run/handoff-evidence.json`, and the **orchestrator**
   validates it after verified provider success and performs the single
   transition (`orchestrator/src/orchestrator/handoff.py`). Everything else in
-  this AgDR — the claim-visibility framing, the four-writer *structure*, the
+  this AgDR — the claim-visibility framing (the writer model is now THREE
+  writers: humans, the triage verifier, and the orchestrator — AgDR-028 removed
+  worker agents as status-label writers; decision #2's four-writer table below
+  is historical), the
   `todo → in-progress` transitions, decisions #1 and #3–#5 — remains in force.
   The original text below is preserved unedited as the record; read decision #2
   through AgDR-028.
@@ -109,7 +112,7 @@ dispatch/retry never depended on the label.
 
 `tracker.py` (+`remove_labels`, +mutation constant), `scheduler.py` (dispatch
 swap, park clear, shared revert helper, startup sweep), and METHODOLOGY.md (the
-four-writer table + config caveat). No changes to human/verifier/worker-owned
+historical four-writer table + config caveat). No changes to human/verifier-owned
 labels, to normalization, or to the park gate. The tracker method is a sanctioned
 exception to the §11.5 no-writes boundary, like `add_labels`.
 
