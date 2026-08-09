@@ -25,8 +25,11 @@ What it proves (issue #109 findings):
    (added by #109; prior auth patterns did not match, classifying a real auth
    outage as WORKER_FAILURE and keeping the provider circuit closed).
 4. Transient `Reconnecting... N/5` error events occur mid-turn before the CLI
-   recovers or terminally fails (WebSocket → HTTPS fallback). See the follow-up
-   ticket on early-break behavior in `codex_runner`.
+   recovers or terminally fails (WebSocket → HTTPS fallback). Fixed in issue
+   #114 / AgDR-030: `codex_runner` now treats `error` events as non-terminal
+   notifications and takes the verdict from `turn.failed` / `turn.completed` /
+   stream end. This file is replayed verbatim by the `replay_fixture`
+   scenario in `tests/fake_codex.py` to hold that behavior.
 
 ## Conditions verified vs unverified (codex)
 
@@ -41,3 +44,27 @@ What it proves (issue #109 findings):
 
 Per #109's assumptions: unverified conditions are recorded here rather than
 covered by hand-written "real-looking" fixtures.
+
+## claude_cli_auth_logged_out.jsonl
+
+- **CLI:** claude-code `2.1.226`
+- **Captured:** 2026-08-09, operator host
+- **Command:** `CLAUDE_CONFIG_DIR=<empty dir> claude -p --verbose --output-format stream-json "say hi"`
+  (isolated config — the CLI sees no auth; the operator's real login untouched)
+- **Exit code:** 1
+
+What it proves (issue #116): the logged-out CLI emits an event with
+`"error": "authentication_failed"` (`is_api_error_message: true`) — a code
+present in NEITHER `_CLAUDE_CODES` entry (`authentication_expired` /
+`authentication_required`) — and a terminal result whose `result` text
+("Not logged in · Please run /login") would match the existing
+`\bnot logged in\b` pattern but is never passed to classification
+(`runner.py` `_structured_error_text` reads `msg["error"]` only). Captured as a
+deliberate zero-token isolated probe: contains no conversation content or
+secrets (the after_run transcript-privacy policy governs session transcripts,
+not probe fixtures — #109 precedent).
+
+| Condition (claude) | Status |
+|---|---|
+| authentication (logged out) | **verified** — this fixture |
+| usage/plan limit, credits, rate limit, unavailable | UNVERIFIED — not safely reproducible on demand |

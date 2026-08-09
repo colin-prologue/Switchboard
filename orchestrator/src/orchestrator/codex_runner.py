@@ -254,6 +254,15 @@ class CodexRunner:
         first_line = True
         session_id: str | None = None
         result: TurnResult | None = None
+        # Issue #114: `error` events are non-terminal notifications — real
+        # codex-cli emits `Reconnecting... N/5` blips mid-turn and then recovers
+        # or falls back before its own terminal verdict (issue #109 ground
+        # truth, tests/fixtures/codex_cli_auth_401.jsonl). Remember the
+        # terminal-most one so an EOF with no terminal event can still be
+        # classified from it.
+        saw_error = False
+        last_error_detail = ""
+        last_error_code: str | None = None
 
         assert proc.stdout is not None
         try:
@@ -373,21 +382,15 @@ class CodexRunner:
                     break
 
                 if message_type == "error":
-                    detail = _error_text(message)
+                    saw_error = True
+                    last_error_detail = _error_text(message)
+                    last_error_code = _error_code(message)
                     emit(
-                        "turn_failed",
-                        {"error": detail},
+                        "notification",
+                        {"type": "error", "text": last_error_detail},
                         pid,
                     )
-                    result = TurnResult(
-                        status="failed",
-                        session_id=session_id,
-                        error="codex_error",
-                        failure_class=classify_codex_failure(
-                            code=_error_code(message), detail=detail
-                        ),
-                    )
-                    break
+                    continue
 
                 emit("notification", _notification(message), pid)
 
@@ -404,6 +407,24 @@ class CodexRunner:
 
         if result is not None:
             return result
+
+        if saw_error:
+            # Stream ended with no terminal event but at least one `error`
+            # notification: the CLI never recovered. `port_exit` /
+            # RUNNER_PROTOCOL stays reserved for EOF with no error seen.
+            emit(
+                "turn_failed",
+                {"error": last_error_detail, "stderr": _stderr_tail(stderr_chunks)},
+                pid,
+            )
+            return TurnResult(
+                status="failed",
+                session_id=session_id,
+                error="codex_error",
+                failure_class=classify_codex_failure(
+                    code=last_error_code, detail=last_error_detail
+                ),
+            )
 
         emit(
             "turn_failed",

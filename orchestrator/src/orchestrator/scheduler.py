@@ -66,10 +66,15 @@ SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
 # decision survives a process restart (AgDR-002 weakest point → resolved).
 PARK_LABEL = "status:parked"
 
-# Claim-visibility status labels (issue #14 / AgDR-010). The orchestrator OWNS
-# exactly these three status labels — gate/handoff/triage status labels belong
-# to humans, worker agents, and the verifier respectively and are NEVER written
-# here. `status:in-progress` is board visibility only, NOT a lock (a label
+# Claim-visibility status labels (issue #14 / AgDR-010) plus the terminal
+# handoff label (issue #61 / AgDR-028). The orchestrator owns all four status
+# labels it touches: `status:todo`/`status:in-progress` (plus PARK_LABEL above)
+# track the claim, and `status:human-review` is the single terminal transition
+# it performs ITSELF after provider-turn success + validated
+# `.run/handoff-evidence.json` (`handoff.py`) — workers write evidence, never
+# labels. Gate labels (`drafting`, `plan-review`, `blocked`) stay with humans
+# and the triage labels with the verifier agent; neither is written here.
+# `status:in-progress` is board visibility only, NOT a lock (a label
 # cannot compare-and-swap; cross-runner mutual exclusion is issue #15). It is
 # applied when a `todo` issue is first claimed and cleared when the claim dies.
 TODO_LABEL = "status:todo"

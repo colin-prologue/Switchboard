@@ -134,7 +134,7 @@ Normalized outputs must match the core's issue domain model.
 | terminal states                     | issue **closed** → terminal; `status:*` gate labels are non-active              |
 | `blocked_by` (Linear `blocks`)      | GitHub **native issue dependencies** (blocked-by), read via GraphQL (`blockedBy` connection) |
 | `issue.identifier`                  | the issue **number** (workspace root is per-project, so numbers don't collide)  |
-| tracker **writes**                  | done by the **agent** via `gh` (move label, comment, link PR), not the orchestrator |
+| tracker **writes**                  | **split.** The agent uses `gh` for comments and PR links but writes **no** `status:*` label; its final action is the handoff evidence contract `.run/handoff-evidence.json` (`orchestrator/src/orchestrator/handoff.py`). The **orchestrator** validates that evidence after verified provider success and performs the single `status:human-review` transition itself, alongside its own claim/park labels (issue #61 / AgDR-028) |
 
 **State mapping is the one real semantic gap.** Model state as `status:*` labels:
 the adapter normalizes a `status:todo` label into `state: "todo"`. Gate states
