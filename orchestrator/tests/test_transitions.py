@@ -109,6 +109,39 @@ def test_decision_adds_exactly_two_edges_and_no_requires_marker():
     assert "decision" not in _raw_table()["requires_marker"]
 
 
+# --- review-response re-entry: the widened human-review -> todo edge (#43) ----
+
+def test_human_review_to_todo_edge_carries_both_actors_and_the_trigger():
+    """One edge, two actors (issue #43 / AgDR-037).
+
+    The review-response sub-poll deliberately reuses the EXISTING re-entry edge
+    rather than minting a `status:review-response` state, so this table is the
+    only place the widening is recorded. Exact equality per convention: an edge
+    that quietly lost `orchestrator` or the trigger key would leave the
+    orchestrator taking an undocumented transition.
+    """
+    edges = [e for e in _edges()
+             if e["from"] == "human-review" and e["to"] == "todo"]
+    assert len(edges) == 1, f"expected exactly one re-entry edge, got {edges}"
+    edge = edges[0]
+    assert edge["actor"] == ["human", "orchestrator"]
+    assert edge["verdict"] == "changes-requested"  # the human path is unchanged
+    assert edge["trigger"] == "review-response"
+    assert set(edge) == {"from", "to", "actor", "verdict", "trigger", "note"}
+
+
+def test_review_response_adds_no_new_state_and_no_requires_marker():
+    """The decision's load-bearing claim: no new state, no new gate.
+
+    `requires_marker` keys `todo` on `gate:triage-passed`, and that marker
+    deliberately survives the re-entry — so the relabeled todo is claimable
+    without the sub-poll writing any marker of its own.
+    """
+    states = {e["from"] for e in _edges()} | {e["to"] for e in _edges()}
+    assert "review-response" not in states
+    assert set(_raw_table()["requires_marker"]) == {"todo"}
+
+
 def test_degraded_todo_to_human_review_edge_annotated():
     degraded = [e for e in _edges() if e.get("degraded")]
     match = [e for e in degraded if e["from"] == "todo" and e["to"] == "human-review"]

@@ -78,6 +78,33 @@ class IssueComment:
     reactions: tuple[CommentReaction, ...] = ()
 
 
+@dataclass(frozen=True)
+class ReviewThreadComment:
+    """One comment inside a PR review thread (issue #43).
+
+    Trimmed to exactly what `needs_response` reads: who wrote it and when.
+    Bodies are deliberately absent — the predicate never inspects text, and the
+    responding session reads the threads itself through `gh`.
+    """
+
+    id: str
+    login: str | None
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ReviewThread:
+    """One PR review thread (issue #43).
+
+    `is_resolved` is GitHub's `isResolved`; resolving is the human suppression
+    mechanism for a thread Switchboard left unresolved by design.
+    """
+
+    id: str
+    is_resolved: bool
+    comments: tuple[ReviewThreadComment, ...] = ()
+
+
 # --- workflow definition (core §4.1.2) ---------------------------------------
 
 @dataclass
@@ -162,6 +189,25 @@ class FoldConfig:
     """
 
     operator_logins: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReviewResponseConfig:
+    """Bot identity for review-response triggering (issue #43 / AgDR-037).
+
+    `bot_logins` is an ALLOWLIST of GitHub logins whose unanswered PR review
+    threads trigger a response round. It doubles as the BOTNESS DEFINITION —
+    "an external bot comment" is one whose author login is in this list — so
+    Switchboard's own App replies are excluded by construction (its login is
+    never in the list). An empty list (the default) disables the feature
+    entirely, at zero API cost; logins are stored lower-cased and deduped.
+
+    Switchboard's own identity comes from `$SB_APP_BOT_LOGIN` at runtime, NOT
+    from here: config parsing stays free of environment reads (the `FoldConfig`
+    precedent).
+    """
+
+    bot_logins: tuple[str, ...] = ()
 
 
 @dataclass

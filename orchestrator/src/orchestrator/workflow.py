@@ -27,6 +27,7 @@ from .types import (
     ClaudeConfig,
     CodexConfig,
     FoldConfig,
+    ReviewResponseConfig,
     HooksConfig,
     MixedExecutionConfig,
     TrackerConfig,
@@ -302,6 +303,52 @@ class Config:
             if login not in logins:  # duplicates are harmless; keep it canonical
                 logins.append(login)
         return FoldConfig(operator_logins=tuple(logins))
+
+    # -- review_response (issue #43: bot allowlist for the response loop) ------
+
+    def review_response(self) -> ReviewResponseConfig:
+        """Bot-login allowlist for the review-response sub-poll.
+
+        Absent block, absent key, or an empty list -> the feature is disabled
+        (the default; the sub-poll then makes zero API calls). Validated as
+        strictly as `fold()`, and for the same reason: a typo'd key that
+        silently disabled the loop would be indistinguishable from "the bot
+        hasn't reviewed yet".
+        """
+        raw = self._config.get("review_response")
+        if raw is None:
+            return ReviewResponseConfig()
+        if not isinstance(raw, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"review_response must be a map, got {type(raw).__name__}",
+            )
+        unknown = [key for key in raw if key != "bot_logins"]
+        if unknown:
+            raise WorkflowError(
+                "workflow_parse_error",
+                "review_response contains unknown fields: "
+                + ", ".join(sorted(map(str, unknown))),
+            )
+        logins_raw = raw.get("bot_logins", [])
+        if not isinstance(logins_raw, list):
+            raise WorkflowError(
+                "workflow_parse_error",
+                "review_response.bot_logins must be a list of GitHub logins, "
+                f"got {type(logins_raw).__name__}",
+            )
+        logins: list[str] = []
+        for value in logins_raw:
+            if not isinstance(value, str) or not value.strip():
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    "review_response.bot_logins entries must be non-empty "
+                    f"strings, got {value!r}",
+                )
+            login = value.strip().lower()
+            if login not in logins:  # duplicates are harmless; keep it canonical
+                logins.append(login)
+        return ReviewResponseConfig(bot_logins=tuple(logins))
 
     # -- workspace ---------------------------------------------------------------
 
@@ -889,3 +936,4 @@ def validate_dispatch(cfg: Config, *, provider_id: str = "claude") -> None:
     cfg.workspace_root()
     cfg.polling_interval_ms()
     cfg.fold()
+    cfg.review_response()

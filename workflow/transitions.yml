@@ -134,9 +134,19 @@ edges:
     verdict: merged
   - from: human-review
     to: todo
-    actor: human
+    actor: [human, orchestrator]
     verdict: changes-requested
-    note: "re-enters dispatch WITHOUT re-triage; marker deliberately survives"
+    trigger: review-response
+    note: >-
+      re-enters dispatch WITHOUT re-triage; marker deliberately survives.
+      TWO actors, ONE edge (issue #43 / AgDR-037): the human path is the
+      changes-requested verdict; the orchestrator path is the review-response
+      sub-poll, which takes this edge when a bound PR carries a bot review
+      thread that is unresolved and whose last bot comment postdates
+      Switchboard's last reply. The re-dispatched session is an ordinary
+      implement-role session — no new state, no new role. Bounded by a durable
+      per-PR round marker (2 rounds); at the cap the orchestrator stops
+      relabeling and comments instead of parking.
 
   # === Phase 2 — INACTIVE until #20b (fail-review hub) lands ==================
   # Annotated, NOT enforced. Today a cap-hit parks (the active in-progress->parked
