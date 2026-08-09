@@ -695,15 +695,22 @@ class Orchestrator:
         await tracker.add_issue_comment(
             pr_id, format_round_marker(rounds + 1, bot_logins, self_login)
         )
-        await tracker.set_sole_status_label(
-            issue.id, TODO_LABEL, expected_status=(HUMAN_REVIEW_LABEL,)
-        )
         # The per-role session counter is cumulative across the issue's life and
         # is otherwise cleared only by unpark, so the multi-session PRs that
         # attract the most findings would arrive here at `spent == cap` and park
         # on the first response dispatch. Reset every role (the verify budget is
-        # unreachable from `todo`, so dropping it is harmless).
+        # unreachable from `todo`, so dropping it is harmless). The reset runs
+        # BEFORE the relabel (codex review, PR #134): the relabel can land on
+        # GitHub yet raise commit-ambiguous (`handoff_swap_uncertain`) out of
+        # its verification reads — resetting after the await would then leave
+        # the stale counter in place and the next poll would park the
+        # now-`todo` issue instead of dispatching the owed responder. A reset
+        # with a relabel that truly failed is harmless: the issue stays at
+        # human-review and the next trigger resets again.
         self._reset_issue_sessions(issue.id)
+        await tracker.set_sole_status_label(
+            issue.id, TODO_LABEL, expected_status=(HUMAN_REVIEW_LABEL,)
+        )
         self._tick_wakeup.set()
         log("review-response triggered",
             issue_id=issue.id, issue_identifier=issue.identifier,
