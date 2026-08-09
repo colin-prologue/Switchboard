@@ -195,3 +195,18 @@ def test_attached_values_are_not_flags(command, tmp_path):
     r = _run_bash(command, tmp_path)
     assert r.returncode == 0
     assert r.stdout == ""
+
+
+# --- config-env and separated push-option values (round 3, PR #136) -----------
+
+def test_config_env_global_does_not_bypass(tmp_path):
+    r = _run_bash("git --config-env user.name=FOO push -f origin branch", tmp_path)
+    assert r.returncode == 2
+
+
+def test_separated_push_option_value_is_not_a_refspec(tmp_path):
+    r = _run_bash("git push -o +foo origin branch", tmp_path)
+    assert r.returncode == 0
+    # ...but a real +refspec after the consumed option still denies
+    r2 = _run_bash("git push -o opt origin +main", tmp_path)
+    assert r2.returncode == 2

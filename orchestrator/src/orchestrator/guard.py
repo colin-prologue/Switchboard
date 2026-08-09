@@ -98,7 +98,7 @@ def _skip_flags(tokens: list[str], value_takers: tuple[str, ...]) -> list[str]:
 
 _GH_VALUE_FLAGS = ("-R", "--repo")
 _GIT_GLOBAL_VALUE_FLAGS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
-                           "--exec-path")
+                           "--exec-path", "--config-env")
 
 
 def _denied_shape(command: str) -> str | None:
@@ -144,7 +144,16 @@ def _denied_shape(command: str) -> str | None:
         # first non-flag token with global values consumed.
         rest = _skip_flags(tokens[1:], _GIT_GLOBAL_VALUE_FLAGS)
         if rest[:1] == ["push"]:
-            for tok in rest[1:]:
+            args = rest[1:]
+            i = 0
+            while i < len(args):
+                tok = args[i]
+                # a bare -o/--push-option consumes the NEXT token as its
+                # value (codex review, PR #136 — `git push -o +foo` is a
+                # push option, not a force refspec)
+                if tok in ("-o", "--push-option"):
+                    i += 2
+                    continue
                 if tok == "--force" or tok.startswith("--force-with-lease"):
                     return f"git push {tok}"
                 # value-aware bundle scan: `-fu`/`-uf` deny, `-ofoo` is the
@@ -153,6 +162,7 @@ def _denied_shape(command: str) -> str | None:
                     return f"git push {tok} (force)"
                 if len(tok) > 1 and tok.startswith("+"):
                     return f"git push {tok} (force refspec)"
+                i += 1
     return None
 
 
