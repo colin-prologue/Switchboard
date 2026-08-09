@@ -14,6 +14,7 @@ globally override YAML; only explicit `$VAR_NAME` values are resolved
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -346,6 +347,22 @@ class Config:
                     f"strings, got {value!r}",
                 )
             login = value.strip().lower()
+            # GitHub-login grammar, checked AFTER stripping an optional [bot]
+            # suffix (codex review, PR #134): a whitespace-bearing entry would
+            # serialize into the round marker's `bots=` field, which the
+            # marker regex reads as \S* — every marker would then parse as
+            # round 0 and the two-round cap would never engage, dispatching
+            # paid response sessions indefinitely. Malformed config fails the
+            # LOAD (the force-call block makes this startup-fatal), never the
+            # marker.
+            bare = login[: -len("[bot]")] if login.endswith("[bot]") else login
+            if not _GITHUB_LOGIN_RE.fullmatch(bare):
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    "review_response.bot_logins entries must be GitHub logins "
+                    "(alphanumerics and inner hyphens, optional [bot] suffix), "
+                    f"got {value!r}",
+                )
             if login not in logins:  # duplicates are harmless; keep it canonical
                 logins.append(login)
         return ReviewResponseConfig(bot_logins=tuple(logins))
@@ -814,6 +831,8 @@ class Config:
 # identity pair drives before_run.sh's git author + credential helper. Codex
 # PR #42 P2: accepting the minting keys alone would mint bot tokens while
 # commits silently author as whatever git identity the workspace inherits.
+_GITHUB_LOGIN_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+
 _APP_ENV_KEYS = (
     "SB_APP_ID",
     "SB_APP_INSTALLATION_ID",

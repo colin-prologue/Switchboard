@@ -1323,3 +1323,20 @@ def test_composed_self_workflow_ships_the_response_loop_disabled(tmp_path: Path)
     p = tmp_path / "WORKFLOW.md"
     p.write_text((real / "WORKFLOW.md").read_text(encoding="utf-8"))
     assert Config(load_workflow(p), tmp_path).review_response().bot_logins == ()
+
+
+def test_review_response_rejects_logins_that_break_the_marker_grammar(tmp_path: Path):
+    """Codex review (PR #134): a whitespace-bearing entry would serialize into
+    the round marker's `bots=` field (matched as \\S*), making every marker
+    parse as round 0 — the cap never engages and response sessions dispatch
+    indefinitely. Malformed config fails the LOAD, never the marker."""
+    for bad in ("codex bot", "bots=evil", "a<b", "-lead", "trail-"):
+        cfg = _rr_cfg(
+            tmp_path, f'review_response:\n  bot_logins: ["{bad}"]\n'
+        )
+        with pytest.raises(WorkflowError):
+            cfg.review_response()
+    ok = _rr_cfg(
+        tmp_path, 'review_response:\n  bot_logins: ["Codex-Bot[bot]"]\n'
+    ).review_response()
+    assert ok.bot_logins == ("codex-bot[bot]",)
