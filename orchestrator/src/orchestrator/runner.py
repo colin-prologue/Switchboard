@@ -45,7 +45,11 @@ STDERR_TAIL_CHARS = 500
 NOTIFICATION_TEXT_CHARS = 200
 
 GUARD_PATH = Path(__file__).with_name("guard.py")
-GUARD_MATCHER = "Write|Edit|MultiEdit|NotebookEdit"
+# One hook, one settings file: `Bash` joins the containment matchers so the
+# merge guard (issue #133 / AgDR-036) fires on Bash calls too. The alternation
+# is unanchored, so `Bash` also matches `BashOutput` — harmless (no `command`
+# key => exit 0), recorded so it is not rediscovered as a bug.
+GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit"
 
 
 def _write_guard_settings(workspace: Path) -> Path:
