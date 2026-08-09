@@ -976,9 +976,11 @@ def test_workflow_prompt_pins_in_brief_block():
         assert "## In brief" in text, f"{rel}: block heading absent"
         assert "**What this does:**" in text, f"{rel}: first field absent"
         assert "**What could be wrong:**" in text, f"{rel}: second field absent"
-        # The PR-handoff step must keep Closes #N ahead of the block: the
+        # The PR-handoff step must keep Closes #N ahead of the block. The
         # orchestrator resolves the issue link through GitHub's closing
-        # references, so burying it breaks the human-review transition.
+        # references, which match anywhere in the body — presence is what the
+        # handoff check enforces; staying first is convention only, so the
+        # line stays visible and doesn't get edited away.
         assert "Keep the `Closes #N` line first" in text, f"{rel}: ordering rule absent"
         # Gate C consequence must be stated where the agent reads it.
         assert "is incomplete at the merge gate" in text, f"{rel}: gate consequence absent"
@@ -986,6 +988,18 @@ def test_workflow_prompt_pins_in_brief_block():
         # a PR that does not close this issue with `pr_linkage_missing`.
         assert "a literal\n   closing reference, not prose that mentions the issue" in text, (
             f"{rel}: Closes #N instruction absent"
+        )
+        # This string lives ONLY inside the NEEDS WORK triage-verdict insertion,
+        # not the step-7 PR-handoff insertion — pins the triage surface on its
+        # own, so a symmetric deletion of just that insertion (which the sync
+        # test alone cannot catch) turns this test red.
+        assert (
+            "the single finding the author has the strongest\n  > case to push back on"
+            in text
+        ), f"{rel}: triage-verdict In brief block absent"
+        # SPLIT-verdict child issues must also open with the block.
+        assert "each\n  body opens with the `## In brief` block" in text, (
+            f"{rel}: SPLIT child-issue body block instruction absent"
         )
 
 

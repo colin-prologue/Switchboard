@@ -46,11 +46,13 @@
     bet is that "what could be wrong" implicitly names the file worth reading.
     This is the field to add back first if drafts read as thin.
   - *Adding the rule to the drafting-quality checklist as a fifth entry* (as the
-    design spec proposed). Rejected during implementation: every entry in that
-    list is a triage reject criterion the rubric bounces on by name, so filing a
-    writing rule there would make triage bounce tickets on prose — which this
-    same decision's enforcement asymmetry exists to prevent. It got its own
-    section instead.
+    design spec proposed). Steelman: it puts the rule exactly where authors
+    already look for drafting rules, and inherits the checklist's triage-level
+    teeth for free — no separate enforcement story to invent. Rejected during
+    implementation: every entry in that list is a triage reject criterion the
+    rubric bounces on by name, so filing a writing rule there would make triage
+    bounce tickets on prose — which this same decision's enforcement asymmetry
+    exists to prevent. It got its own section instead.
 - **Blast radius:** `scripts/new-ticket.sh` (skeleton), `workflow/WORKFLOW.base.md`
   + `projects/switchboard-self/WORKFLOW.md` (prompt, both halves of the sync
   pair), `methodology/METHODOLOGY.md` (Gate C + a new section), and three test
@@ -61,8 +63,28 @@
   scarce resource this protects — reviewer attention — is also its enforcement
   mechanism. A reader skimming is the least likely to catch a padded **What
   could be wrong**. Accepted rather than solved: the identifier ban on the first
-  field is self-enforcing and does most of the practical work. If padding turns
-  out to be common, the follow-up is a mechanical merge-gate check that greps
-  the first field for banned tokens (issue numbers, paths, `AgDR-`, `status:`).
-  Building that checker now is speculative — the evidence for whether it is
-  needed does not exist yet.
+  field is self-enforcing and does most of the practical work.
+
+  *Correction (post-review):* this section originally deferred "a mechanical
+  check" as one speculative thing. That conflated two different checks and
+  aimed the follow-up at the wrong, harder one:
+  - A **quality** heuristic — grepping the first field for banned tokens (issue
+    numbers, paths, `AgDR-`, `status:`) — is false-positive-prone (a legitimate
+    plain sentence can contain a stray one) and genuinely speculative.
+    Deferring it is correct.
+  - A **presence** check — does the body contain `## In brief` and both field
+    labels? — needs zero judgment and has no false positives. The orchestrator
+    already fetches the PR in the same GraphQL round-trip it uses for linkage
+    (`OPEN_PRS_FOR_BRANCH_QUERY`, `orchestrator/src/orchestrator/tracker.py:115`);
+    adding `body` to that query plus one condition alongside
+    `pr_linkage_missing` is roughly ten lines against an existing validator, not
+    new infrastructure. This half was wrongly bucketed with the speculative
+    quality check above — it is cheap and could be built now.
+  - The real reason not to make the presence check **blocking**: a handoff
+    rejection strands the ticket with no transition, a heavy penalty for a
+    prose miss that breaks this decision's own enforcement asymmetry. The cheap
+    middle path is a **non-blocking** variant: validate, transition anyway, and
+    post the diagnostic as a PR comment, so the Gate C reviewer sees "block
+    missing" before they start reading.
+
+  Not implemented here — this correction updates the record, not the decision.

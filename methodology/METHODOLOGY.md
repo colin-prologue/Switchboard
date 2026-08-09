@@ -135,6 +135,8 @@ the entry state. Match the path to the risk.
 
 For gated work, the issue body should contain:
 
+- an `## In brief` block (see "Writing for the reader" below) as the first
+  section,
 - a one-paragraph **intent** (what + why),
 - **acceptance criteria** written as checks (pass/fail, eval-shaped),
 - **non-goals** (hard scope boundaries),
@@ -177,13 +179,16 @@ Two rules make the fields hard to pad, and they are the whole mechanism:
    could be more robust") fails; naming a trigger and its damage passes. This is
    the scrutiny surface: it tells a reviewer what to argue with before merging.
 
-**Placement.** The block is the first section, with exactly two exceptions, both
-machine-load-bearing: on a PR body, the `Closes #N` line comes first (the
-orchestrator resolves the issue link through GitHub's closing references); on a
-triage verdict, the `## Triage verdict` heading comes first (it is pinned as the
-comment's first line for grep-ability). Everything the author would otherwise
-write goes below the block, unchanged. The block adds a layer; it removes
-nothing.
+**Placement.** The block is the first section, with exactly two exceptions, each
+for its own reason. On a PR body, the `Closes #N` line comes first: the
+orchestrator resolves the issue link through GitHub's closing references, which
+match a closing keyword anywhere in the body — so the line's **presence** is
+machine-enforced by the handoff check, but its **position** is convention only,
+kept first so it stays visible and never gets edited away. On a triage verdict,
+the `## Triage verdict` heading comes first because the workflow prompt pins it
+there as the comment's first line for grep-ability — that ordering genuinely is
+the rule, not a courtesy. Everything the author would otherwise write goes below
+the block, unchanged. The block adds a layer; it removes nothing.
 
 **Enforcement is asymmetric on purpose.** PR bodies are gated at Gate C — a
 missing or hedged block bounces the PR, the same as a missing AgDR. Ticket

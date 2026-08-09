@@ -1,7 +1,8 @@
 # The "In brief" block — plain-language layer for tickets, PRs, and verdicts
 
 **Date:** 2026-08-08
-**Status:** design approved, not yet implemented
+**Status:** shipped on this branch (`claude/plain-language-prs-tickets-667348`);
+see AgDR-029 for the one deliberate deviation from this design.
 **Anchors verified at:** `ce5764f558b2a8a39d078a7b7e144075f70db318`
 
 ## Intent
@@ -42,16 +43,20 @@ be wrong.
 
 A fixed, grep-able heading — matching the repo's existing `## Triage verdict`
 convention — placed as the first section of every agent-written ticket body, PR
-body, and triage verdict comment. Two machine-load-bearing exceptions may precede
-it, and only these:
+body, and triage verdict comment. Two exceptions may precede it, and only these,
+each for its own reason:
 
-- On a **PR body**, a leading `Closes #N` line. This is not decoration: the
-  orchestrator's handoff validation resolves the issue link through GitHub's
-  `closingIssuesReferences`, so removing or burying it breaks the
-  `status:human-review` transition. Keep it as the first line, block second.
+- On a **PR body**, a leading `Closes #N` line. Its **presence** is not
+  decoration: the orchestrator's handoff validation resolves the issue link
+  through GitHub's `closingIssuesReferences` (`orchestrator/src/orchestrator/tracker.py:122,136`,
+  checked via set membership at `orchestrator/src/orchestrator/handoff.py:246`),
+  which matches a closing keyword **anywhere** in the PR body — so a missing
+  reference breaks the `status:human-review` transition, but its **position**
+  does not. Keep it as the first line by convention only, so it stays visible
+  and never gets edited away; block second.
 - On a **triage verdict comment**, the exact heading `## Triage verdict`, which
-  `workflow/WORKFLOW.base.md:154` pins as the comment's first line for grep-ability.
-  Block second.
+  `workflow/WORKFLOW.base.md:154` pins as the comment's first line for
+  grep-ability — a human/tooling convention, not a machine check. Block second.
 
 The block itself:
 
@@ -124,7 +129,7 @@ Under this design, that body is unchanged but for the block inserted after the
 | PR bodies | `workflow/WORKFLOW.base.md:198` (step 7) | Block as the first section after the `Closes #N` line | **Gate C** |
 | Triage verdicts | `workflow/WORKFLOW.base.md:154` (NEEDS WORK routing) | Block as the first section under the `## Triage verdict` heading | Template only |
 | Gate C definition | `methodology/METHODOLOGY.md:65` | Add the block as a merge-gate completeness condition | — |
-| Drafting guidance | `methodology/METHODOLOGY.md:145` | Add the block and its two rules to the drafting-quality checklist as a fifth entry | — |
+| ~~Drafting guidance~~ | ~~`methodology/METHODOLOGY.md:145`~~ | **Superseded, not implemented.** Every entry in the drafting-quality checklist is a triage reject criterion; filing a writing rule there would make triage bounce tickets on prose. The block got its own `## Writing for the reader` section instead. See AgDR-029's rejected options (the fifth bullet). | — |
 | Composed prompt | `projects/switchboard-self/WORKFLOW.md` | Mirror the base edits (see "Drift") | — |
 
 Orchestrator-generated comments are explicitly out of scope; no Python changes.

@@ -169,8 +169,10 @@ name the class in the verdict so drafting and triage share one vocabulary; see
   gh issue comment {{ issue.identifier }} --repo colin-prologue/Switchboard --body "## Triage verdict"...
   gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:triage,gate:triage-passed --add-label status:drafting
   ```
-- **SPLIT** → file child issues at `status:drafting` with drafted bodies, chain
-  each to this parent with native blocked-by, and park this parent at
+- **SPLIT** → file child issues at `status:drafting` with drafted bodies — each
+  body opens with the `## In brief` block, same as any other ticket
+  (`scripts/new-ticket.sh --scaffold` emits it as the skeleton's first section)
+  — chain each to this parent with native blocked-by, and park this parent at
   `status:drafting`. Post a `## Triage verdict` comment linking the children.
 
 The verifier never implements; feedback and splits only. Do not open a PR. Stop
@@ -227,9 +229,11 @@ once the verdict is routed.
    > read-back false-negatives and the ticket strands").
 
    Keep the `Closes #N` line first, block second: the orchestrator resolves the
-   issue link through GitHub's closing references, and burying that line breaks
-   your own handoff transition. Everything you would otherwise write goes below
-   the block, unchanged — the block adds a layer, it does not replace one.
+   issue link through GitHub's closing references, so the line must be
+   **present** anywhere in the body or your handoff is rejected — keeping it
+   first is convention, so it stays visible and never gets edited away.
+   Everything you would otherwise write goes below the block, unchanged — the
+   block adds a layer, it does not replace one.
 
    A PR body with no block, or whose second field names a quality instead of a
    consequence, is incomplete at the merge gate and will be bounced there, the

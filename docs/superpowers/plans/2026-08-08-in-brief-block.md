@@ -499,7 +499,7 @@ Run:
 uv run --project orchestrator python -m pytest orchestrator/tests -q
 ```
 
-Expected: PASS, 488+ tests (488 was the count at `ce5764f`; this plan adds two). If `test_decision_record_numbers_are_unique_and_match_headings` fails, the filename number and the `# AgDR-NNN:` heading disagree — they must match exactly.
+Expected: PASS, 502+ tests (502 was the count at `ce5764f`; this plan adds two). If `test_decision_record_numbers_are_unique_and_match_headings` fails, the filename number and the `# AgDR-NNN:` heading disagree — they must match exactly.
 
 - [ ] **Step 6: Commit**
 
