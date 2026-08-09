@@ -143,3 +143,27 @@ def test_guard_settings_matcher_includes_bash(tmp_path):
     # additive: the containment matchers survive
     for old in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         assert old in matcher.split("|")
+
+
+# --- bundled short flags (codex review, PR #136) ------------------------------
+
+@pytest.mark.parametrize("command", [
+    "gh pr review 12 -a",
+    "gh pr review 12 -am lgtm",
+    "git push -fu origin branch",
+    "git push -uf origin branch",
+])
+def test_short_and_bundled_flags_are_denied(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+    assert "switchboard-guard: denied:" in r.stderr
+
+
+@pytest.mark.parametrize("command", [
+    "git push -u origin branch",          # set-upstream alone is fine
+    "gh pr review 12 --comment ok",       # review without approve
+])
+def test_adjacent_short_flags_stay_allowed(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0
+    assert r.stdout == ""

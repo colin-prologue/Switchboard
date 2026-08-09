@@ -79,7 +79,12 @@ def _denied_shape(command: str) -> str | None:
             verb, args = rest[1], rest[2:]
             if verb in GH_PR_DENIED_VERBS:
                 return GH_PR_DENIED_VERBS[verb]
-            if verb == "review" and "--approve" in args:
+            if verb == "review" and any(
+                a == "--approve" or a == "-a"
+                # bundled short flags: `-am "lgtm"` carries the approve `a`
+                or (len(a) > 1 and a[0] == "-" and a[1] != "-" and "a" in a[1:])
+                for a in args
+            ):
                 return "gh pr review --approve"
         return None
 
@@ -89,8 +94,13 @@ def _denied_shape(command: str) -> str | None:
         for tok in tokens[2:]:
             if tok == "--force" or tok.startswith("--force-with-lease"):
                 return f"git push {tok}"
-            if tok == "-f":
-                return "git push -f"
+            if tok == "-f" or (
+                # bundled short options: `-fu` carries force (codex review,
+                # PR #136 — git accepts bundled shorts; whole-token equality
+                # missed them)
+                len(tok) > 1 and tok[0] == "-" and tok[1] != "-" and "f" in tok[1:]
+            ):
+                return f"git push {tok} (force)"
             if len(tok) > 1 and tok.startswith("+"):
                 return f"git push {tok} (force refspec)"
     return None
