@@ -357,6 +357,26 @@ def test_bundle_denials_survive_value_consumption(command, tmp_path):
     assert r.returncode == 2
 
 
+# --- bash quoting forms shlex does not know (round 16, PR #136) ---------------
+
+@pytest.mark.parametrize("command", [
+    "gh $'pr' merge 12",
+    "git $'push' -f origin main",
+    "gh pr review 12 $'--approve'",
+    "gh $'\\x70r' merge 12",                           # \x70 = 'p'
+    "git $'pu'$'sh' --mirror origin",                  # concatenation
+    'gh $"pr" merge 12',                               # locale quoting
+])
+def test_ansi_c_and_locale_quoting_are_normalized(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+
+
+def test_ansi_c_in_benign_value_is_allowed(tmp_path):
+    r = _run_bash("git commit -m $'multi\\nline msg'", tmp_path)
+    assert r.returncode == 0
+
+
 # --- line continuations, non-push config, alias smuggling (round 9, PR #136) --
 
 @pytest.mark.parametrize("command", [

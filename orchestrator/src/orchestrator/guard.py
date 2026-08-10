@@ -29,8 +29,10 @@ Scope (documented), two independent rules:
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -46,6 +48,22 @@ GH_PR_DENIED_VERBS = {
 }
 
 
+_ANSI_C_RE = re.compile(r"\$'((?:\\.|[^'\\])*)'")
+
+
+def _decode_ansi_c(match: "re.Match[str]") -> str:
+    """Rewrite bash ANSI-C quoting `$'...'` as a plain single-quoted word with
+    the escapes decoded, so tokens match what bash hands the CLI (codex review
+    r16, PR #136 — `gh $'pr' merge` and `$'\\x70ush'` execute denied verbs
+    while shlex left `$pr` in the token). unicode_escape covers every
+    letter-producing bash escape (\\xHH, \\nnn octal, \\uXXXX, \\UXXXXXXXX);
+    \\e/\\E are mapped first; \\cX yields only control chars, which cannot
+    spell a verb."""
+    body = match.group(1).replace("\\e", "\\x1b").replace("\\E", "\\x1b")
+    text = codecs.decode(body, "unicode_escape")
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
 def _tokenize(command: str) -> list[str]:
     """shlex so a quoted `--body "gh pr merge here"` collapses to ONE token (no
     bare `pr` inside prose) and `+refs/heads/x` stays one token. An unbalanced
@@ -55,6 +73,13 @@ def _tokenize(command: str) -> list[str]:
     # newline glued to the next token (`gh \<NL>pr merge` -> "\npr" — codex
     # review r9, PR #136); match bash before tokenizing
     command = command.replace("\\\n", "")
+    # bash quoting forms shlex does not know (codex review r16): ANSI-C
+    # $'...' decodes escapes; locale $"..." is plain double-quoting. A
+    # $' that survives substitution is quoting we could not decode — raise
+    # so the caller denies (never allow what bash may still parse).
+    command = _ANSI_C_RE.sub(_decode_ansi_c, command).replace('$"', '"')
+    if "$'" in command:
+        raise ValueError("undecodable ANSI-C quoting")
     try:
         return shlex.split(command)
     except ValueError:
@@ -133,6 +158,8 @@ def _push_value_option(tok: str) -> bool:
     if not tok.startswith("--") or "=" in tok or len(tok) < 4:
         return False
     return sum(1 for o in _PUSH_VALUE_OPTIONS if o.startswith(tok)) == 1
+
+
 _GIT_GLOBAL_VALUE_FLAGS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace",
                            "--exec-path", "--config-env", "--attr-source")
 
@@ -145,7 +172,13 @@ def _denied_shape(command: str) -> str | None:
     merge") never match. Compound commands are deliberately not split — a NAMED
     residual, consistent with the raises-the-cost-not-a-boundary posture.
     """
-    tokens = _tokenize(command)
+    try:
+        tokens = _tokenize(command)
+    except ValueError:
+        # quoting we could not decode but bash may still parse (r16):
+        # an in-band denial, never an uncaught exception — hook exit codes
+        # other than 2 ALLOW the tool call
+        return "undecodable shell quoting (fail toward deny)"
     if not tokens:
         return None
 
