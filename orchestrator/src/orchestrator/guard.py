@@ -105,6 +105,22 @@ _PUSH_VALUE_OPTIONS = ("--push-option", "--receive-pack", "--exec", "--repo",
                        "--recurse-submodules")
 
 
+def _bundle_consumes_next(token: str, value_takers: str) -> bool:
+    """Whether a short-flag bundle ends in a bare value-taking flag, making
+    the NEXT token its value (codex review r15, PR #136 — `gh pr review -cb
+    --approve` parses `--approve` as the BODY, and `git push -vo opt` parses
+    `opt` as the push-option value). A value-taker mid-bundle takes the rest
+    of the token (or its `=` suffix) as the value instead."""
+    if len(token) < 2 or token[0] != "-" or token[1] == "-":
+        return False
+    for i, ch in enumerate(token[1:], start=1):
+        if ch == "=":
+            return False
+        if ch in value_takers:
+            return i == len(token) - 1
+    return False
+
+
 def _push_value_option(tok: str) -> bool:
     """True when tok is a bare value-taking push option whose VALUE is the
     next token — exact, or a git-style unambiguous long-option abbreviation
@@ -153,6 +169,16 @@ def _denied_shape(command: str) -> str | None:
                         # `--approve` the literal body text, not an approval)
                         if a in ("-b", "--body", "-F", "--body-file",
                                  "-R", "--repo"):
+                            i += 2
+                            continue
+                        # a bundle whose LAST letter is a bare value-taker
+                        # consumes the next token too (`-cb --approve` makes
+                        # `--approve` the body — codex r15). Deny-letter scan
+                        # below still runs first on the bundle itself via
+                        # _bundled_bool ordering: check denial before skipping
+                        if _bundled_bool(a, "a", "bFR"):
+                            return "gh pr review --approve"
+                        if _bundle_consumes_next(a, "bFR"):
                             i += 2
                             continue
                         if (
@@ -260,6 +286,11 @@ def _denied_shape(command: str) -> str | None:
                 # push-option VALUE and does not (o takes a value)
                 if tok == "-f" or _bundled_bool(tok, "f", "o"):
                     return f"git push {tok} (force)"
+                # a bundle ending in bare `o` consumes the next token as the
+                # push-option value (`-vo opt` — codex r15)
+                if _bundle_consumes_next(tok, "o"):
+                    i += 2
+                    continue
                 if not tok.startswith("-"):
                     positionals += 1
                     # the FIRST positional is the <repository> operand

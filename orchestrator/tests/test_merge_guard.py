@@ -335,6 +335,28 @@ def test_help_flag_on_denied_verb_stays_denied(tmp_path):
     assert r.returncode == 2
 
 
+# --- bundles ending in a value-taker consume the next token (round 15) --------
+
+@pytest.mark.parametrize("command", [
+    "gh pr review 12 -cb --approve",                   # --approve is the body
+    "git push --dry-run -vo opt +remote HEAD",         # opt is the o value
+])
+def test_bundle_final_value_taker_consumes_next(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr review 12 -cb thanks -a",                   # real approve after value
+    "gh pr review 12 -ab whatever",                    # a before the value-taker
+    "git push -vo opt origin +main",                   # real force refspec after
+    "git push -vf origin main",                        # f in bundle still denies
+])
+def test_bundle_denials_survive_value_consumption(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+
+
 # --- line continuations, non-push config, alias smuggling (round 9, PR #136) --
 
 @pytest.mark.parametrize("command", [
