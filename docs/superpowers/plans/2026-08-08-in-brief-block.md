@@ -32,7 +32,7 @@
 | `projects/switchboard-self/WORKFLOW.md` | The composed per-project mirror; must match byte-for-byte | 2 |
 | `orchestrator/tests/test_workflow.py` | Pins the block text in both prompt files and guards drift | 2 |
 | `methodology/METHODOLOGY.md` | Human-readable methodology; gains a "Writing for the reader" section and a Gate C completeness condition | 3 |
-| `self/.decisions/AgDR-029-in-brief-plain-language-block.md` | The decision record this change requires | 3 |
+| `self/.decisions/AgDR-038-in-brief-plain-language-block.md` | The decision record this change requires | 3 |
 
 **Deviation from the spec, applied here deliberately.** The spec's surfaces table says to add the block "to the drafting-quality checklist as a fifth entry." That is wrong and this plan does not do it. Every entry in that checklist is a *triage reject criterion* — the rubric at `workflow/WORKFLOW.base.md:112-143` bounces tickets on them by name. Adding a writing rule to that list would make triage bounce tickets on prose, which the spec's own non-goals forbid. The block gets its own `## Writing for the reader` section instead, and the checklist is left untouched.
 
@@ -314,7 +314,7 @@ git commit -m "feat(workflow): require the In brief block in PR bodies and triag
 **Files:**
 - Modify: `methodology/METHODOLOGY.md:65-69` (Gate C)
 - Modify: `methodology/METHODOLOGY.md` — new `## Writing for the reader` section, inserted after the "Task-intent / spec in the issue body" section (which ends at line 143) and **before** `## Drafting-quality checklist` (line 145)
-- Create: `self/.decisions/AgDR-029-in-brief-plain-language-block.md`
+- Create: `self/.decisions/AgDR-038-in-brief-plain-language-block.md`
 - Test: `orchestrator/tests/test_workflow.py:974` (`test_decision_record_numbers_are_unique_and_match_headings`) — existing, no edit needed
 
 **Interfaces:**
@@ -418,10 +418,10 @@ Note the nested fence: the block example above uses a plain triple-backtick fenc
 
 - [ ] **Step 4: Write the decision record**
 
-Create `self/.decisions/AgDR-029-in-brief-plain-language-block.md`:
+Create `self/.decisions/AgDR-038-in-brief-plain-language-block.md`:
 
 ```markdown
-# AgDR-029: Layer a two-field plain-language block above the citation-dense body
+# AgDR-038: Layer a two-field plain-language block above the citation-dense body
 
 - **Status:** proposed by the plain-language implementation session (2026-08-08);
   awaiting ratification at the PR merge gate.
@@ -504,8 +504,8 @@ Expected: PASS, 502+ tests (502 was the count at `ce5764f`; this plan adds two).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add methodology/METHODOLOGY.md self/.decisions/AgDR-029-in-brief-plain-language-block.md
-git commit -m "docs(methodology): gate the In brief block at Gate C; record AgDR-029"
+git add methodology/METHODOLOGY.md self/.decisions/AgDR-038-in-brief-plain-language-block.md
+git commit -m "docs(methodology): gate the In brief block at Gate C; record AgDR-038"
 ```
 
 ---
@@ -565,7 +565,7 @@ padding actually happens.
 - **Methodology** (`methodology/METHODOLOGY.md`): a new "Writing for the reader"
   section, and the block added to Gate C's completeness conditions alongside the
   AgDR requirement.
-- **Decision record**: AgDR-029.
+- **Decision record**: AgDR-038.
 - **Not changed**: the drafting-quality checklist, the triage rubric, every
   existing citation requirement, and the orchestrator's own generated comments —
   those already lead with a plain sentence and are the model this generalizes.
@@ -577,7 +577,7 @@ passing. New pins: the skeleton leads with the block and carries both rules; bot
 halves of the workflow sync pair carry the block, the ordering rule, and the gate
 consequence.
 
-## Weakest point (from AgDR-029)
+## Weakest point (from AgDR-038)
 
 Gate C enforcement is a human reading it. Accepted rather than solved — the
 identifier ban on the first field is self-enforcing and does most of the work. If
@@ -599,7 +599,7 @@ Write it to `.run/handoff-evidence.json`. Do not edit any `status:*` label. Stop
 
 ## Self-Review
 
-**Spec coverage.** Every spec section maps to a task: the block definition and its two rules → Task 1 (canonical text) and Task 2 (prompt); the surfaces table → Tasks 1–3 row by row, with orchestrator comments explicitly excluded; enforcement at Gate C → Task 3 Step 2; the drift constraint → Task 2 Steps 5–6 and the Global Constraints; the testing section → Task 1 Steps 5–6 and Task 3 Step 5; the AgDR requirement → Task 3 Step 4. One spec instruction is deliberately not implemented — the "fifth checklist entry" — and the reason is recorded in File Structure and in AgDR-029's rejected options.
+**Spec coverage.** Every spec section maps to a task: the block definition and its two rules → Task 1 (canonical text) and Task 2 (prompt); the surfaces table → Tasks 1–3 row by row, with orchestrator comments explicitly excluded; enforcement at Gate C → Task 3 Step 2; the drift constraint → Task 2 Steps 5–6 and the Global Constraints; the testing section → Task 1 Steps 5–6 and Task 3 Step 5; the AgDR requirement → Task 3 Step 4. One spec instruction is deliberately not implemented — the "fifth checklist entry" — and the reason is recorded in File Structure and in AgDR-038's rejected options.
 
 **Placeholder scan.** No TBD, TODO, or "similar to Task N". Every code and prose block is the literal text to write. The one intentional variable is the AgDR number, which Task 3 Step 1 tells the implementer how to resolve.
 

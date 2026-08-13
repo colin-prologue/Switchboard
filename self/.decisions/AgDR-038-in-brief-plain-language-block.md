@@ -1,4 +1,9 @@
-# AgDR-029: Layer a two-field plain-language block above the citation-dense body
+# AgDR-038: Layer a two-field plain-language block above the citation-dense body
+
+> Renumbered from AgDR-029 (2026-08-08): this branch minted 029 in parallel with
+> main, where the self-host-pilot binding decision took the same number and
+> merged first, so it keeps it. 036 and 037 were claimed the same way while this
+> branch was open.
 
 - **Status:** proposed by the plain-language implementation session (2026-08-08);
   awaiting ratification at the PR merge gate.

@@ -46,6 +46,65 @@ class Issue:
     updated_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class CommentReaction:
+    """One reaction on an issue comment (issue #51 part a).
+
+    `id` is the reaction's GraphQL node id — the per-process dedupe key for a
+    reaction-channel fold signal. `content` is GitHub's enum verbatim
+    (`THUMBS_UP` / `THUMBS_DOWN` / …); `login` is the reacting user's login,
+    read from the `user { login }` field (reactions have no `author`).
+    """
+
+    id: str
+    content: str
+    login: str | None
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class IssueComment:
+    """One top-level issue comment plus its reactions (issue #51 part a).
+
+    GitHub issue comments have NO reply threading — every comment is top-level,
+    which is why `/fold` binding needs an explicit rule (see `fold.py`) while a
+    reaction is already comment-bound.
+    """
+
+    id: str
+    body: str
+    login: str | None
+    created_at: datetime | None = None
+    reactions: tuple[CommentReaction, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReviewThreadComment:
+    """One comment inside a PR review thread (issue #43).
+
+    Trimmed to exactly what `needs_response` reads: who wrote it and when.
+    Bodies are deliberately absent — the predicate never inspects text, and the
+    responding session reads the threads itself through `gh`.
+    """
+
+    id: str
+    login: str | None
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ReviewThread:
+    """One PR review thread (issue #43).
+
+    `is_resolved` is GitHub's `isResolved`; resolving is the human suppression
+    mechanism for a thread Switchboard left unresolved by design.
+    """
+
+    id: str
+    is_resolved: bool
+    comments: tuple[ReviewThreadComment, ...] = ()
+
+
 # --- workflow definition (core §4.1.2) ---------------------------------------
 
 @dataclass
@@ -112,6 +171,43 @@ class CodexConfig:
     turn_timeout_ms: int = 3600000
     read_timeout_ms: int = 30000
     stall_timeout_ms: int = 300000
+
+
+@dataclass(frozen=True)
+class FoldConfig:
+    """Operator identity for fold-signal detection (issue #51 part a).
+
+    `operator_logins` is an ALLOWLIST of GitHub logins whose 👍/👎 reactions and
+    `/fold` // `/no-fold` comments count as fold signals. An empty list disables
+    detection entirely (zero API calls) — that is the default, so a project that
+    never configures `fold:` pays nothing. Logins are stored lower-cased
+    (GitHub logins are case-insensitive).
+
+    The bot identity (`SB_APP_BOT_LOGIN`) is NEVER an operator; that exclusion
+    is applied at detection time (`fold.py`) rather than here, so config parsing
+    stays free of environment reads.
+    """
+
+    operator_logins: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReviewResponseConfig:
+    """Bot identity for review-response triggering (issue #43 / AgDR-037).
+
+    `bot_logins` is an ALLOWLIST of GitHub logins whose unanswered PR review
+    threads trigger a response round. It doubles as the BOTNESS DEFINITION —
+    "an external bot comment" is one whose author login is in this list — so
+    Switchboard's own App replies are excluded by construction (its login is
+    never in the list). An empty list (the default) disables the feature
+    entirely, at zero API cost; logins are stored lower-cased and deduped.
+
+    Switchboard's own identity comes from `$SB_APP_BOT_LOGIN` at runtime, NOT
+    from here: config parsing stays free of environment reads (the `FoldConfig`
+    precedent).
+    """
+
+    bot_logins: tuple[str, ...] = ()
 
 
 @dataclass

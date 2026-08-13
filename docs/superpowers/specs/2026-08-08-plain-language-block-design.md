@@ -2,8 +2,19 @@
 
 **Date:** 2026-08-08
 **Status:** shipped on this branch (`claude/plain-language-prs-tickets-667348`);
-see AgDR-029 for the one deliberate deviation from this design.
+see AgDR-038 for the one deliberate deviation from this design.
 **Anchors verified at:** `ce5764f558b2a8a39d078a7b7e144075f70db318`
+
+> **Reconciled with `main` (2026-08-13).** Main rebuilt triage verdict routing
+> after this spec's anchors were taken: five routes now post a `## Triage
+> verdict` comment, and every one of them pins `body-sha1:` as the comment's
+> **second** line. Two statements below are superseded accordingly — the block
+> is **third** on a verdict comment, under the heading and the hash (the same
+> machine-parsed-line-wins rule this spec already applies to `Closes #N`), and
+> it goes on the three routes carrying judgment (NEEDS WORK, NEEDS DECISION,
+> SPLIT), not on PASS or the unchanged-body fast-path, which reach no
+> conclusion a reader could argue with. `methodology/METHODOLOGY.md`
+> ("Writing for the reader") carries the current rule.
 
 ## Intent
 
@@ -129,7 +140,7 @@ Under this design, that body is unchanged but for the block inserted after the
 | PR bodies | `workflow/WORKFLOW.base.md:198` (step 7) | Block as the first section after the `Closes #N` line | **Gate C** |
 | Triage verdicts | `workflow/WORKFLOW.base.md:154` (NEEDS WORK routing) | Block as the first section under the `## Triage verdict` heading | Template only |
 | Gate C definition | `methodology/METHODOLOGY.md:65` | Add the block as a merge-gate completeness condition | — |
-| ~~Drafting guidance~~ | ~~`methodology/METHODOLOGY.md:145`~~ | **Superseded, not implemented.** Every entry in the drafting-quality checklist is a triage reject criterion; filing a writing rule there would make triage bounce tickets on prose. The block got its own `## Writing for the reader` section instead. See AgDR-029's rejected options (the fifth bullet). | — |
+| ~~Drafting guidance~~ | ~~`methodology/METHODOLOGY.md:145`~~ | **Superseded, not implemented.** Every entry in the drafting-quality checklist is a triage reject criterion; filing a writing rule there would make triage bounce tickets on prose. The block got its own `## Writing for the reader` section instead. See AgDR-038's rejected options (the fifth bullet). | — |
 | Composed prompt | `projects/switchboard-self/WORKFLOW.md` | Mirror the base edits (see "Drift") | — |
 
 Orchestrator-generated comments are explicitly out of scope; no Python changes.

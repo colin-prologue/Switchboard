@@ -1,7 +1,22 @@
 # AgDR-010: `status:in-progress` as claim-visibility label (not a lock)
 
-- **Status:** accepted (2026-07-06). Extends AgDR-008 (durable park label) to the
-  full claim lifecycle. Implements issue #14.
+- **Status:** accepted (2026-07-06), **superseded in part by
+  [AgDR-028](AgDR-028-orchestrator-owned-terminal-handoff.md)** (2026-08-08).
+  Extends AgDR-008 (durable park label) to the full claim lifecycle. Implements
+  issue #14.
+- **Superseded clause — decision #2 only, handoff ownership.** AgDR-010 assigned
+  `status:human-review` to **worker agents**. Issue #61 / PR #115 inverted that:
+  workers write **no** `status:*` label at all — their final action is the
+  evidence contract `.run/handoff-evidence.json`, and the **orchestrator**
+  validates it after verified provider success and performs the single
+  transition (`orchestrator/src/orchestrator/handoff.py`). Everything else in
+  this AgDR — the claim-visibility framing (the writer model is now THREE
+  writers: humans, the triage verifier, and the orchestrator — AgDR-028 removed
+  worker agents as status-label writers; decision #2's four-writer table below
+  is historical), the
+  `todo → in-progress` transitions, decisions #1 and #3–#5 — remains in force.
+  The original text below is preserved unedited as the record; read decision #2
+  through AgDR-028.
 - **Context:** The orchestrator's claim state lived only in an in-memory set
   (`scheduler.py` `self.claimed`); the sole status writes it performed were park
   labels. A human scanning the GitHub board could not tell which `todo` issues a
@@ -34,7 +49,12 @@ dispatch/retry never depended on the label.
    anymore (AgDR-008 removed the OBS-022 re-fetch machinery; the park gate keys
    on the `status:parked` label). A label write's `updatedAt` echo therefore
    perturbs nothing. Revisit if a future `updated_at`-sensitive consumer lands.
-2. **Ownership split — four writers** (documented in METHODOLOGY.md §"Who writes
+2. ⚠️ **SUPERSEDED IN PART by
+   [AgDR-028](AgDR-028-orchestrator-owned-terminal-handoff.md): the handoff
+   clause in this item is no longer true — workers write no `status:*` label,
+   and the orchestrator owns the `status:human-review` transition. Original
+   text preserved unedited as the record.**
+   **Ownership split — four writers** (documented in METHODOLOGY.md §"Who writes
    which status label"): humans own gate labels (`drafting`, `plan-review`,
    `blocked`); the triage **verifier agent** owns `triage → todo|drafting`;
    **worker agents** apply `status:human-review` at handoff; the **orchestrator**
@@ -92,7 +112,7 @@ dispatch/retry never depended on the label.
 
 `tracker.py` (+`remove_labels`, +mutation constant), `scheduler.py` (dispatch
 swap, park clear, shared revert helper, startup sweep), and METHODOLOGY.md (the
-four-writer table + config caveat). No changes to human/verifier/worker-owned
+historical four-writer table + config caveat). No changes to human/verifier-owned
 labels, to normalization, or to the park gate. The tracker method is a sanctioned
 exception to the §11.5 no-writes boundary, like `add_labels`.
 

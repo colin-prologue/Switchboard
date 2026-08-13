@@ -164,3 +164,142 @@ def test_triage_needs_work_removes_marker_in_same_command():
     # Routing back to drafting drops the provenance marker in the same command.
     assert "--remove-label status:triage,gate:triage-passed" in line
     assert "--add-label status:drafting" in line
+
+
+# --- NEEDS DECISION + unchanged-body fast-path (issue #55) --------------------
+
+def _verifier_prompt() -> str:
+    return render_prompt(_real_base_body(), make_issue(labels=["status:triage"]), attempt=None)
+
+
+def test_body_hash_command_is_embedded_verbatim():
+    """The ONE literal command, byte-for-byte. `git hash-object` is allowlisted
+    under Bash(git:*); `shasum` is NOT, and a denied command strands the
+    session. Any drift here (a jq variant, a different digest tool) breaks the
+    cross-session comparability the fast-path depends on."""
+    # In the template, verbatim with the Liquid placeholder... The command is
+    # now a fetch-to-file + hash pair (PR #125 review): the digest is bound to
+    # the exact bytes the verifier reviews, not the live body at hash time.
+    template = _real_base_body()
+    assert (
+        "gh issue view {{ issue.identifier }} --repo acme/widgets "
+        "--json body -q .body > .run/triage-body.md"
+    ) in template
+    assert "git hash-object .run/triage-body.md" in template
+    # ...and in the rendered prompt the agent actually reads, with the issue
+    # number substituted and nothing else changed.
+    out = _verifier_prompt()
+    assert (
+        "gh issue view 42 --repo acme/widgets "
+        "--json body -q .body > .run/triage-body.md"
+    ) in out
+    assert "git hash-object .run/triage-body.md" in out
+    # The reviewed-bytes binding is instructed, not implied.
+    assert "not the issue text rendered into this prompt" in out
+    # The allowlist trap is named so no session substitutes a denied variant.
+    assert "`shasum` is **not**" in out
+
+
+def test_needs_decision_verdict_present_with_routing_and_structure():
+    out = _verifier_prompt()
+    assert "NEEDS DECISION" in out
+    # Routes triage -> decision, and only that (no marker churn on this edge).
+    line = next(l for l in out.splitlines()
+                if "gh issue edit" in l and "status:decision" in l)
+    assert "--remove-label status:triage" in line
+    assert "--add-label status:decision" in line
+    assert "gate:triage-passed" not in line
+    # Required comment structure per Mechanics 1.
+    for required in (
+        "## Triage verdict",
+        "body-sha1:",
+        "steelmanned",
+        "acceptance-criteria implications",
+        "reply on this issue with the chosen option",
+    ):
+        assert required in out, f"missing decision-request element: {required!r}"
+
+
+def test_needs_decision_boundary_against_needs_work_is_stated():
+    out = _verifier_prompt()
+    assert "determinate answer" in out
+    assert "unmade human decision" in out
+
+
+def test_fast_path_covers_all_five_table_rows():
+    out = _verifier_prompt()
+    assert "Unchanged-body fast-path" in out
+    table = out.split("Unchanged-body fast-path", 1)[1]
+    rows = [l for l in table.splitlines() if l.startswith("| ")]
+    joined = "\n".join(rows)
+    # NEEDS WORK / SPLIT -> drafting + marker cleared; NEEDS DECISION -> decision;
+    # PASS -> todo + marker in the same command; no-hash -> full review.
+    assert joined.count(
+        "--remove-label status:triage,gate:triage-passed --add-label status:drafting"
+    ) == 2
+    assert "--remove-label status:triage --add-label status:decision" in joined
+    assert "--remove-label status:triage --add-label status:todo,gate:triage-passed" in joined
+    no_hash = [r for r in rows if "no parseable" in r]
+    assert no_hash and "full review" in no_hash[0], (
+        "the retrofit fall-through row must send pre-#55 verdicts to a full review"
+    )
+
+
+def test_every_verdict_carries_the_body_sha1_block():
+    out = _verifier_prompt()
+    assert "body-sha1: <the 40-hex digest from Step 0>" in out
+    # PASS posts a comment too — otherwise the next re-triage has nothing to
+    # compare against and the fast-path can never fire on a PASSed ticket.
+    assert "That includes PASS" in out
+
+
+# --- NEEDS WORK proposal block (issue #126 part b) ----------------------------
+
+
+def test_needs_work_route_pins_the_exact_proposal_sentinel_pair():
+    """The parser and the prompt must cite ONE pair of literals."""
+    from orchestrator.fold_apply import PROPOSAL_CLOSE, PROPOSAL_OPEN
+
+    out = _verifier_prompt()
+    assert PROPOSAL_OPEN in out
+    assert PROPOSAL_CLOSE in out
+    # Whole-body replacement, not a fragment.
+    assert "COMPLETE replacement issue body" in out
+    # The omit-instead-of-truncate boundary (Non-goals, round 12).
+    assert "OMIT the proposal block entirely" in out
+
+
+def test_verifier_absolute_survives_the_operator_gated_carve_out():
+    """The carve-out must not read as permission to edit the body."""
+    out = _verifier_prompt()
+    assert "you never edit the issue body and never write feature" in out
+    assert "you NEVER write the issue body, not even when an operator" in out
+    assert "The body write belongs exclusively" in out
+
+
+# --- worker fold prohibition (issue #51 part a) -------------------------------
+
+
+def test_worker_prompt_forbids_agents_from_signalling_a_fold():
+    """The operator's approval channel must be operator-only.
+
+    `fold.operator_logins` filters by login, but the prompt-side prohibition is
+    the belt to that suspenders: an agent that reacts 👍 on the verdict for its
+    OWN ticket would fold it and defeat Gate A. Detection is read-only, so
+    nothing downstream re-checks authorship — the rule has to reach the worker.
+    """
+    out = render_prompt(_real_base_body(), make_issue(labels=["status:todo"]), attempt=None)
+    assert "## How to work it" in out  # the worker branch, not the verifier's
+    assert "Never signal a fold." in out
+    # Both channels named explicitly, so neither reads as the permitted one.
+    assert "/fold" in out and "/no-fold" in out
+    assert "Never react to a verdict comment" in out
+
+
+def test_fold_prohibition_lives_in_the_worker_branch_only():
+    """The verifier AUTHORS verdict comments; it is not the audience for a rule
+    about approving them, and the branches must stay cleanly separated."""
+    verifier = render_prompt(
+        _real_base_body(), make_issue(labels=["status:triage"]), attempt=None
+    )
+    assert "Never signal a fold." not in verifier

@@ -14,6 +14,7 @@ orchestrator code.
 | `status:triage`        | **yes** | Adversarial ticket verification — dispatched to a verifier session |
 | `status:todo`          | **yes** | Approved, unblocked, dispatchable                              |
 | `status:in-progress`   | **yes** | An agent is working it                                          |
+| `status:decision`      | no      | Waiting on the operator — triage asked a Gate-A question (issue #55) |
 | `status:plan-review`   | no      | Gate B handoff — agent produced a plan/ADR awaiting approval    |
 | `status:human-review`  | no      | Gate C handoff — implementation done, awaiting human merge      |
 | `status:blocked`       | no      | Parked (fallback when native dependencies aren't available)     |
@@ -32,7 +33,9 @@ orchestrator performs the verified transition.
 | Label(s)                                        | Written by | When |
 |-------------------------------------------------|------------|------|
 | `status:drafting`, `status:plan-review`, `status:blocked` | **humans** | authoring/approving at the gates |
-| `status:triage` → `status:todo` \| `status:drafting`      | the **triage verifier agent** | on its PASS / NEEDS WORK verdict |
+| `status:triage` → `status:todo` \| `status:drafting`      | the **triage verifier agent** | on its PASS / NEEDS WORK / SPLIT verdict |
+| `status:triage` → `status:decision`             | the **triage verifier agent** | on its NEEDS DECISION verdict (issue #55) — the ticket is blocked on an unmade human decision |
+| `status:decision` → `status:drafting`           | **humans** | the operator picked an option; the answer is folded into the body at drafting (manual until #51) |
 | `status:human-review`                           | the **orchestrator** | after provider-turn success + validated handoff evidence (issue #61 / AgDR-028; workers only write `.run/handoff-evidence.json`) |
 | `status:todo` → `status:in-progress`, its revert, and `status:parked` | the **orchestrator** | claim taken / claim died / session cap |
 
@@ -79,8 +82,11 @@ adversarial scrutiny so the implementing agent only ever sees contracts that
 survived independent review. It is an **active** state (Symphony dispatches it),
 but the dispatched session runs as a *verifier*, not an implementer — the
 `status:triage` branch in the workflow prompt swaps the role. It reuses the
-same dispatch machinery, session, and budget caps as an implementation session,
-plus one generic scheduler rule it leans on: sessions are *role-pinned* — when
+same dispatch machinery and session shape as an implementation session, but
+**not** the same budget: verify and implement sessions are capped independently
+(same cap value, separate counters — issue #35 / AgDR-030), so verification
+passes never eat the implementation budget. It also leans on one generic
+scheduler rule: sessions are *role-pinned* — when
 a worker's issue changes state (even active → active, e.g. a PASS relabel
 `status:triage → status:todo`), the session ends at the next turn boundary and
 normal re-dispatch starts a fresh session in the new role (SPEC.md §4).
@@ -90,13 +96,37 @@ testing asks, sizing, boundaries) and routes to exactly one verdict:
 
 - **PASS** → relabel `status:triage → status:todo` (dispatchable).
 - **NEEDS WORK** → relabel `status:triage → status:drafting` + a `## Triage
-  verdict` feedback comment (fixed, grep-able heading).
+  verdict` feedback comment (fixed, grep-able heading). This is the verdict for a
+  **specification error with a determinate answer** — an unstated assumption, an
+  unbounded criterion, a drifted citation.
+- **NEEDS DECISION** → relabel `status:triage → status:decision` + a `## Triage
+  verdict` comment carrying the decision request (the question, the options each
+  steelmanned, per-option acceptance-criteria implications, and "reply on this
+  issue with the chosen option"). This is the verdict for an **unmade human
+  decision** — a Gate-A architecture choice the ticket is stalled on, which a
+  verifier is rightly forbidden to make on the operator's behalf. The boundary
+  against NEEDS WORK is determinacy, not difficulty: a question with a right
+  answer is NEEDS WORK; a question with a *choice* is NEEDS DECISION. Issue #15
+  burned five triage sessions on five concurring NEEDS-WORK verdicts for want of
+  this class.
 - **SPLIT** → file child issues at `status:drafting` (drafted bodies, native
   blocked-by chaining), park the parent at `status:drafting`.
 
+Every verdict comment's first line is `## Triage verdict` and its second line is
+`body-sha1: <40 hex>` — the hash of the body that verdict reviewed, computed by
+the one literal command the prompt embeds (`gh issue view … --json body -q .body
+| git hash-object --stdin`; `git hash-object` is allowlisted, `shasum` is not).
+A re-triaged issue whose current body hash equals the latest verdict's takes the
+**unchanged-body fast-path**: one referral comment and an immediate re-route per
+the prior verdict class, no re-review. A latest verdict with no parseable
+`body-sha1:` line (every pre-#55 verdict) falls through to a full review.
+
 The verifier never edits the issue body and never writes feature code — comments,
 labels, and child issues only. Transitions in: a human (or a `SPLIT` parent)
-files at `status:triage`. Transitions out: `status:todo` or `status:drafting`.
+files at `status:triage`. Transitions out: `status:todo`, `status:drafting`, or
+`status:decision`. `status:decision` leaves only via `status:drafting` (the
+operator's answer must be folded into the body before re-triage —
+`decision → triage` is deliberately illegal; see `workflow/transitions.yml`).
 
 ### When to file at `status:triage` vs straight to `status:todo`
 
@@ -154,8 +184,9 @@ citations, enumerated consumers, `file:line` at a named sha. That precision is
 load-bearing and stays. It is also unreadable to a human catching up — the
 operator between context switches, or somebody helping review the board.
 
-So every agent-written ticket body, PR body, and triage verdict opens with a
-fixed, grep-able block carrying **insight, not information**:
+So every agent-written ticket body, PR body, and judgment-carrying triage
+verdict opens with a fixed, grep-able block carrying **insight, not
+information**:
 
 ```
 ## In brief
@@ -165,6 +196,14 @@ fixed, grep-able block carrying **insight, not information**:
 **What could be wrong:** <one decision or assumption, and what breaks if it is
 false>
 ```
+
+**"Judgment-carrying" excludes exactly two of the five verdict routes.** NEEDS
+WORK, NEEDS DECISION, and SPLIT each reach a conclusion a reader can argue with,
+so each carries the block. A PASS verdict is one line saying the ticket passed,
+and an unchanged-body fast-path referral re-routes per a prior verdict having
+run no rubric and produced no new findings by construction. Neither holds
+judgment for a reader to scrutinize, so on those two a block would be ceremony
+wrapped around nothing — and the surest way to teach readers to skip it.
 
 Two rules make the fields hard to pad, and they are the whole mechanism:
 
@@ -185,10 +224,14 @@ orchestrator resolves the issue link through GitHub's closing references, which
 match a closing keyword anywhere in the body — so the line's **presence** is
 machine-enforced by the handoff check, but its **position** is convention only,
 kept first so it stays visible and never gets edited away. On a triage verdict,
-the `## Triage verdict` heading comes first because the workflow prompt pins it
-there as the comment's first line for grep-ability — that ordering genuinely is
-the rule, not a courtesy. Everything the author would otherwise write goes below
-the block, unchanged. The block adds a layer; it removes nothing.
+**two** lines precede the block and the block is third, because both of those
+lines are contracts rather than courtesies: the `## Triage verdict` heading,
+which the workflow prompt pins as the comment's first line so verdicts stay
+grep-able, and the `body-sha1:` line directly under it, which the next triage
+session parses to tell a revised body from an unchanged one. A human-facing
+layer never displaces a machine-read one. Everything the author would otherwise
+write goes below the block, unchanged. The block adds a layer; it removes
+nothing.
 
 **Enforcement is asymmetric on purpose.** PR bodies are gated at Gate C — a
 missing or hedged block bounces the PR, the same as a missing AgDR. Ticket

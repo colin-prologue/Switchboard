@@ -907,6 +907,41 @@ def test_real_workflow_base_file_loads_after_placeholder_substitution(tmp_path: 
     assert "issue.identifier" in defn.prompt_template
 
 
+# --- status:decision is a gate BY OMISSION (issue #55) ------------------------
+#
+# Adding a gate state must cost zero config: `active_states` is an allowlist, so
+# a state simply absent from it is never dispatched. This test is the regression
+# that fails if someone "helpfully" adds "decision" to the list.
+
+def test_decision_is_not_an_active_state(tmp_path: Path):
+    real_path = Path(__file__).resolve().parents[2] / "workflow" / "WORKFLOW.base.md"
+    substituted = (
+        real_path.read_text(encoding="utf-8")
+        .replace("{{REPO}}", "acme/widgets")
+        .replace("{{WORKSPACE_ROOT}}", "/tmp/symphony_workspaces/acme-widgets")
+        .replace("{{MAX_AGENTS}}", "10")
+        .replace("{{CONVENTION_ROOT}}", "")
+    )
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(substituted)
+
+    cfg = Config(load_workflow(p), tmp_path)
+    assert "decision" not in cfg.tracker().active_states
+    # The whole allowlist, pinned: gates are the states NOT here.
+    assert cfg.tracker().active_states == ["triage", "todo", "in progress"]
+
+
+def test_active_states_line_is_byte_identical_in_base_and_composed():
+    """#55 added a gate state without touching this line. Both files must still
+    carry the exact same `active_states` declaration."""
+    repo_root = Path(__file__).resolve().parents[2]
+    expected = '  active_states: ["triage", "todo", "in progress"]'
+    for rel in ("workflow/WORKFLOW.base.md", "projects/switchboard-self/WORKFLOW.md"):
+        lines = (repo_root / rel).read_text(encoding="utf-8").splitlines()
+        matches = [l for l in lines if l.strip().startswith("active_states:")]
+        assert matches == [expected], f"{rel}: active_states drifted -> {matches}"
+
+
 # --- base <-> composed conformance (issue #44) --------------------------------
 #
 # register-project.sh composes projects/switchboard-self/WORKFLOW.md from
@@ -989,25 +1024,49 @@ def test_workflow_prompt_pins_in_brief_block():
         assert "a literal\n   closing reference, not prose that mentions the issue" in text, (
             f"{rel}: Closes #N instruction absent"
         )
-        # This string lives ONLY inside the NEEDS WORK triage-verdict insertion,
-        # not the step-7 PR-handoff insertion — pins the triage surface on its
-        # own, so a symmetric deletion of just that insertion (which the sync
-        # test alone cannot catch) turns this test red.
+        # Three of the five verdict routes carry the block (NEEDS WORK, NEEDS
+        # DECISION, SPLIT); PASS and the unchanged-body fast-path deliberately
+        # do not. Each of the three is pinned by a string that occurs ONCE in
+        # the file and only inside its own route, so deleting any single
+        # insertion turns this test red — the sync test alone cannot catch a
+        # deletion mirrored across both files.
+        #
+        # On a verdict comment the block is THIRD: the `## Triage verdict`
+        # heading and the machine-parsed `body-sha1:` line keep lines 1-2.
+        # Counted, not just present: one occurrence per block-carrying route,
+        # so losing the rule from any single route is red.
+        assert text.count("the machine-read hash stays second") == 3, (
+            f"{rel}: verdict-block placement rule must appear once per "
+            f"block-carrying route, found {text.count('the machine-read hash stays second')}"
+        )
+        # NEEDS WORK — lives only in that route's insertion, not the step-8
+        # PR-handoff insertion.
         assert (
             "the single finding the author has the strongest\n  > case to push back on"
             in text
-        ), f"{rel}: triage-verdict In brief block absent"
+        ), f"{rel}: NEEDS WORK In brief block absent"
+        # NEEDS DECISION — the route main added; its second field asks how the
+        # decision request's own framing could be wrong.
+        assert (
+            "an option you left off, or a two-way choice that is really three" in text
+        ), f"{rel}: NEEDS DECISION In brief block absent"
         # SPLIT-verdict child issues must also open with the block.
         assert "each\n  body opens with the `## In brief` block" in text, (
             f"{rel}: SPLIT child-issue body block instruction absent"
         )
         # The SPLIT verdict's own `## Triage verdict` comment must also carry
         # the block, not just the child bodies — this string lives ONLY inside
-        # that SPLIT-comment insertion (distinct from the NEEDS WORK In brief
-        # block above and the SPLIT child-body clause just checked), so a
-        # regression that drops just this insertion turns this test red.
+        # that SPLIT-comment insertion (distinct from the NEEDS WORK and NEEDS
+        # DECISION blocks above and the SPLIT child-body clause just checked),
+        # so a regression that drops just this insertion turns this test red.
         assert "the split decision most likely to be wrong" in text, (
             f"{rel}: SPLIT triage-verdict comment In brief block absent"
+        )
+        # The two mechanical routes stay block-free on purpose. Without this,
+        # nothing distinguishes "deliberately excluded" from "forgotten", and a
+        # later session would add ceremony back to a one-line PASS.
+        assert "The fast-path comment carries no `## In brief` block" in text, (
+            f"{rel}: PASS/fast-path exclusion rationale absent"
         )
 
 
@@ -1140,3 +1199,217 @@ def test_build_credentials_missing_bot_identity_fails_loud(tmp_path: Path):
         build_credentials(cfg.tracker(), env, client=None)
     assert exc_info.value.code == "incomplete_app_credentials"
     assert "SB_APP_BOT_LOGIN" in str(exc_info.value)
+
+
+# --- fold.operator_logins (issue #51 part a) ----------------------------------
+#
+# The operator allowlist is the ONLY identity surface fold detection has. A
+# silently-disabled allowlist is indistinguishable from "the operator hasn't
+# reacted yet", so malformed config must fail loudly at startup instead.
+
+def _fold_cfg(tmp_path: Path, block: str) -> Config:
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        f"{block}"
+        "---\n"
+        "body\n"
+    )
+    return Config(load_workflow(p), tmp_path)
+
+
+def test_fold_block_absent_disables_detection(tmp_path: Path):
+    assert _fold_cfg(tmp_path, "").fold().operator_logins == ()
+
+
+def test_fold_empty_list_disables_detection(tmp_path: Path):
+    cfg = _fold_cfg(tmp_path, "fold:\n  operator_logins: []\n")
+    assert cfg.fold().operator_logins == ()
+
+
+def test_fold_logins_are_lowercased_and_deduped(tmp_path: Path):
+    cfg = _fold_cfg(
+        tmp_path,
+        "fold:\n  operator_logins: [\"Colin-Prologue\", \" colin-prologue \", \"other\"]\n",
+    )
+    # GitHub logins are case-insensitive; the stored form is canonical so the
+    # detector can compare without re-normalizing at every call site.
+    assert cfg.fold().operator_logins == ("colin-prologue", "other")
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "fold: not-a-map\n",
+        "fold:\n  operator_logins: colin\n",
+        "fold:\n  operator_logins: [\"\"]\n",
+        "fold:\n  operator_logins: [123]\n",
+        "fold:\n  operator_lgoins: [\"colin\"]\n",  # typo'd key must not pass silently
+    ],
+)
+def test_fold_malformed_config_raises(tmp_path: Path, block: str):
+    with pytest.raises(WorkflowError) as exc_info:
+        _fold_cfg(tmp_path, block).fold()
+    assert exc_info.value.code == "workflow_parse_error"
+
+
+def test_validate_dispatch_forces_fold_validation(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        "  api_key: $GITHUB_TOKEN\n"
+        "fold:\n"
+        "  operator_logins: 7\n"
+        "---\n"
+        "body\n"
+    )
+    with pytest.raises(WorkflowError) as exc_info:
+        validate_dispatch(Config(load_workflow(p), tmp_path))
+    assert exc_info.value.code == "workflow_parse_error"
+
+
+def _real_base_config(tmp_path: Path, name: str = "WORKFLOW.md") -> Config:
+    """The committed `WORKFLOW.base.md`, scaffold placeholders substituted."""
+    real_path = Path(__file__).resolve().parents[2] / "workflow" / "WORKFLOW.base.md"
+    substituted = (
+        real_path.read_text(encoding="utf-8")
+        .replace("{{REPO}}", "acme/widgets")
+        .replace("{{WORKSPACE_ROOT}}", "/tmp/ws")
+        .replace("{{MAX_AGENTS}}", "10")
+        .replace("{{CONVENTION_ROOT}}", "")
+    )
+    p = tmp_path / name
+    p.write_text(substituted)
+    return Config(load_workflow(p), tmp_path)
+
+
+def test_real_workflow_base_declares_an_empty_fold_allowlist(tmp_path: Path):
+    """The scaffold ships detection OFF: an allowlist nobody vetted must never
+    grant fold authority by default."""
+    assert _real_base_config(tmp_path).fold().operator_logins == ()
+
+
+# --- review_response.bot_logins (issue #43 / AgDR-037) ------------------------
+#
+# Same posture and same reason as `fold` above: this allowlist is the loop's
+# only botness definition, and a typo'd key that silently disabled the responder
+# would be indistinguishable from "the bot hasn't reviewed yet". Without this
+# accessor the shipped block would load clean and be inert — no top-level
+# unknown-key check exists to catch it.
+
+def _rr_cfg(tmp_path: Path, block: str) -> Config:
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        f"{block}"
+        "---\n"
+        "body\n"
+    )
+    return Config(load_workflow(p), tmp_path)
+
+
+def test_review_response_block_absent_disables_the_loop(tmp_path: Path):
+    assert _rr_cfg(tmp_path, "").review_response().bot_logins == ()
+
+
+def test_review_response_empty_list_disables_the_loop(tmp_path: Path):
+    cfg = _rr_cfg(tmp_path, "review_response:\n  bot_logins: []\n")
+    assert cfg.review_response().bot_logins == ()
+
+
+def test_review_response_logins_are_lowercased_and_deduped(tmp_path: Path):
+    cfg = _rr_cfg(
+        tmp_path,
+        "review_response:\n"
+        "  bot_logins: [\"ChatGPT-Codex-Connector\", \" chatgpt-codex-connector \","
+        " \"other-bot\"]\n",
+    )
+    # The stored form is canonical because it is ALSO what gets written into the
+    # round marker's `bots=` field, which a session parses in another process.
+    assert cfg.review_response().bot_logins == (
+        "chatgpt-codex-connector", "other-bot",
+    )
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "review_response: not-a-map\n",
+        "review_response:\n  bot_logins: codex\n",
+        "review_response:\n  bot_logins: [\"\"]\n",
+        "review_response:\n  bot_logins: [123]\n",
+        "review_response:\n  bot_lgoins: [\"codex\"]\n",  # typo'd key: no silent pass
+    ],
+)
+def test_review_response_malformed_config_raises(tmp_path: Path, block: str):
+    with pytest.raises(WorkflowError) as exc_info:
+        _rr_cfg(tmp_path, block).review_response()
+    assert exc_info.value.code == "workflow_parse_error"
+
+
+def test_validate_dispatch_forces_review_response_validation(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        "  api_key: $GITHUB_TOKEN\n"
+        "review_response:\n"
+        "  bot_logins: 7\n"
+        "---\n"
+        "body\n"
+    )
+    with pytest.raises(WorkflowError) as exc_info:
+        validate_dispatch(Config(load_workflow(p), tmp_path))
+    assert exc_info.value.code == "workflow_parse_error"
+
+
+def test_real_workflow_base_ships_the_response_loop_disabled(tmp_path: Path):
+    """SHIPPED CONFIG AC: the loop lands DISABLED, dead code by design.
+
+    Going live is a deliberate post-merge config edit, never a merge side
+    effect — and with no `bot_logins` no trigger fires, so no round marker is
+    ever written and the prompt addendum stays inert too.
+    """
+    assert _real_base_config(tmp_path).review_response().bot_logins == ()
+
+
+def test_composed_self_workflow_ships_the_response_loop_disabled(tmp_path: Path):
+    """The OTHER carrying file. `projects/switchboard-self/WORKFLOW.md` is the
+    composed copy the live instance actually loads; shipping it enabled would
+    activate the loop on merge regardless of what the base template says."""
+    real = Path(__file__).resolve().parents[2] / "projects" / "switchboard-self"
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text((real / "WORKFLOW.md").read_text(encoding="utf-8"))
+    assert Config(load_workflow(p), tmp_path).review_response().bot_logins == ()
+
+
+def test_review_response_rejects_logins_that_break_the_marker_grammar(tmp_path: Path):
+    """Codex review (PR #134): a whitespace-bearing entry would serialize into
+    the round marker's `bots=` field (matched as \\S*), making every marker
+    parse as round 0 — the cap never engages and response sessions dispatch
+    indefinitely. Malformed config fails the LOAD, never the marker."""
+    for bad in ("codex bot", "bots=evil", "a<b", "-lead", "trail-"):
+        cfg = _rr_cfg(
+            tmp_path, f'review_response:\n  bot_logins: ["{bad}"]\n'
+        )
+        with pytest.raises(WorkflowError):
+            cfg.review_response()
+    ok = _rr_cfg(
+        tmp_path, 'review_response:\n  bot_logins: ["Codex-Bot[bot]"]\n'
+    ).review_response()
+    assert ok.bot_logins == ("codex-bot[bot]",)

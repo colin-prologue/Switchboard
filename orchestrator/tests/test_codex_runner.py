@@ -15,6 +15,7 @@ from orchestrator.types import AgentEvent, CodexConfig, FailureClass
 
 
 FIXTURE = Path(__file__).with_name("fake_codex.py")
+AUTH_401_CAPTURE = Path(__file__).with_name("fixtures") / "codex_cli_auth_401.jsonl"
 
 
 def make_cfg(
@@ -239,6 +240,76 @@ async def test_provider_diagnostic_does_not_enter_normalized_error(
 
     assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION
     assert secret not in (result.error or "")
+
+
+async def test_transient_error_events_do_not_preempt_the_terminal_verdict(
+    workspace: Path, monkeypatch
+) -> None:
+    """Issue #114, replaying the issue #109 ground-truth capture verbatim.
+
+    The real CLI emits eleven `Reconnecting... N/5` error events mid-turn and
+    then a terminal `turn.failed`. Only that last verdict may reach the
+    orchestrator.
+    """
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "replay_fixture")
+    monkeypatch.setenv("FAKE_CODEX_FIXTURE", str(AUTH_401_CAPTURE))
+    recorder = EventRecorder()
+
+    result = await CodexRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, recorder, "issue-114"
+    )
+
+    failures = [event for _, event in recorder.events if event.event == "turn_failed"]
+    assert len(failures) == 1
+    detail = failures[0].payload["error"]
+    assert not detail.startswith("Reconnecting")
+    assert detail.startswith(
+        "unexpected status 401 Unauthorized: Missing bearer or basic authentication"
+    )
+    assert result.status == "failed"
+    assert result.error == "codex_turn_failed"
+    assert result.session_id == "019fe2a5-ba48-7610-82f1-519832edc3d3"
+    assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION
+
+
+async def test_transient_error_events_followed_by_completion_succeed(
+    workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "recovered")
+    recorder = EventRecorder()
+
+    result = await CodexRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, recorder, "issue-114"
+    )
+
+    assert result.status == "succeeded"
+    assert result.session_id == "codex-recovered"
+    assert result.failure_class is None
+    assert result.usage == {"input_tokens": 7, "output_tokens": 11}
+    assert "turn_failed" not in recorder.names
+    assert recorder.names == [
+        "session_started",
+        "notification",
+        "notification",
+        "notification",
+        "notification",
+        "turn_completed",
+    ]
+
+
+async def test_eof_after_errors_classifies_from_the_terminal_most_error(
+    workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "error_then_error")
+
+    result = await CodexRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-114"
+    )
+
+    assert result.status == "failed"
+    assert result.error == "codex_error"
+    # The first (transient) error would classify WORKER_FAILURE; the last wins.
+    assert result.failure_class is FailureClass.PROVIDER_PLAN_LIMIT
 
 
 async def test_malformed_line_is_reported_and_tolerated(

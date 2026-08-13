@@ -28,6 +28,15 @@ edges:
   - from: drafting
     to: triage
     actor: human
+  # The operator-approved fold (#51 detect / #126 apply). Same edge, different
+  # actor: apply rewrites the body from the verdict's proposal block, posts the
+  # durable `switchboard:fold-applied` marker comment, then relabels. The
+  # relabel is the TERMINAL act — it evicts the issue from the fold poll set
+  # (scheduler.FOLD_POLL_STATES), so every failable step precedes it.
+  - from: drafting
+    to: triage
+    actor: fold
+    note: "operator /fold or 👍 approved; apply folded the proposal into the body"
 
   # --- Triage: adversarial ticket verification (active state, AgDR-006) ------
   # PASS stamps the durable provenance marker in the SAME gh edit as the state
@@ -48,6 +57,27 @@ edges:
     actor: triage-verifier
     verdict: SPLIT
     note: "children filed @drafting (native blocked-by), parent parked @drafting"
+  - from: triage
+    to: decision
+    actor: triage-verifier
+    verdict: needs-decision
+
+  # --- decision: waiting on the operator to answer a Gate-A question (#55) ----
+  # A gate BY OMISSION from active_states — no orchestrator code or config reads
+  # `decision`; the allowlist semantics of active_states park it for free, the
+  # same way drafting/plan-review/human-review are gated.
+  #
+  # `decision -> triage` is deliberately ILLEGAL: the chosen option must be
+  # folded into the issue body first, and the fold path is the existing
+  # `drafting -> triage` edge above. Re-entering triage with the answer living
+  # only in a comment would re-triage the same unchanged body — the loop #55
+  # exists to stop.
+  - from: decision
+    to: drafting
+    actor: human
+    verdict: answered
+    remove_marker: gate:triage-passed
+    note: "operator chose an option; body fold pending (#51 — manual today)"
 
   # --- todo: dispatchable ----------------------------------------------------
   - from: todo
@@ -113,9 +143,19 @@ edges:
     verdict: merged
   - from: human-review
     to: todo
-    actor: human
+    actor: [human, orchestrator]
     verdict: changes-requested
-    note: "re-enters dispatch WITHOUT re-triage; marker deliberately survives"
+    trigger: review-response
+    note: >-
+      re-enters dispatch WITHOUT re-triage; marker deliberately survives.
+      TWO actors, ONE edge (issue #43 / AgDR-037): the human path is the
+      changes-requested verdict; the orchestrator path is the review-response
+      sub-poll, which takes this edge when a bound PR carries a bot review
+      thread that is unresolved and whose last bot comment postdates
+      Switchboard's last reply. The re-dispatched session is an ordinary
+      implement-role session — no new state, no new role. Bounded by a durable
+      per-PR round marker (2 rounds); at the cap the orchestrator stops
+      relabeling and comments instead of parking.
 
   # === Phase 2 — INACTIVE until #20b (fail-review hub) lands ==================
   # Annotated, NOT enforced. Today a cap-hit parks (the active in-progress->parked

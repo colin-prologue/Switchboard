@@ -28,7 +28,16 @@ import httpx
 
 from orchestrator.auth import AppInstallationTokenProvider, StaticTokenProvider
 from orchestrator.log import log
-from orchestrator.types import BlockerRef, Issue, TrackerConfig, TrackerError
+from orchestrator.types import (
+    BlockerRef,
+    CommentReaction,
+    Issue,
+    IssueComment,
+    ReviewThread,
+    ReviewThreadComment,
+    TrackerConfig,
+    TrackerError,
+)
 
 # --- GraphQL query/mutation constants (core §11.2) --------------------------
 
@@ -91,6 +100,36 @@ query($owner: String!, $name: String!, $after: String) {{
 }}
 """
 
+# fetch_issue_comments: verdict-comment fold-signal detection (issue #51 part a).
+# GitHub issue comments have no reply threading, so every comment is top-level
+# and the connection is flat. The login field on a reaction is `user`, NOT
+# `author` (only Comment-ish types carry `author`) — asking for `author` here is
+# a schema error, which is why this query's exact shape is pinned by a test.
+# Reactions are read as full nodes rather than `reactionGroups` because the
+# per-reaction node id is the dedupe key and the reacting login must be matched
+# against the operator allowlist — presence alone is not enough.
+ISSUE_COMMENTS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      comments(first: 50, after: $after) {
+        nodes {
+          id
+          body
+          createdAt
+          author { login }
+          reactions(first: 100) {
+            pageInfo { hasNextPage endCursor }
+            nodes { id content createdAt user { login } }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
 # fetch_issue_states_by_ids: reconciliation by node id.
 ISSUES_BY_IDS_QUERY = f"""
 query($ids: [ID!]!) {{
@@ -112,11 +151,38 @@ mutation($subjectId: ID!, $body: String!) {
 """
 
 
+# update_issue_body: the fold apply step's ONE net-new write (issue #126 part b).
+# GitHub has no conditional update, so this is the write half of a
+# read-compare-write, never a compare-and-swap; the TOCTOU window is an accepted
+# residual and verify-after-write is the check that survives it.
+UPDATE_ISSUE_BODY_MUTATION = """
+mutation($id: ID!, $body: String!) {
+  updateIssue(input: {id: $id, body: $body}) {
+    issue { id }
+  }
+}
+"""
+
+
+COMMENT_REACTIONS_PAGE_QUERY = """
+query($commentId: ID!, $cursor: String) {
+  node(id: $commentId) {
+    ... on IssueComment {
+      reactions(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id content createdAt user { login } }
+      }
+    }
+  }
+}
+"""
+
 OPEN_PRS_FOR_BRANCH_QUERY = """
 query($owner: String!, $name: String!, $headRef: String!) {
   repository(owner: $owner, name: $name) {
     pullRequests(headRefName: $headRef, states: [OPEN], first: 5) {
       nodes {
+        id
         number
         headRefOid
         closingIssuesReferences(first: 50) {
@@ -136,6 +202,63 @@ query($owner: String!, $name: String!, $prNumber: Int!, $cursor: String) {
       closingIssuesReferences(first: 50, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes { number }
+      }
+    }
+  }
+}
+"""
+
+# fetch_pr_comments: round-marker reader (issue #43). `repository.issue(number:)`
+# is NULL for a pull-request number, so ISSUE_COMMENTS_QUERY cannot serve this —
+# hence a sibling query on `pullRequest`. No reactions: no marker reader wants
+# them, and selecting them would cost a nested page per comment for nothing.
+PR_COMMENTS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      comments(first: 50, after: $after) {
+        nodes { id body createdAt author { login } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+# fetch_pr_review_threads: the review-response trigger's read surface (issue
+# #43). The selection is exactly the `needs_response` fixture set — `isResolved`
+# plus per-comment author login and `createdAt`. Bodies are NOT selected: the
+# predicate never reads text, and the responding session fetches the threads
+# itself. Verified live against PR #132 (2026-08-09): a Bot author's `login` is
+# the BARE login (`chatgpt-codex-connector`, `switchboard-agent`) with
+# `__typename: Bot` — never the `<login>[bot]` form git uses.
+PR_REVIEW_THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $after) {
+        nodes {
+          id
+          isResolved
+          comments(first: 50) {
+            nodes { id createdAt author { login } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+REVIEW_THREAD_COMMENTS_PAGE_QUERY = """
+query($threadId: ID!, $cursor: String) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first: 50, after: $cursor) {
+        nodes { id createdAt author { login } }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
@@ -252,6 +375,95 @@ class GitHubTracker:
         raw_issues = await self._paginate(CLOSED_ISSUES_QUERY, {"owner": owner, "name": name})
         return [self._normalize_issue(raw) for raw in raw_issues]
 
+    async def fetch_open_issues_by_status(self, status_names: list[str]) -> list[Issue]:
+        """OPEN issues whose normalized state is one of `status_names`.
+
+        Owned extension (issue #51 part a). `fetch_candidate_issues` filters to
+        `cfg.active_states`, and `fetch_issues_by_states` only has a GitHub-side
+        form for CLOSED — so neither can see a *gate* state like `drafting` or
+        `decision`, which is exactly the set the fold poller must watch. This
+        reuses CANDIDATE_ISSUES_QUERY (already parameterized on `states`) with
+        the same client-side `issue.state` filter `fetch_candidate_issues`
+        applies, against an explicit list instead of the active set. Reading
+        gate states here has NO dispatch side-effect: dispatch eligibility still
+        keys off `active_states`, which is untouched.
+
+        An empty request list makes zero API calls (core §17.3).
+        """
+        wanted = {s.strip().lower() for s in status_names if s and s.strip()}
+        if not wanted:
+            return []
+        owner, name = self._split_repo()
+        raw_issues = await self._paginate(
+            CANDIDATE_ISSUES_QUERY, {"owner": owner, "name": name, "states": ["OPEN"]}
+        )
+        issues = [self._normalize_issue(raw) for raw in raw_issues]
+        return [issue for issue in issues if issue.state in wanted]
+
+    async def fetch_issue_comments(self, issue_number: str | int) -> list[IssueComment]:
+        """Top-level comments on one issue, with their reactions (issue #51).
+
+        Read-only. Ordered oldest-first as GitHub returns them, which is the
+        order the fold binding rule ("the most recent verdict comment preceding
+        this one") depends on.
+        """
+        owner, name = self._split_repo()
+        try:
+            number = int(issue_number)
+        except (TypeError, ValueError) as exc:
+            raise TrackerError(
+                "github_unknown_payload",
+                f"issue identifier {issue_number!r} is not a number",
+            ) from exc
+
+        nodes: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            data = await self._request(
+                ISSUE_COMMENTS_QUERY,
+                {"owner": owner, "name": name, "number": number, "after": after},
+            )
+            issue = (data.get("repository") or {}).get("issue")
+            if issue is None:
+                raise TrackerError(
+                    "github_unknown_payload",
+                    f"issue #{number} not found in repository payload",
+                )
+            conn = issue.get("comments")
+            if not isinstance(conn, dict):
+                raise TrackerError(
+                    "github_unknown_payload", "missing 'issue.comments' connection"
+                )
+            page_nodes = conn.get("nodes")
+            page_info = conn.get("pageInfo")
+            if page_nodes is None or page_info is None:
+                raise TrackerError(
+                    "github_unknown_payload", "missing comments nodes/pageInfo"
+                )
+            nodes.extend(n for n in page_nodes if isinstance(n, dict))
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if after is None:
+                raise TrackerError(
+                    "github_missing_end_cursor", "hasNextPage true but endCursor missing"
+                )
+        # PR #129 review: a comment with >100 reactions truncates the nested
+        # connection — paginate each such comment's reactions to completion so
+        # an operator signal beyond the first page is never silently missed.
+        for raw in nodes:
+            rc = raw.get("reactions") or {}
+            page = rc.get("pageInfo") or {}
+            while page.get("hasNextPage"):
+                more = await self._request(
+                    COMMENT_REACTIONS_PAGE_QUERY,
+                    {"commentId": raw.get("id"), "cursor": page.get("endCursor")},
+                )
+                rconn = ((more.get("node") or {}).get("reactions")) or {}
+                (rc.setdefault("nodes", [])).extend(rconn.get("nodes") or [])
+                page = rconn.get("pageInfo") or {}
+        return [self._normalize_comment(node) for node in nodes]
+
     async def fetch_issue_states_by_ids(self, issue_ids: list[str]) -> list[Issue]:
         """Active-run reconciliation by GraphQL node id.
 
@@ -286,6 +498,18 @@ class GitHubTracker:
         extension that needs a single write path).
         """
         await self._request(ADD_COMMENT_MUTATION, {"subjectId": issue_id, "body": body})
+
+    async def update_issue_body(self, issue_id: str, body: str) -> None:
+        """Replace an issue's body (issue #126: the fold apply step).
+
+        The only net-new tracker surface part (b) needs — the single-issue body
+        READ already exists (`fetch_issue_states_by_ids`, whose `_ISSUE_FIELDS`
+        requests `body`). Like `add_issue_comment` and the label mutations, a
+        sanctioned exception to the core §11.5 no-tracker-writes boundary: the
+        operator's `/fold` is an explicit instruction to edit the body, and the
+        caller (`fold_apply`) owns the read-compare-write around it.
+        """
+        await self._request(UPDATE_ISSUE_BODY_MUTATION, {"id": issue_id, "body": body})
 
     async def add_labels(self, issue_id: str, label_names: list[str]) -> None:
         """Apply labels to an issue (SPEC.md §4 owned extension: durable park).
@@ -337,6 +561,7 @@ class GitHubTracker:
                 continue
             number = node.get("number")
             head_sha = node.get("headRefOid")
+            node_id = node.get("id")
             refs = node.get("closingIssuesReferences") or {}
             closes = [
                 c["number"] for c in (refs.get("nodes") or [])
@@ -361,10 +586,133 @@ class GitHubTracker:
                 )
                 page = refs.get("pageInfo") or {}
             if isinstance(number, int) and isinstance(head_sha, str):
+                # `id` (issue #43): the PR NODE id, the write target for the
+                # round/cap marker comments. addComment takes a subjectId, and
+                # nothing else in this payload can supply one.
                 out.append({
+                    "id": node_id if isinstance(node_id, str) else None,
                     "number": number, "head_sha": head_sha, "closes": closes,
                 })
         return out
+
+    async def fetch_pr_comments(self, pr_number: int) -> list[IssueComment]:
+        """Top-level (conversation) comments on one PR (issue #43).
+
+        `fetch_issue_comments` resolves `repository.issue(number:)`, which is
+        null for a PR number and raises — so the round-marker reader needs its
+        own query against `repository.pullRequest(number:)`. Reactions are not
+        selected: no marker reader looks at them.
+        """
+        owner, name = self._split_repo()
+        nodes: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            data = await self._request(
+                PR_COMMENTS_QUERY,
+                {"owner": owner, "name": name, "number": int(pr_number), "after": after},
+            )
+            pr = (data.get("repository") or {}).get("pullRequest")
+            if pr is None:
+                raise TrackerError(
+                    "github_unknown_payload",
+                    f"pull request #{pr_number} not found in repository payload",
+                )
+            conn = pr.get("comments")
+            if not isinstance(conn, dict):
+                raise TrackerError(
+                    "github_unknown_payload", "missing 'pullRequest.comments' connection"
+                )
+            page_nodes = conn.get("nodes")
+            page_info = conn.get("pageInfo")
+            if page_nodes is None or page_info is None:
+                raise TrackerError(
+                    "github_unknown_payload", "missing PR comments nodes/pageInfo"
+                )
+            nodes.extend(n for n in page_nodes if isinstance(n, dict))
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if after is None:
+                raise TrackerError(
+                    "github_missing_end_cursor", "hasNextPage true but endCursor missing"
+                )
+        return [self._normalize_comment(node) for node in nodes]
+
+    async def fetch_pr_review_threads(self, pr_number: int) -> list[ReviewThread]:
+        """Review threads on one PR, with each thread's comments (issue #43).
+
+        Read-only. Both connections paginate: a PR can carry more than one page
+        of threads, and a long-running argument more than one page of comments
+        inside a thread. Truncating either would make `needs_response` read a
+        partial history — the exact class of silent wrongness the predicate must
+        not have (a missed last-bot-comment reads as "already answered").
+        """
+        owner, name = self._split_repo()
+        raw_threads: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            data = await self._request(
+                PR_REVIEW_THREADS_QUERY,
+                {"owner": owner, "name": name, "number": int(pr_number), "after": after},
+            )
+            pr = (data.get("repository") or {}).get("pullRequest")
+            if pr is None:
+                raise TrackerError(
+                    "github_unknown_payload",
+                    f"pull request #{pr_number} not found in repository payload",
+                )
+            conn = pr.get("reviewThreads")
+            if not isinstance(conn, dict):
+                raise TrackerError(
+                    "github_unknown_payload",
+                    "missing 'pullRequest.reviewThreads' connection",
+                )
+            page_nodes = conn.get("nodes")
+            page_info = conn.get("pageInfo")
+            if page_nodes is None or page_info is None:
+                raise TrackerError(
+                    "github_unknown_payload", "missing reviewThreads nodes/pageInfo"
+                )
+            raw_threads.extend(n for n in page_nodes if isinstance(n, dict))
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if after is None:
+                raise TrackerError(
+                    "github_missing_end_cursor", "hasNextPage true but endCursor missing"
+                )
+
+        threads: list[ReviewThread] = []
+        for raw in raw_threads:
+            cconn = raw.get("comments") or {}
+            comment_nodes = list(cconn.get("nodes") or [])
+            page = cconn.get("pageInfo") or {}
+            while page.get("hasNextPage"):
+                cursor = page.get("endCursor")
+                if cursor is None:
+                    raise TrackerError(
+                        "github_missing_end_cursor",
+                        "hasNextPage true but endCursor missing",
+                    )
+                more = await self._request(
+                    REVIEW_THREAD_COMMENTS_PAGE_QUERY,
+                    {"threadId": raw.get("id"), "cursor": cursor},
+                )
+                cconn = ((more.get("node") or {}).get("comments")) or {}
+                comment_nodes.extend(cconn.get("nodes") or [])
+                page = cconn.get("pageInfo") or {}
+            threads.append(
+                ReviewThread(
+                    id=str(raw.get("id") or ""),
+                    is_resolved=bool(raw.get("isResolved")),
+                    comments=tuple(
+                        self._normalize_review_comment(node)
+                        for node in comment_nodes
+                        if isinstance(node, dict)
+                    ),
+                )
+            )
+        return threads
 
     async def set_sole_status_label(
         self,
@@ -710,6 +1058,55 @@ class GitHubTracker:
             blocked_by=blocked_by,
             created_at=_parse_iso8601(raw.get("createdAt")),
             updated_at=_parse_iso8601(raw.get("updatedAt")),
+        )
+
+    @staticmethod
+    def _normalize_comment(raw: dict[str, Any]) -> IssueComment:
+        """Normalize one comment node (issue #51 part a).
+
+        `author`/`user` are null for deleted accounts, so logins stay
+        `str | None` — a null login can never match the operator allowlist,
+        which is the safe direction.
+        """
+        author = raw.get("author") or {}
+        login = author.get("login") if isinstance(author, dict) else None
+        reactions = []
+        for node in ((raw.get("reactions") or {}).get("nodes") or []):
+            if not isinstance(node, dict) or not node.get("id"):
+                continue
+            user = node.get("user") or {}
+            reactor = user.get("login") if isinstance(user, dict) else None
+            reactions.append(
+                CommentReaction(
+                    id=node["id"],
+                    content=str(node.get("content") or ""),
+                    login=reactor.strip().lower() if isinstance(reactor, str) else None,
+                    created_at=_parse_iso8601(node.get("createdAt")),
+                )
+            )
+        return IssueComment(
+            id=raw["id"],
+            body=raw.get("body") or "",
+            login=login.strip().lower() if isinstance(login, str) else None,
+            created_at=_parse_iso8601(raw.get("createdAt")),
+            reactions=tuple(reactions),
+        )
+
+    @staticmethod
+    def _normalize_review_comment(raw: dict[str, Any]) -> ReviewThreadComment:
+        """Normalize one review-thread comment node (issue #43).
+
+        Same null-author posture as `_normalize_comment`: a deleted account
+        yields `login=None`, which can match neither the bot allowlist nor the
+        Switchboard identity — the safe direction for both conjuncts of
+        `needs_response`.
+        """
+        author = raw.get("author") or {}
+        login = author.get("login") if isinstance(author, dict) else None
+        return ReviewThreadComment(
+            id=str(raw.get("id") or ""),
+            login=login.strip().lower() if isinstance(login, str) else None,
+            created_at=_parse_iso8601(raw.get("createdAt")),
         )
 
 

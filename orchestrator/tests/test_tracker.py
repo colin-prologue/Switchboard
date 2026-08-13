@@ -18,9 +18,11 @@ from orchestrator.tracker import (
     ADD_LABELS_MUTATION,
     CANDIDATE_ISSUES_QUERY,
     CLOSED_ISSUES_QUERY,
+    ISSUE_COMMENTS_QUERY,
     ISSUES_BY_IDS_QUERY,
     LABEL_ID_QUERY,
     REMOVE_LABELS_MUTATION,
+    UPDATE_ISSUE_BODY_MUTATION,
     GitHubTracker,
 )
 from orchestrator.types import TrackerConfig, TrackerError
@@ -482,6 +484,32 @@ async def test_add_issue_comment_posts_mutation():
     assert captured["body"]["variables"] == {
         "subjectId": "I_1",
         "body": "Parking this issue after 3 sessions.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_issue_body_posts_mutation_with_id_and_body():
+    """issue #126: pins the fold apply step's ONE net-new mutation shape.
+
+    GraphQL shape errors are invisible to a fake by definition (see the
+    ISSUE_COMMENTS_QUERY note at tracker.py:101-105), so the real request is
+    asserted against the stubbed transport — the same convention as
+    add_issue_comment / add_labels / remove_labels.
+    """
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request_body(request)
+        return graphql_response({"updateIssue": {"issue": {"id": "I_1"}}})
+
+    tracker, transport = make_tracker(handler)
+    await tracker.update_issue_body("I_1", "# Folded body\n\nrevised.")
+
+    assert transport.call_count == 1
+    assert captured["body"]["query"] == UPDATE_ISSUE_BODY_MUTATION
+    assert captured["body"]["variables"] == {
+        "id": "I_1",
+        "body": "# Folded body\n\nrevised.",
     }
 
 
@@ -996,3 +1024,130 @@ async def test_ambiguous_removal_readback_yields_to_closure():
         await tracker.set_sole_status_label("node-1", "status:human-review")
     assert exc.value.code == "handoff_preempted"
     assert state["remove_calls"] == 2  # withdrawal of our label on the closed issue
+
+
+# --- fetch_open_issues_by_status (issue #51 part a) ---------------------------
+#
+# Gate states (drafting/decision) are NOT active states, so fetch_candidate_issues
+# structurally never returns them, and fetch_issues_by_states is hard-wired to the
+# CLOSED startup query. This method is the only way the fold poller can see its
+# issue set — and it must apply the SAME client-side status filter.
+
+@pytest.mark.asyncio
+async def test_open_issues_by_status_filters_client_side_to_requested_states():
+    drafting = issue_node(id_="I_1", number=1, labels=["status:drafting"])
+    decision = issue_node(id_="I_2", number=2, labels=["status:decision"])
+    todo = issue_node(id_="I_3", number=3, labels=["status:todo"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return graphql_response(
+            {"repository": {"issues": {
+                "nodes": [drafting, decision, todo],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}
+        )
+
+    tracker, transport = make_tracker(handler)
+    issues = await tracker.fetch_open_issues_by_status(["drafting", "decision"])
+
+    assert [i.identifier for i in issues] == ["1", "2"]
+    body = request_body(transport.calls[0])
+    # Reuses the candidate query (already parameterized on states) against OPEN.
+    assert body["query"] == CANDIDATE_ISSUES_QUERY
+    assert body["variables"]["states"] == ["OPEN"]
+
+
+@pytest.mark.asyncio
+async def test_open_issues_by_status_empty_request_makes_no_api_calls():
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("no request expected")
+
+    tracker, transport = make_tracker(handler)
+    assert await tracker.fetch_open_issues_by_status([]) == []
+    assert transport.call_count == 0
+
+
+# --- fetch_issue_comments: EXACT query shape (issue #51 part a) ---------------
+
+@pytest.mark.asyncio
+async def test_issue_comments_query_requests_the_exact_required_fields():
+    """The reaction login field is `user`, NOT `author` (only Comment-ish types
+    carry `author`) — asking for the wrong one is a schema error at runtime, so
+    the shape is pinned here rather than discovered in production."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return graphql_response(
+            {"repository": {"issue": {"comments": {
+                "nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}}
+        )
+
+    tracker, transport = make_tracker(handler)
+    await tracker.fetch_issue_comments("42")
+
+    body = request_body(transport.calls[0])
+    assert body["query"] == ISSUE_COMMENTS_QUERY
+    assert body["variables"] == {
+        "owner": "acme", "name": "widgets", "number": 42, "after": None,
+    }
+    q = ISSUE_COMMENTS_QUERY
+    assert "$number: Int!" in q
+    assert "author { login }" in q                                # comment author
+    assert "reactions(first: 100)" in q
+    assert "nodes { id content createdAt user { login } }" in q   # reaction login
+    assert "reactionGroups" not in q   # presence alone cannot identify a login
+
+
+@pytest.mark.asyncio
+async def test_issue_comments_normalize_author_reactions_and_paginate():
+    verdict = {
+        "id": "IC_1",
+        "body": "## Triage verdict\nbody-sha1: " + "a" * 40,
+        "createdAt": "2026-08-01T10:00:00Z",
+        "author": {"login": "Verifier-Bot"},
+        "reactions": {"nodes": [
+            {"id": "RE_1", "content": "THUMBS_UP",
+             "createdAt": "2026-08-01T11:00:00Z",
+             "user": {"login": "Colin-Prologue"}},
+            {"id": "RE_2", "content": "HEART", "createdAt": None, "user": None},
+        ]},
+    }
+    orphan = {
+        "id": "IC_2", "body": "/fold", "createdAt": "2026-08-01T12:00:00Z",
+        "author": None,  # deleted account
+        "reactions": {"nodes": []},
+    }
+
+    pages = [
+        {"repository": {"issue": {"comments": {
+            "nodes": [verdict],
+            "pageInfo": {"hasNextPage": True, "endCursor": "cur1"}}}}},
+        {"repository": {"issue": {"comments": {
+            "nodes": [orphan],
+            "pageInfo": {"hasNextPage": False, "endCursor": None}}}}},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return graphql_response(pages[len(transport.calls) - 1])
+
+    tracker, transport = make_tracker(handler)
+    comments = await tracker.fetch_issue_comments(42)
+
+    assert [c.id for c in comments] == ["IC_1", "IC_2"]
+    assert comments[0].login == "verifier-bot"   # lower-cased for matching
+    assert comments[1].login is None             # deleted account never matches
+    assert [(r.id, r.content, r.login) for r in comments[0].reactions] == [
+        ("RE_1", "THUMBS_UP", "colin-prologue"),
+        ("RE_2", "HEART", None),
+    ]
+    assert request_body(transport.calls[1])["variables"]["after"] == "cur1"
+
+
+@pytest.mark.asyncio
+async def test_issue_comments_missing_issue_raises_tracker_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return graphql_response({"repository": {"issue": None}})
+
+    tracker, _ = make_tracker(handler)
+    with pytest.raises(TrackerError) as exc_info:
+        await tracker.fetch_issue_comments(999)
+    assert exc_info.value.code == "github_unknown_payload"

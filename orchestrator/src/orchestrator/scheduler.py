@@ -6,7 +6,8 @@ overridden by: spec/SPEC.md §1 (worker turns are `claude -p` invocations resume
             by session id), SPEC.md §4 owned extension: per-issue session cap
             with parking ("caps as diagnostic checkpoints" — when
             agent.max_sessions_per_issue worker sessions have been spent on one
-            issue in this process lifetime, the orchestrator releases the claim,
+            issue IN ONE ROLE (verify vs implement, issue #35 / AgDR-033) in
+            this process lifetime, the orchestrator releases the claim,
             posts ONE notification comment on the issue, preserves the
             workspace/logs, and stops re-dispatching until the issue's
             updated_at changes. This is a deliberate, documented exception to
@@ -28,9 +29,20 @@ from pathlib import Path
 import httpx
 
 from .agent_runner import AgentRunner
+from .fold import FoldSignal, detect_fold_signals
+from .fold_apply import apply_fold_signal
 from .log import log
 from .handoff import snapshot_evidence, validate_handoff
 from .prompt import render_prompt
+from .review_response import (
+    CAP_MARKER,
+    ROUND_CAP,
+    format_round_marker,
+    has_cap_comment,
+    latest_round,
+    needs_response,
+    normalize_login,
+)
 from .provider_circuit import (
     CircuitState,
     CircuitTransition,
@@ -66,10 +78,30 @@ SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
 # decision survives a process restart (AgDR-002 weakest point → resolved).
 PARK_LABEL = "status:parked"
 
-# Claim-visibility status labels (issue #14 / AgDR-010). The orchestrator OWNS
-# exactly these three status labels — gate/handoff/triage status labels belong
-# to humans, worker agents, and the verifier respectively and are NEVER written
-# here. `status:in-progress` is board visibility only, NOT a lock (a label
+# Session-budget roles (issue #35 / AgDR-033). `max_sessions_per_issue` is
+# accounted PER ROLE, not per issue: a `status:triage` dispatch runs a VERIFIER
+# session (the triage rubric), every other active state runs an IMPLEMENTER
+# session. Without the split, adversarial verify passes eat the implementation
+# budget and the ticket parks on arrival at `status:todo` (live instances: #30,
+# #15, #57). The cap VALUE is unchanged — each role gets the full budget.
+VERIFY_ROLE = "verify"
+IMPLEMENT_ROLE = "implement"
+VERIFY_STATES = frozenset({"triage"})
+
+
+def session_role(state: str) -> str:
+    """The session role a dispatch in `state` runs as (issue #35 / AgDR-033)."""
+    return VERIFY_ROLE if state.lower() in VERIFY_STATES else IMPLEMENT_ROLE
+
+# Claim-visibility status labels (issue #14 / AgDR-010) plus the terminal
+# handoff label (issue #61 / AgDR-028). The orchestrator owns all four status
+# labels it touches: `status:todo`/`status:in-progress` (plus PARK_LABEL above)
+# track the claim, and `status:human-review` is the single terminal transition
+# it performs ITSELF after provider-turn success + validated
+# `.run/handoff-evidence.json` (`handoff.py`) — workers write evidence, never
+# labels. Gate labels (`drafting`, `plan-review`, `blocked`) stay with humans
+# and the triage labels with the verifier agent; neither is written here.
+# `status:in-progress` is board visibility only, NOT a lock (a label
 # cannot compare-and-swap; cross-runner mutual exclusion is issue #15). It is
 # applied when a `todo` issue is first claimed and cleared when the claim dies.
 TODO_LABEL = "status:todo"
@@ -85,6 +117,42 @@ CLAIM_RELEASE_COMMENT = (
     "holding it, so its status label was reverted to `" + TODO_LABEL + "` to "
     "keep the board honest. It will be re-dispatched on a future poll if it is "
     "still eligible."
+)
+
+# Fold-signal detection (issue #51 part a). The gate states a fold can target —
+# NOT active states, so `fetch_candidate_issues` structurally never returns them
+# and the poller needs the tracker's `fetch_open_issues_by_status`.
+FOLD_POLL_STATES = ["drafting", "decision"]
+
+# Sub-poll cadence: an operator's 👍 is a human-latency event, so polling it at
+# the dispatch interval (30s) would spend one issue-comments query per gate
+# issue per tick for nothing. Ten minutes is the low-frequency floor; detection
+# is read-only, so a late signal costs nothing but latency.
+FOLD_POLL_INTERVAL_MS = 600000
+
+# Review-response triggering (issue #43 / AgDR-037). The ONE gate state whose
+# PRs can still be accumulating bot review comments: a `status:human-review`
+# issue is waiting at Gate C, which is exactly when Codex reviews land.
+REVIEW_POLL_STATES = ["human review"]
+
+# Same cadence, same reasoning as the fold sub-poll: a bot review is a
+# minutes-latency event and the sub-poll is bounded to human-review issues'
+# PRs, so a late trigger costs latency and nothing else.
+REVIEW_POLL_INTERVAL_MS = 600000
+
+# Posted once per PR when the durable round cap is reached. At the cap the
+# orchestrator STOPS RELABELING — it does not park (no active
+# `human-review -> parked` edge exists, and `_park` clears only
+# IN_PROGRESS_LABEL, which would strand a dual-label state).
+REVIEW_CAP_COMMENT = (
+    "{marker}\n"
+    "**Switchboard reached its review-response round cap on this PR "
+    "({cap} rounds).** Unresolved bot review threads remain, but no further "
+    "response session will be dispatched automatically — the loop is bounded "
+    "so an acknowledgment-happy reviewer cannot drive it forever. Review the "
+    "remaining threads by hand, or move the issue back to `" + TODO_LABEL +
+    "` to dispatch another session.\n\n"
+    "_Posted by Switchboard (AI orchestrator)._"
 )
 
 CONTINUATION_PROMPT = (
@@ -106,6 +174,11 @@ class RunningEntry:
     issue: Issue
     provider_id: str
     stall_timeout_ms: int
+    session_key: tuple[str, str]           # (issue id, session role) — the
+                                           # budget this session was drawn from,
+                                           # frozen at dispatch so a mid-session
+                                           # state change cannot misroute the
+                                           # failure refund (issue #35)
     session_id: str | None = None
     last_event_at: datetime | None = None  # stall-detection anchor (§8.5)
     retry_attempt: int | None = None
@@ -175,7 +248,12 @@ class Orchestrator:
         self._circuit_refusals: set[tuple[str, str, int]] = set()
 
         # owned extension state (SPEC.md §4 session cap / parking)
-        self.sessions_per_issue: dict[str, int] = {}
+        # Keyed by (issue id, session role) — NOT by issue id alone (issue #35 /
+        # AgDR-032). Verifier and implementer sessions draw on separate budgets,
+        # so `max_sessions_per_issue` verify passes leave the implementation
+        # budget untouched. Read it through `sessions_for_issue()`; a bare-id
+        # lookup is always a miss.
+        self.sessions_per_issue: dict[tuple[str, str], int] = {}
         self.parked: set[str] = set()  # issue ids DURABLY parked this run (label
                                        # write confirmed); counter-reset bookkeeping
                                        # only — the durable state is the PARK_LABEL
@@ -191,6 +269,21 @@ class Orchestrator:
         # it does not reconstruct transition edges.
         self._requires_marker: dict[str, list[str]] = load_requires_marker()
         self._marker_refused: set[str] = set()  # refusal comment posted once per issue
+
+        # Fold-signal dedupe (issue #51 part a, rewired by #126 part b). Per
+        # PROCESS LIFETIME, keyed on the EFFECTIVE decision; a restart re-emits
+        # every still-standing signal, which is accepted because part (b)'s
+        # durable fold-applied marker on the issue is the real, cross-restart
+        # dedupe. A key is written only after apply reaches a DECIDED outcome.
+        self.fold_signals_seen: set[str] = set()
+        self._fold_last_poll_at: datetime | None = None
+
+        # Review-response triggering (issue #43 / AgDR-037). No durable state
+        # lives here: the round count is a marker comment ON THE PR, re-read
+        # every poll, so the cap survives a restart by construction. These two
+        # are cadence and log-once bookkeeping only.
+        self._review_last_poll_at: datetime | None = None
+        self._review_disabled_logged = False
 
         self._stopping = False
         self._workflow_broken: str | None = None  # §5.5 dispatch block reason
@@ -242,6 +335,26 @@ class Orchestrator:
         cfg = self._cfg
         assert cfg is not None
         return self._runner_selector.select(cfg, issue)
+
+    # -- per-role session budgets (issue #35 / AgDR-033) ------------------------
+
+    def sessions_for_issue(self, issue_id: str) -> dict[str, int]:
+        """Sessions spent on `issue_id`, per role: `{"verify": 2}`.
+
+        The single read surface over `sessions_per_issue`'s composite key —
+        `sessions_per_issue.get(issue_id)` is a silent miss, so every reader
+        (including tests) goes through here or builds the tuple explicitly."""
+        return {
+            role: spent
+            for (iid, role), spent in self.sessions_per_issue.items()
+            if iid == issue_id
+        }
+
+    def _reset_issue_sessions(self, issue_id: str) -> None:
+        """Drop EVERY role's counter for one issue (unpark: both budgets are
+        restored, matching the park comment's promise)."""
+        for key in [k for k in self.sessions_per_issue if k[0] == issue_id]:
+            del self.sessions_per_issue[key]
 
     def _provider_circuit(self, provider_id: str) -> ProviderCircuit:
         circuit = self.provider_circuits.get(provider_id)
@@ -325,12 +438,18 @@ class Orchestrator:
             await self._startup_in_progress_sweep()
 
             while not self._stopping:
+                # Clear BEFORE the tick (codex review, PR #134): a wake-up
+                # raised DURING the tick — e.g. the review sub-poll relabeling
+                # an issue to todo — must survive into the wait below, or the
+                # owed dispatch stalls a full polling interval. A signal set
+                # during the previous wait has already been consumed by waking
+                # that wait, so clearing here drops nothing.
+                self._tick_wakeup.clear()
                 try:
                     await self._tick()
                 except Exception as exc:  # a tick must never kill the service (§14.2)
                     log("tick error", error=repr(exc))
                 interval = (self._cfg.polling_interval_ms() if self._cfg else 30000) / 1000
-                self._tick_wakeup.clear()
                 try:
                     await asyncio.wait_for(self._tick_wakeup.wait(), timeout=interval)
                 except asyncio.TimeoutError:
@@ -424,6 +543,270 @@ class Orchestrator:
             if self._should_dispatch(issue):
                 await self._dispatch(issue, attempt=None)
 
+        await self._poll_fold_signals(tracker)
+        await self._poll_review_responses(tracker)
+
+    # -- review-response sub-poll (issue #43 / AgDR-037) ------------------------
+
+    async def _poll_review_responses(self, tracker: GitHubTracker) -> list[str]:
+        """Relabel `human-review -> todo` for issues whose PR owes a bot reply.
+
+        AgDR-034-shaped: bounded (only `status:human-review` issues' PRs),
+        config-gated, per-issue reads — but unlike its prior art this one is
+        WRITE-BEARING: it writes the round marker, relabels, may post the cap
+        comment, and resets the issue's session counters. Returns the
+        identifiers it triggered (tests and logs; nothing else consumes it).
+
+        No new state and no new session role: the re-dispatched session is an
+        ordinary implement-role session on `status:todo`, and the response
+        behaviour lives entirely in the prompt addendum.
+        """
+        cfg = self._cfg
+        assert cfg is not None
+
+        # GATE FIRST — BOTH checks precede the issue fetch. The fold poll this
+        # is modelled on fetches first; copying that shape verbatim would spend
+        # a repository-issues query on a disabled feature.
+        bot_logins = cfg.review_response().bot_logins
+        if not bot_logins:
+            return []
+        self_login = normalize_login(os.environ.get("SB_APP_BOT_LOGIN"))
+        if self_login is None:
+            # Reachable via the documented GITHUB_TOKEN dogfood path, under
+            # which worker replies are authored by the OPERATOR's login and no
+            # login-based identification can work. Same zero-cost posture as an
+            # empty allowlist, but LOUD once — a silently-disabled responder is
+            # indistinguishable from "the bot hasn't reviewed yet".
+            if not self._review_disabled_logged:
+                self._review_disabled_logged = True
+                log("review-response disabled: SB_APP_BOT_LOGIN is unset; the "
+                    "feature requires the App identity (bot_logins is "
+                    "configured but cannot be acted on)",
+                    bot_logins=",".join(bot_logins))
+            return []
+
+        now = datetime.now(timezone.utc)
+        if self._review_last_poll_at is not None:
+            elapsed_ms = (now - self._review_last_poll_at).total_seconds() * 1000
+            if elapsed_ms < REVIEW_POLL_INTERVAL_MS:
+                return []
+        self._review_last_poll_at = now
+
+        try:
+            issues = await tracker.fetch_open_issues_by_status(REVIEW_POLL_STATES)
+        except TrackerError as exc:
+            log("review poll: human-review fetch failed; skipping this round",
+                error=str(exc))
+            return []
+
+        triggered: list[str] = []
+        for issue in issues:
+            if self._stopping:
+                break
+            if PARK_LABEL in issue.labels:
+                # `_park` leaves the status label in place, so a hand-parked
+                # issue still shows human-review. Triggering it would burn a
+                # round on `_should_dispatch`'s park refusal.
+                log("review poll: issue is parked; skipping",
+                    issue_identifier=issue.identifier)
+                continue
+            try:
+                if await self._maybe_trigger_review_response(
+                        tracker, issue, bot_logins, self_login):
+                    triggered.append(issue.identifier)
+            except TrackerError as exc:
+                log("review poll: issue failed; skipping",
+                    issue_identifier=issue.identifier, error=str(exc))
+        return triggered
+
+    async def _bind_pr(
+        self, tracker: GitHubTracker, issue: Issue
+    ) -> dict | None:
+        """The one open PR bound to `issue`, or None (issue #43 binding rule).
+
+        The authoritative binding is the tracker's structured query — the head
+        ref the handoff path constructs, plus `closingIssuesReferences` — NOT
+        prose `Closes #N` and NOT `.run/handoff-evidence.json` (workspace-local;
+        it does not survive workspace recreation). Zero open PRs is the normal
+        post-merge state and skips QUIETLY; the other two failure modes are
+        UNBINDABLE and fail loud, never a silent drop.
+        """
+        head_ref = f"switchboard/issue-{issue.identifier}"
+        prs = await tracker.fetch_open_prs(head_ref)
+        if not prs:
+            log("review poll: no open PR for branch; skipping",
+                issue_identifier=issue.identifier, head_ref=head_ref)
+            return None
+        if len(prs) > 1:
+            log("review poll: UNBINDABLE — more than one open PR on the branch",
+                issue_identifier=issue.identifier, head_ref=head_ref,
+                unbindable=True, prs=",".join(str(p.get("number")) for p in prs))
+            return None
+        pr = prs[0]
+        try:
+            issue_number = int(issue.identifier)
+        except (TypeError, ValueError):
+            log("review poll: UNBINDABLE — issue identifier is not a number",
+                issue_identifier=issue.identifier, unbindable=True)
+            return None
+        if issue_number not in (pr.get("closes") or []):
+            log("review poll: UNBINDABLE — the open PR does not close this issue",
+                issue_identifier=issue.identifier, head_ref=head_ref,
+                unbindable=True, pr_number=pr.get("number"),
+                closes=",".join(str(n) for n in (pr.get("closes") or [])))
+            return None
+        if not pr.get("id"):
+            log("review poll: UNBINDABLE — PR node id missing; no write target",
+                issue_identifier=issue.identifier, unbindable=True,
+                pr_number=pr.get("number"))
+            return None
+        return pr
+
+    async def _maybe_trigger_review_response(
+        self,
+        tracker: GitHubTracker,
+        issue: Issue,
+        bot_logins: tuple[str, ...],
+        self_login: str,
+    ) -> bool:
+        pr = await self._bind_pr(tracker, issue)
+        if pr is None:
+            return False
+        pr_number, pr_id = pr["number"], pr["id"]
+
+        threads = await tracker.fetch_pr_review_threads(pr_number)
+        owed = [
+            t for t in threads
+            if needs_response(t, bot_logins=bot_logins, self_login=self_login)
+        ]
+        if not owed:
+            return False
+
+        comments = await tracker.fetch_pr_comments(pr_number)
+        rounds, _ = latest_round(comments, self_login=self_login)
+        if rounds >= ROUND_CAP:
+            if not has_cap_comment(comments, self_login=self_login):
+                await tracker.add_issue_comment(
+                    pr_id,
+                    REVIEW_CAP_COMMENT.format(marker=CAP_MARKER, cap=ROUND_CAP),
+                )
+                log("review poll: round cap reached; posted operator comment",
+                    issue_identifier=issue.identifier, pr_number=pr_number,
+                    rounds=rounds, owed=len(owed))
+            return False
+
+        # The marker is written BEFORE the relabel: a crash between them burns
+        # a round harmlessly, while the reverse order hands out a free round the
+        # cap can never account for.
+        await tracker.add_issue_comment(
+            pr_id, format_round_marker(rounds + 1, bot_logins, self_login)
+        )
+        # The per-role session counter is cumulative across the issue's life and
+        # is otherwise cleared only by unpark, so the multi-session PRs that
+        # attract the most findings would arrive here at `spent == cap` and park
+        # on the first response dispatch. Reset every role (the verify budget is
+        # unreachable from `todo`, so dropping it is harmless). The reset runs
+        # BEFORE the relabel (codex review, PR #134): the relabel can land on
+        # GitHub yet raise commit-ambiguous (`handoff_swap_uncertain`) out of
+        # its verification reads — resetting after the await would then leave
+        # the stale counter in place and the next poll would park the
+        # now-`todo` issue instead of dispatching the owed responder. A reset
+        # with a relabel that truly failed is harmless: the issue stays at
+        # human-review and the next trigger resets again.
+        self._reset_issue_sessions(issue.id)
+        await tracker.set_sole_status_label(
+            issue.id, TODO_LABEL, expected_status=(HUMAN_REVIEW_LABEL,)
+        )
+        self._tick_wakeup.set()
+        log("review-response triggered",
+            issue_id=issue.id, issue_identifier=issue.identifier,
+            pr_number=pr_number, round=rounds + 1, owed=len(owed),
+            threads=",".join(t.id for t in owed))
+        return True
+
+    # -- fold-signal sub-poll (issue #51 part a) --------------------------------
+
+    async def _poll_fold_signals(self, tracker: GitHubTracker) -> list[FoldSignal]:
+        """Detect new operator fold signals on gate-state issues and apply them.
+
+        Runs at the tail of a tick so it can never delay dispatch, and at
+        FOLD_POLL_INTERVAL_MS rather than every tick. Disabled (zero API calls)
+        when `fold.operator_logins` is empty, which is the default.
+
+        Detection (part a) is read-only; `apply_fold_signal` (part b, issue
+        #126) is what writes — and only for an APPROVED signal that survives
+        binding, marker-first, and the before-digest comparison. Apply performs
+        its OWN thread re-read per signal, so a signal sees the writes earlier
+        signals in this same batch performed.
+        """
+        cfg = self._cfg
+        assert cfg is not None
+        operators = cfg.fold().operator_logins
+        if not operators:
+            return []
+
+        now = datetime.now(timezone.utc)
+        if self._fold_last_poll_at is not None:
+            elapsed_ms = (now - self._fold_last_poll_at).total_seconds() * 1000
+            if elapsed_ms < FOLD_POLL_INTERVAL_MS:
+                return []
+        self._fold_last_poll_at = now
+
+        try:
+            issues = await tracker.fetch_open_issues_by_status(FOLD_POLL_STATES)
+        except TrackerError as exc:
+            log("fold poll: gate-issue fetch failed; skipping this round",
+                error=str(exc))
+            return []
+
+        bot_login = os.environ.get("SB_APP_BOT_LOGIN") or None
+        fresh: list[FoldSignal] = []
+        for issue in issues:
+            if self._stopping:
+                break
+            try:
+                comments = await tracker.fetch_issue_comments(issue.identifier)
+            except TrackerError as exc:
+                log("fold poll: comment fetch failed; skipping issue",
+                    issue_id=issue.id, issue_identifier=issue.identifier,
+                    error=str(exc))
+                continue
+            signals, rejected = detect_fold_signals(
+                issue_id=issue.id,
+                issue_identifier=issue.identifier,
+                comments=comments,
+                operator_logins=operators,
+                bot_login=bot_login,
+            )
+            for bad in rejected:
+                log("fold signal rejected: unknown body-sha1",
+                    issue_identifier=bad.issue_identifier,
+                    comment_id=bad.comment_id, operator=bad.operator_login,
+                    body_sha1=bad.body_sha1, reason=bad.reason)
+            for signal in signals:
+                # Dedupe on the EFFECTIVE decision, not the mutable node id
+                # (PR #129 review): an edited or re-promoted command re-emits.
+                key = signal.dedupe_key()
+                if key in self.fold_signals_seen:
+                    continue
+                log("fold signal detected", **signal.log_fields())
+                # Issue #126 (part b): consumption moved OUT of detection to
+                # after the DECIDED outcome. A transient tracker failure on a
+                # read, the body write, or the marker post leaves the signal
+                # re-emittable so the next poll resumes it; every decided
+                # outcome (applied, refused, vetoed, skipped, diverged,
+                # terminal relabel failure) consumes.
+                outcome = await apply_fold_signal(
+                    tracker, signal, issue=issue, bot_login=bot_login
+                )
+                log("fold apply", issue_identifier=signal.issue_identifier,
+                    verdict_comment_id=signal.verdict_comment_id,
+                    **outcome.log_fields())
+                if outcome.consume:
+                    self.fold_signals_seen.add(key)
+                fresh.append(signal)
+        return fresh
+
     @staticmethod
     def _sort_for_dispatch(issues: list[Issue]) -> list[Issue]:
         """core §8.2 sort: priority asc (null last), created_at oldest, identifier."""
@@ -496,7 +879,7 @@ class Orchestrator:
         if issue.id in self.parked:
             self.parked.discard(issue.id)
             self._park_notified.discard(issue.id)
-            self.sessions_per_issue.pop(issue.id, None)
+            self._reset_issue_sessions(issue.id)
             log("issue unparked (status:parked label removed)",
                 issue_id=issue.id, issue_identifier=issue.identifier)
         if not self._state_slots_available(issue.state):
@@ -541,10 +924,19 @@ class Orchestrator:
         self._marker_refused.discard(issue.id)  # eligible again -> re-arm the notice
         # The cap is always positive (workflow.py coerces invalid values back
         # to the default) — parking cannot be configured off.
+        # The cap is per ROLE (issue #35 / AgDR-033): the role is derived from the
+        # dispatch-time state and frozen for the whole session, so the verify
+        # passes a ticket spent at `status:triage` do not shrink the implementer
+        # budget it gets at `status:todo`.
         cap = cfg.agent().max_sessions_per_issue
-        spent = self.sessions_per_issue.get(issue.id, 0)
+        role = session_role(issue.state)
+        session_key = (issue.id, role)
+        spent = self.sessions_per_issue.get(session_key, 0)
         if spent >= cap:
-            await self._park(issue, f"session cap reached ({spent}/{cap})")
+            await self._park(
+                issue,
+                f"{role} budget exhausted ({spent}/{cap} {role} sessions)",
+            )
             return DispatchOutcome(DispatchResult.REFUSED, runner.provider_id)
 
         provider_id = runner.provider_id
@@ -623,14 +1015,15 @@ class Orchestrator:
         entry = RunningEntry(task=task, identifier=issue.identifier, issue=issue,
                              provider_id=provider_id,
                              stall_timeout_ms=runner.stall_timeout_ms,
+                             session_key=session_key,
                              retry_attempt=attempt,
                              circuit_probe_token=permit.probe_token)
         self.running[issue.id] = entry
         self._cancel_retry(issue.id)
-        self.sessions_per_issue[issue.id] = spent + 1
+        self.sessions_per_issue[session_key] = spent + 1
         log("dispatched", issue_id=issue.id, issue_identifier=issue.identifier,
             provider_id=provider_id, attempt=attempt,
-            session_number=spent + 1, outcome="started")
+            session_role=role, session_number=spent + 1, outcome="started")
         task.add_done_callback(
             lambda t, iid=issue.id: self._on_worker_done(iid, t))
         return DispatchOutcome(DispatchResult.STARTED, provider_id)
@@ -840,7 +1233,7 @@ class Orchestrator:
             )
             self._log_circuit_transition(transition, entry)
             if circuit.is_circuit_failure(failure_class):
-                self._refund_issue_session(issue_id)
+                self._refund_issue_session(entry.session_key)
                 self.provider_waiting[issue_id] = ProviderWaitEntry(
                     identifier=entry.identifier,
                     issue=entry.issue,
@@ -862,12 +1255,15 @@ class Orchestrator:
                 outcome="failed", failure_class=failure_class.value,
                 error=str(exc))
 
-    def _refund_issue_session(self, issue_id: str) -> None:
-        spent = self.sessions_per_issue.get(issue_id, 0)
+    def _refund_issue_session(self, session_key: tuple[str, str]) -> None:
+        """Give back the session a provider-circuit failure burned. Refunds the
+        role budget the session was DRAWN from (`RunningEntry.session_key`), not
+        whatever role the issue's state implies now (issue #35)."""
+        spent = self.sessions_per_issue.get(session_key, 0)
         if spent <= 1:
-            self.sessions_per_issue.pop(issue_id, None)
+            self.sessions_per_issue.pop(session_key, None)
         else:
-            self.sessions_per_issue[issue_id] = spent - 1
+            self.sessions_per_issue[session_key] = spent - 1
 
     async def _resume_provider_waiters(self, candidates: list[Issue]) -> None:
         if not self.provider_waiting:
@@ -1335,8 +1731,9 @@ class Orchestrator:
             f"**Switchboard parked this issue** — {reason}.\n\n"
             f"The orchestrator will not dispatch it again while it carries the "
             f"`{PARK_LABEL}` label. Remove that label (or move the issue off "
-            f"*Parked* on the board) to re-dispatch — the session counter resets "
-            f"on unpark. The per-issue workspace is preserved for diagnosis at "
+            f"*Parked* on the board) to re-dispatch — BOTH session counters "
+            f"(`{VERIFY_ROLE}` and `{IMPLEMENT_ROLE}`) reset on unpark. The "
+            f"per-issue workspace is preserved for diagnosis at "
             f"`{wsm.path_for(issue.identifier)}`."
         )
         # Hold the claim while the tracker writes settle so a poll tick cannot
