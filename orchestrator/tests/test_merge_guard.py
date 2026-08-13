@@ -377,6 +377,23 @@ def test_ansi_c_in_benign_value_is_allowed(tmp_path):
     assert r.returncode == 0
 
 
+# --- literal $' inside ordinary quotes is text, not syntax (round 17) ---------
+
+@pytest.mark.parametrize("command", [
+    "gh pr create --body \"mention $' syntax\"",
+    "gh pr create --body 'literal $\"x\" here'",
+    "gh pr comment 5 --body \"the $'form' is neat\"",
+])
+def test_quoted_ansi_c_markers_are_literal(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0
+
+
+def test_unterminated_bare_ansi_c_denies(tmp_path):
+    r = _run_bash("gh $'pr merge 12", tmp_path)
+    assert r.returncode == 2
+
+
 # --- line continuations, non-push config, alias smuggling (round 9, PR #136) --
 
 @pytest.mark.parametrize("command", [

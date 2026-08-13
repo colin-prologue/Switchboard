@@ -48,20 +48,65 @@ GH_PR_DENIED_VERBS = {
 }
 
 
-_ANSI_C_RE = re.compile(r"\$'((?:\\.|[^'\\])*)'")
-
-
-def _decode_ansi_c(match: "re.Match[str]") -> str:
-    """Rewrite bash ANSI-C quoting `$'...'` as a plain single-quoted word with
-    the escapes decoded, so tokens match what bash hands the CLI (codex review
-    r16, PR #136 — `gh $'pr' merge` and `$'\\x70ush'` execute denied verbs
-    while shlex left `$pr` in the token). unicode_escape covers every
-    letter-producing bash escape (\\xHH, \\nnn octal, \\uXXXX, \\UXXXXXXXX);
-    \\e/\\E are mapped first; \\cX yields only control chars, which cannot
-    spell a verb."""
-    body = match.group(1).replace("\\e", "\\x1b").replace("\\E", "\\x1b")
+def _decode_ansi_c(body: str) -> str:
+    """Decode a bash ANSI-C `$'...'` body into a plain single-quoted word, so
+    tokens match what bash hands the CLI (codex review r16, PR #136 —
+    `gh $'pr' merge` and `$'\\x70ush'` execute denied verbs while shlex left
+    `$pr` in the token). unicode_escape covers every letter-producing bash
+    escape (\\xHH, \\nnn octal, \\uXXXX, \\UXXXXXXXX); \\e/\\E are mapped
+    first; \\cX yields only control chars, which cannot spell a verb."""
+    body = body.replace("\\e", "\\x1b").replace("\\E", "\\x1b")
     text = codecs.decode(body, "unicode_escape")
     return "'" + text.replace("'", "'\\''") + "'"
+
+
+def _normalize_quoting(command: str) -> str:
+    """Rewrite the bash quoting forms shlex does not know, QUOTE-AWARE: a
+    `$'` or `$"` is shell syntax only OUTSIDE ordinary quotes — inside double
+    quotes it is literal text (codex review r17, PR #136: a PR body
+    mentioning `$'` must not trip the undecodable-quoting denial). An
+    unterminated unquoted `$'` raises so the caller denies in-band."""
+    out: list[str] = []
+    state = ""  # "" outside, "'" in single, '"' in double
+    i = 0
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if state == "":
+            if c == "\\":
+                out.append(command[i:i + 2])
+                i += 2
+                continue
+            if c == "$" and command[i + 1:i + 2] == "'":
+                j = i + 2
+                while j < n and command[j] != "'":
+                    j += 2 if command[j] == "\\" else 1
+                if j >= n:
+                    raise ValueError("unterminated ANSI-C quoting")
+                out.append(_decode_ansi_c(command[i + 2:j]))
+                i = j + 1
+                continue
+            if c == "$" and command[i + 1:i + 2] == '"':
+                # locale quoting is plain double-quoting
+                out.append('"')
+                state = '"'
+                i += 2
+                continue
+            if c in ("'", '"'):
+                state = c
+        elif state == "'":
+            if c == "'":
+                state = ""
+        else:  # in double quotes
+            if c == "\\":
+                out.append(command[i:i + 2])
+                i += 2
+                continue
+            if c == '"':
+                state = ""
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def _tokenize(command: str) -> list[str]:
@@ -73,13 +118,7 @@ def _tokenize(command: str) -> list[str]:
     # newline glued to the next token (`gh \<NL>pr merge` -> "\npr" — codex
     # review r9, PR #136); match bash before tokenizing
     command = command.replace("\\\n", "")
-    # bash quoting forms shlex does not know (codex review r16): ANSI-C
-    # $'...' decodes escapes; locale $"..." is plain double-quoting. A
-    # $' that survives substitution is quoting we could not decode — raise
-    # so the caller denies (never allow what bash may still parse).
-    command = _ANSI_C_RE.sub(_decode_ansi_c, command).replace('$"', '"')
-    if "$'" in command:
-        raise ValueError("undecodable ANSI-C quoting")
+    command = _normalize_quoting(command)
     try:
         return shlex.split(command)
     except ValueError:
