@@ -53,6 +53,7 @@ from .runner_selector import (
     ClaudeOnlyRunnerSelector,
     MixedAssignmentRefused,
 )
+from .singleton import acquire_singleton_lock
 from .tracker import GitHubTracker
 from .transitions import load_requires_marker
 from .types import (
@@ -237,6 +238,9 @@ class Orchestrator:
         self._defn = None
         self._cfg: Config | None = None
         self._workflow_mtime: float | None = None
+        # Held for the process lifetime once run() takes it (issue #130); the
+        # fd IS the lock, so it is never closed while the orchestrator lives.
+        self._singleton_lock_fd: int | None = None
 
         # core §4.1.8 runtime state
         self.running: dict[str, RunningEntry] = {}
@@ -425,6 +429,11 @@ class Orchestrator:
     # -- service lifecycle (core §16.1) -----------------------------------------
 
     async def run(self) -> None:
+        # FIRST statement (issue #130): one orchestrator per project checkout.
+        # Before the workflow load, so a second launch refuses on the lock alone
+        # — not after burning a config parse and a credential build. The fd is
+        # RETAINED for the process lifetime: closing it releases the flock.
+        self._singleton_lock_fd = acquire_singleton_lock(self.workflow_path)
         self._load_workflow(initial=True)  # startup validation failure aborts (§6.3)
         cfg = self._cfg
         assert cfg is not None

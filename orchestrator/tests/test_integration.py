@@ -932,6 +932,37 @@ async def test_verify_budget_exhaustion_park_comment_names_the_budget(
     assert tracker.labels_added == [("node-1", ("status:parked",))]
 
 
+async def test_verify_unpark_resets_the_verify_counter(tmp_path, monkeypatch):
+    """Twin of the IMPLEMENT_ROLE unpark assertion (issue #130).
+
+    Counters are per-role, so the unpark reset has to be asserted per-role too:
+    an unparked verify issue must re-dispatch as a FRESH verify session 1, not
+    a continuation of the pre-park count — which would re-park it immediately,
+    the sticky-re-park shape the 2026-08-09 incident showed.
+    """
+    tmpl = WORKFLOW_TMPL.replace(
+        'active_states: ["todo", "in progress"]',
+        'active_states: ["triage", "todo", "in progress"]')
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+    issue = make_issue(1, "triage")          # verifier never routes a verdict
+    tracker.candidates = [issue]
+    tracker.states = {"node-1": issue}
+
+    await orch._tick()
+    await wait_for(lambda: "node-1" in orch.parked)
+    assert orch.sessions_for_issue("node-1") == {VERIFY_ROLE: 2}
+
+    # human removes status:parked -> unparked, verify counter reset
+    unparked = make_issue(1, "triage")       # labels back to just status:triage
+    tracker.candidates = [unparked]
+    tracker.states = {"node-1": make_issue(1, "human review")}
+    await orch._tick()
+
+    assert "node-1" not in orch.parked
+    assert orch.sessions_for_issue("node-1") == {VERIFY_ROLE: 1}
+    await wait_for(lambda: not orch.running)
+
+
 async def test_next_turn_token_refresh_remains_reconcilable(tmp_path, monkeypatch):
     """A prior success cannot shield a worker preparing its next provider turn."""
     tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 2")
