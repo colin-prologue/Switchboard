@@ -171,6 +171,9 @@ class FakeProject:
                 item["field_updated_at"] = None  # the value node is gone
         self.option_writes.append((item_id, ""))
 
+    def status_labels(self, number: int) -> list[str]:
+        return [l for l in self._by_issue(number)["labels"] if l.startswith("status:")]
+
     def set_status_label(self, number: int, add: str, remove) -> None:
         item = self._by_issue(number)
         labels = [l for l in item["labels"] if l not in set(remove)]
@@ -664,3 +667,37 @@ def test_poll_skips_indeterminate_items():
     assert decisions[0].action == SKIP
     assert "indeterminate" in decisions[0].reason
     assert fake.option_writes == []
+
+
+# --- honored-drag marker effects + TOCTOU guard (codex review, PR #141) -------
+
+
+def test_honored_drag_applies_edge_marker_effects():
+    # decision -> drafting carries remove_marker: gate:triage-passed
+    # (workflow/transitions.yml); the honored drag must clear it.
+    from orchestrator.status_board import marker_effects
+    assert "gate:triage-passed" in marker_effects("decision", "drafting")
+    fake = FakeProject([
+        _item(5, ["status:decision", "gate:triage-passed"], is_issue=True,
+              option="Drafting",
+              field_updated_at="2026-08-13T09:00:00Z",
+              label_events=["2026-08-13T08:00:00Z"]),
+    ])
+    run_poll(fake, dry_run=False)
+    (write,) = fake.label_writes
+    assert write[1] == "status:drafting"
+    assert "gate:triage-passed" in write[2]
+
+
+def test_label_write_skips_when_labels_changed_mid_poll(capsys):
+    class RacyFake(FakeProject):
+        def status_labels(self, number):
+            return ["status:parked"]  # concurrent human move
+    fake = RacyFake([
+        _item(5, ["status:decision"], is_issue=True, option="Drafting",
+              field_updated_at="2026-08-13T09:00:00Z",
+              label_events=["2026-08-13T08:00:00Z"]),
+    ])
+    run_poll(fake, dry_run=False)
+    assert fake.label_writes == []
+    assert "changed mid-poll" in capsys.readouterr().out

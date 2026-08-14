@@ -187,6 +187,34 @@ def is_honored_drag(
     return (normalize_state(from_state), normalize_state(to_state)) in pairs
 
 
+def marker_effects(
+    from_state: str, to_state: str, edges: Sequence[dict] | None = None
+) -> tuple[str, ...]:
+    """`remove_marker` values of the active edges matching (from, to).
+
+    A drag that takes an edge takes the edge's side effects too (codex
+    review, PR #141): `decision -> drafting` carries a `remove_marker`, and
+    honoring the drag without it leaves a stale provenance marker that lets
+    a later `status:todo` edit satisfy the scheduler's gate without a new
+    triage pass. Marker names come from the YAML only (the no-literal
+    drift guard in test_transitions.py). `add_marker` has no honored-drag
+    consumer (its only row is a verifier edge excluded from the honored
+    set) and is intentionally not applied here.
+    """
+    rows = load_edges() if edges is None else edges
+    src, dst = normalize_state(from_state), normalize_state(to_state)
+    out: list[str] = []
+    for edge in rows:
+        if edge.get("active", True) is False or edge.get("degraded") is True:
+            continue
+        if (normalize_state(str(edge.get("from", ""))) == src
+                and normalize_state(str(edge.get("to", ""))) == dst):
+            rm = edge.get("remove_marker")
+            if isinstance(rm, str) and rm and rm not in out:
+                out.append(rm)
+    return tuple(out)
+
+
 # --- decisions ---------------------------------------------------------------
 
 # Action verbs. `mirror` and `snap_back` are the SAME write (field := label);
@@ -346,7 +374,8 @@ def poll_decision(
             LABEL_WRITE,
             f"honored drag {label_state!r} -> {field_state!r}",
             label=label_for_state(field_state),
-            remove_labels=(label_for_state(label_state),),
+            remove_labels=(label_for_state(label_state),)
+            + marker_effects(label_state, field_state),
             from_state=label_state,
             to_state=field_state,
         )
@@ -408,6 +437,8 @@ class ProjectClient(Protocol):
     def set_status_label(
         self, number: int, add: str, remove: Sequence[str]
     ) -> None: ...
+
+    def status_labels(self, number: int) -> list[str]: ...
 
 
 _FIELD_QUERY = """
@@ -652,6 +683,14 @@ class GhClient:
             "-f", f"field={self._field_id}",
         ])
 
+    def status_labels(self, number: int) -> list[str]:
+        data = self._gh(["api", f"repos/{self._repo}/issues/{number}"])
+        return [
+            str(label.get("name", ""))
+            for label in data.get("labels") or []
+            if str(label.get("name", "")).startswith("status:")
+        ]
+
     def set_status_label(self, number: int, add: str, remove: Sequence[str]) -> None:
         args = ["issue", "edit", str(number), "--repo", self._repo, "--add-label", add]
         for label in remove:
@@ -685,6 +724,20 @@ def _apply(
     elif decision.action == CLEAR:
         client.clear_option(item["item_id"])
     elif decision.action == LABEL_WRITE:
+        # TOCTOU guard (codex review, PR #141): the decision was computed
+        # from a poll snapshot; a concurrent human relabel between snapshot
+        # and write would compose with it into a dual-status state (the
+        # write removes only the snapshot label). Require the snapshot's
+        # status set to still hold; a mismatch skips, and the next poll
+        # re-arbitrates from fresh state.
+        fresh = set(client.status_labels(int(item["number"])))
+        snapshot = {l for l in item["labels"] if l.startswith("status:")}
+        if fresh != snapshot:
+            print(
+                f"skip issue={item['number']} status labels changed mid-poll "
+                f"({sorted(snapshot)} -> {sorted(fresh)}); next poll re-arbitrates"
+            )
+            return
         client.set_status_label(
             int(item["number"]), decision.label or "", decision.remove_labels
         )
