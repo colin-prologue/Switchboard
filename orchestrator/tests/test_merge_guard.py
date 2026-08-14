@@ -415,6 +415,8 @@ def test_heredoc_bodies_are_data(command, tmp_path):
     "git 2>/dev/null push -f origin main",
     "gh pr >log merge 12",
     "git push -f >out 2>&1 origin main",
+    "gh {fd}>/dev/null pr merge 12",                       # r21: brace fd alloc
+    "git {fd}>/dev/null push -f origin main",
 ])
 def test_redirections_cannot_hide_denied_verbs(command, tmp_path):
     r = _run_bash(command, tmp_path)
@@ -427,6 +429,8 @@ def test_redirections_cannot_hide_denied_verbs(command, tmp_path):
     "git commit -m 'msg with > arrow'",                    # quoted > is text
     'gh pr comment 5 --body "2>&1 is a redirection"',
     "git push origin a2b",                                 # digit inside a word
+    "git push origin main {log}>out.txt",                  # trailing brace fd
+    "git commit -m '{fd}> is bash syntax'",                # quoted brace fd
 ])
 def test_benign_redirections_and_quoted_arrows_allowed(command, tmp_path):
     r = _run_bash(command, tmp_path)

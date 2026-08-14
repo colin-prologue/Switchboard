@@ -60,11 +60,13 @@ def _decode_ansi_c(body: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
-# redirection operators, longest-first; the fd-digit prefix is only an
-# operator at a word boundary (`2>` redirects; `a2>` is word `a2` + `>`)
+# redirection operators, longest-first; the fd prefix — numeric (`2>`) or
+# bash's brace allocation (`{fd}>` — codex review r21, PR #136) — is only an
+# operator at a word boundary (`a2>` is word `a2` + `>`)
 _REDIR_OPS = r"(?P<op><<-|<<<|<<|&>>|&>|>>|>\||<>|>&|<&|>|<)"
 _REDIR_RE = re.compile(r"(?P<fd>)" + _REDIR_OPS)
-_REDIR_WORD_RE = re.compile(r"(?P<fd>\d*)" + _REDIR_OPS)
+_REDIR_WORD_RE = re.compile(
+    r"(?P<fd>\d*|\{[A-Za-z_][A-Za-z0-9_]*\})" + _REDIR_OPS)
 
 
 def _balanced_paren_end(command: str, k: int) -> int:
