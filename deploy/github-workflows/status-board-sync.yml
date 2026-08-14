@@ -1,5 +1,16 @@
 # status:* labels <-> GitHub Project v2 "Status" field (issue #22).
 #
+# STAGED, NOT INSTALLED. This file belongs at
+# .github/workflows/status-board-sync.yml, but the switchboard-agent App token
+# holds no `workflows` permission (AgDR-009), and GitHub rejects any push from
+# it that creates a file under .github/workflows/. Installing it is a merge-gate
+# step for a human with `workflow` scope:
+#
+#   git mv deploy/github-workflows/status-board-sync.yml .github/workflows/
+#
+# Until that move lands the sync does not run at all — nothing here fires from
+# this path.
+#
 # The board is a kanban surface you can DRAG on, but the two directions are not
 # symmetric, and the asymmetry is the safety argument:
 #

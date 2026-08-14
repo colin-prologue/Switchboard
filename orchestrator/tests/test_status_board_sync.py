@@ -45,7 +45,13 @@ from orchestrator.tracker import normalize_status_state
 from orchestrator.transitions import load_edges
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_WORKFLOW_YAML = _REPO_ROOT / ".github" / "workflows" / "status-board-sync.yml"
+# Staged, not installed: the App token that pushes this branch has no
+# `workflows` permission, so a file under .github/workflows/ cannot be created
+# from a worker session. A human moves it there at the merge gate; the tests
+# follow it either way so they keep passing after the move.
+_INSTALLED_YAML = _REPO_ROOT / ".github" / "workflows" / "status-board-sync.yml"
+_STAGED_YAML = _REPO_ROOT / "deploy" / "github-workflows" / "status-board-sync.yml"
+_WORKFLOW_YAML = _INSTALLED_YAML if _INSTALLED_YAML.is_file() else _STAGED_YAML
 
 # `gh label list` snapshot, 2026-08-13. The Status field's options must match
 # this set exactly (the field carries every status, including ones no drag can
@@ -561,6 +567,13 @@ def test_workflow_uses_the_projects_pat_not_the_default_token():
     )
     assert "secrets.PROJECT_SYNC_PAT" in body
     assert "secrets.GITHUB_TOKEN" not in body
+
+
+def test_workflow_file_exists_at_exactly_one_of_the_two_paths():
+    assert _WORKFLOW_YAML.is_file()
+    assert not (_INSTALLED_YAML.is_file() and _STAGED_YAML.is_file()), (
+        "two copies of the sync workflow: git rm the staged one after installing"
+    )
 
 
 def test_workflow_header_documents_the_snap_back_and_the_60_day_disable():
