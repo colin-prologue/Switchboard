@@ -232,6 +232,17 @@ class Config:
             else ["closed"]
         )
 
+        # Terminal-handoff target (AgDR-028). A stance that keeps a human gate
+        # leaves this at the default; an autonomous stance points it at its own
+        # QA state (e.g. "status:review"), which its active_states also lists so
+        # the handoff lands somewhere the scheduler will actually dispatch.
+        handoff_label_raw = raw.get("handoff_label")
+        handoff_label = (
+            handoff_label_raw.strip()
+            if isinstance(handoff_label_raw, str) and handoff_label_raw.strip()
+            else "status:human-review"
+        )
+
         return TrackerConfig(
             kind=kind,
             repo=repo,
@@ -240,6 +251,7 @@ class Config:
             required_labels=required_labels,
             active_states=active_states,
             terminal_states=terminal_states,
+            handoff_label=handoff_label,
         )
 
     # -- polling ---------------------------------------------------------------

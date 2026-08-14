@@ -103,13 +103,27 @@ for env in projects/*/project.env; do
     p_repo="$(sed -n 's/^SB_GITHUB_REPO=//p' "$env" | head -1)"
     p_wsroot="$(sed -n 's/^SB_WORKSPACE_ROOT=//p' "$env" | head -1)"
     p_conv="$(sed -n 's/^SB_CONVENTION_ROOT=//p' "$env" | head -1)"
-    p_template="$(sed -n 's/^SB_WORKFLOW_TEMPLATE=//p' "$env" | head -1)"
+    p_base="$(sed -n 's/^SB_BASE_BRANCH=//p' "$env" | head -1)"
+    p_vcmd="$(sed -n 's/^SB_VERIFY_CMD=//p' "$env" | head -1)"
+    p_vtools="$(sed -n 's/^SB_VERIFY_TOOLS=//p' "$env" | head -1)"
+    # SB_WORKFLOW_STANCE supersedes the legacy SB_WORKFLOW_TEMPLATE; read both so
+    # projects registered before the stance ladder still verify.
+    p_template="$(sed -n 's/^SB_WORKFLOW_STANCE=//p' "$env" | head -1)"
+    [ -n "$p_template" ] || p_template="$(sed -n 's/^SB_WORKFLOW_TEMPLATE=//p' "$env" | head -1)"
     p_template="${p_template:-base}"
     case "$p_template" in
       base) template="workflow/WORKFLOW.base.md";;
       codex-canary) template="workflow/WORKFLOW.codex-canary.md";;
       mixed-canary) template="workflow/WORKFLOW.mixed-canary.md";;
-      *) fail "$slug: unknown SB_WORKFLOW_TEMPLATE '$p_template'"; continue;;
+      *)
+        # Stance recipe: project-local override wins over the shared ladder.
+        if [ -f "projects/$slug/WORKFLOW.$p_template.md" ]; then
+          template="projects/$slug/WORKFLOW.$p_template.md"
+        else
+          template="workflow/stances/WORKFLOW.$p_template.md"
+        fi
+        [ -f "$template" ] || { fail "$slug: unknown stance '$p_template' (no $template)"; continue; }
+        ;;
     esac
     p_agents="$(sed -n 's/^  max_concurrent_agents: \([0-9][0-9]*\)$/\1/p' "$wf" | head -1)"
     if [ -n "$p_repo" ] && [ -n "$p_wsroot" ] && [ -n "$p_agents" ] && [ -f "$template" ]; then
@@ -117,6 +131,9 @@ for env in projects/*/project.env; do
                -e "s|{{WORKSPACE_ROOT}}|$p_wsroot|g" \
                -e "s|{{MAX_AGENTS}}|$p_agents|g" \
                -e "s|{{CONVENTION_ROOT}}|$p_conv|g" \
+               -e "s|{{BASE_BRANCH}}|$p_base|g" \
+               -e "s|{{VERIFY_CMD}}|$p_vcmd|g" \
+               -e "s|{{VERIFY_TOOLS}}|$p_vtools|g" \
                "$template" | diff -q - "$wf" >/dev/null 2>&1; then
         fail "$slug: WORKFLOW.md drifted from $template — recompose it from the declared template"
       else

@@ -1138,7 +1138,7 @@ class Orchestrator:
                     if evidence is not None:
                         try:
                             await tracker.set_sole_status_label(
-                                issue.id, HUMAN_REVIEW_LABEL)
+                                issue.id, cfg.tracker().handoff_label)
                         except TrackerError as exc:
                             # Verified-write failed: leave state untouched and
                             # end the session; claim release reverts the claim

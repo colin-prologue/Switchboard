@@ -167,6 +167,49 @@ def test_tracker_defaults(tmp_path: Path):
     assert t.terminal_states == ["closed"]
 
 
+def test_tracker_handoff_label_defaults_to_human_review(tmp_path: Path):
+    """Absent config, the terminal handoff still lands on the Gate C label.
+
+    The default is what keeps every pre-stance binding behaving identically:
+    only a stance that explicitly opts into an agent QA state changes it.
+    """
+    defn = WorkflowDefinition(config={"tracker": {"kind": "github", "repo": "acme/widgets"}}, prompt_template="")
+    cfg = Config(defn, tmp_path)
+    assert cfg.tracker().handoff_label == "status:human-review"
+
+
+def test_tracker_handoff_label_override_targets_an_active_qa_state(tmp_path: Path):
+    """An autonomous stance points the handoff at a state it also dispatches.
+
+    If `handoff_label` named a state absent from `active_states`, a validated
+    handoff would park the issue forever — so the two are set together, and
+    this pins that pairing.
+    """
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["todo", "in progress", "review"],
+                "handoff_label": "status:review",
+            }
+        },
+        prompt_template="",
+    )
+    t = Config(defn, tmp_path).tracker()
+    assert t.handoff_label == "status:review"
+    assert t.handoff_label.removeprefix("status:").replace("-", " ") in t.active_states
+
+
+def test_tracker_handoff_label_blank_falls_back_to_default(tmp_path: Path):
+    """An empty string is a composition accident, not an intent to unset."""
+    defn = WorkflowDefinition(
+        config={"tracker": {"kind": "github", "repo": "acme/widgets", "handoff_label": "   "}},
+        prompt_template="",
+    )
+    assert Config(defn, tmp_path).tracker().handoff_label == "status:human-review"
+
+
 def test_tracker_api_key_dollar_var_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
     defn = WorkflowDefinition(config={"tracker": {"kind": "github", "repo": "acme/widgets"}}, prompt_template="")
