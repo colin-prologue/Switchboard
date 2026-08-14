@@ -174,6 +174,12 @@ class FakeProject:
     def status_labels(self, number: int) -> list[str]:
         return [l for l in self._by_issue(number)["labels"] if l.startswith("status:")]
 
+    def field_option(self, item_id: str):
+        for item in self._items:
+            if item["item_id"] == item_id:
+                return item.get("option")
+        raise KeyError(item_id)
+
     def set_status_label(self, number: int, add: str, remove) -> None:
         item = self._by_issue(number)
         labels = [l for l in item["labels"] if l not in set(remove)]
@@ -701,3 +707,32 @@ def test_label_write_skips_when_labels_changed_mid_poll(capsys):
     run_poll(fake, dry_run=False)
     assert fake.label_writes == []
     assert "changed mid-poll" in capsys.readouterr().out
+
+
+def test_write_skips_when_field_changed_mid_poll(capsys):
+    class RacyFieldFake(FakeProject):
+        def field_option(self, item_id):
+            return "Parked"  # concurrent drag after the snapshot
+    fake = RacyFieldFake([
+        _item(6, ["status:todo"], is_issue=True, option=None,
+              field_updated_at=None),
+    ])
+    run_poll(fake, dry_run=False)
+    assert fake.option_writes == []
+    assert "field changed mid-poll" in capsys.readouterr().out
+
+
+def test_truncated_label_page_is_indeterminate():
+    fake = FakeProject([
+        _item(7, ["status:todo"], is_issue=True, option=None,
+              field_updated_at=None, labels_truncated=True),
+    ])
+    decisions = run_poll(fake, dry_run=False)
+    assert decisions[0].action == SKIP
+    assert fake.option_writes == [] and fake.label_writes == []
+    fake2 = FakeProject([
+        _item(7, ["status:todo"], is_issue=True, option="Todo",
+              labels_truncated=True),
+    ])
+    d = run_mirror(fake2, 7, dry_run=False)
+    assert d.action == SKIP

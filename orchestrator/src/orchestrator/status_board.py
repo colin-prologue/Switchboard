@@ -440,6 +440,8 @@ class ProjectClient(Protocol):
 
     def status_labels(self, number: int) -> list[str]: ...
 
+    def field_option(self, item_id: str) -> str | None: ...
+
 
 _FIELD_QUERY = """
 query($owner: String!, $number: Int!, $field: String!) {
@@ -471,7 +473,10 @@ query($owner: String!, $number: Int!, $after: String) {
               number
               state
               repository { nameWithOwner }
-              labels(first: 50) { nodes { name } }
+              labels(first: 100) {
+                pageInfo { hasNextPage }
+                nodes { name }
+              }
             }
           }
           fieldValues(first: 100) {
@@ -485,6 +490,18 @@ query($owner: String!, $number: Int!, $after: String) {
             }
           }
         }
+      }
+    }
+  }
+}
+"""
+
+_ITEM_FIELD_QUERY = """
+query($item: ID!, $field: String!) {
+  node(id: $item) {
+    ... on ProjectV2Item {
+      fieldValueByName(name: $field) {
+        ... on ProjectV2ItemFieldSingleSelectValue { name }
       }
     }
   }
@@ -618,6 +635,12 @@ class GhClient:
             value is None
             and (field_values.get("pageInfo") or {}).get("hasNextPage")
         )
+        # >100 labels with the status label possibly off-page: the label
+        # side is indeterminate for BOTH directions (codex review, PR #141)
+        labels_truncated = bool(
+            ((content.get("labels") or {}).get("pageInfo") or {}).get(
+                "hasNextPage")
+        )
         return {
             "item_id": node["id"],
             "is_issue": is_issue,
@@ -632,6 +655,7 @@ class GhClient:
             "option": (value or {}).get("name"),
             "field_updated_at": (value or {}).get("updatedAt"),
             "field_page_truncated": truncated,
+            "labels_truncated": labels_truncated,
         }
 
     def item_for_issue(self, number: int) -> dict | None:
@@ -641,11 +665,13 @@ class GhClient:
         return None
 
     def last_label_event_at(self, number: int) -> str | None:
-        """The LAST `labeled`/`unlabeled` timeline event's timestamp.
+        """The LAST **status-label** `labeled`/`unlabeled` event's timestamp.
 
         `--paginate` and the LAST element are both load-bearing: the REST
         timeline is ascending and paginated, so a first-page read skews the
-        arbitration toward "drag".
+        arbitration toward "drag". Non-status label events are excluded —
+        an unrelated label add must not make the label side look newer than
+        a pending honored drag (codex review, PR #141).
         """
         events = self._gh([
             "api", f"repos/{self._repo}/issues/{number}/timeline",
@@ -657,7 +683,9 @@ class GhClient:
         stamps = [
             e.get("created_at")
             for e in flat
-            if e.get("event") in {"labeled", "unlabeled"} and e.get("created_at")
+            if e.get("event") in {"labeled", "unlabeled"}
+            and e.get("created_at")
+            and str((e.get("label") or {}).get("name", "")).startswith("status:")
         ]
         return stamps[-1] if stamps else None
 
@@ -682,6 +710,16 @@ class GhClient:
             "-f", f"item={item_id}",
             "-f", f"field={self._field_id}",
         ])
+
+    def field_option(self, item_id: str) -> str | None:
+        data = self._gh([
+            "api", "graphql",
+            "-f", f"query={_ITEM_FIELD_QUERY}",
+            "-f", f"item={item_id}",
+            "-F", f"field={self._field_name}",
+        ])
+        node = ((data.get("data") or {}).get("node") or {})
+        return ((node.get("fieldValueByName") or {}).get("name"))
 
     def status_labels(self, number: int) -> list[str]:
         data = self._gh(["api", f"repos/{self._repo}/issues/{number}"])
@@ -714,6 +752,19 @@ def _apply(
     client: ProjectClient, item: dict, decision: Decision, *, dry_run: bool
 ) -> None:
     if dry_run or not decision.writes:
+        return
+    # Field-side TOCTOU guard (codex review, PR #141): every write action
+    # was decided from the items() snapshot; a drag landing between snapshot
+    # and write would be overwritten permanently by a stale MIRROR/SNAP_BACK
+    # (and an honored-drag relabel could fire after the card moved back).
+    # Require the item's live option to still match the snapshot; a mismatch
+    # skips, and the next poll re-arbitrates.
+    live = client.field_option(item["item_id"])
+    if live != item.get("option"):
+        print(
+            f"skip issue={item.get('number')} field changed mid-poll "
+            f"({item.get('option')!r} -> {live!r}); next poll re-arbitrates"
+        )
         return
     if decision.action in {MIRROR, SNAP_BACK}:
         options = client.option_ids()
@@ -752,6 +803,12 @@ def run_mirror(
         decision = Decision(SKIP, "issue has no project item (auto-add not yet run)")
         _emit("mirror", {"number": issue}, decision, dry_run=dry_run)
         return decision
+    if item.get("labels_truncated"):
+        decision = Decision(
+            SKIP, "label page truncated — indeterminate, refusing to mirror"
+        )
+        _emit("mirror", item, decision, dry_run=dry_run)
+        return decision
     decision = mirror_decision(
         item["labels"], closed=item["closed"], current_option=item["option"]
     )
@@ -765,11 +822,11 @@ def run_poll(client: ProjectClient, *, dry_run: bool = False) -> list[Decision]:
     allowlist = honored_drags()
     out: list[Decision] = []
     for item in client.items():
-        if item.get("field_page_truncated"):
+        if item.get("field_page_truncated") or item.get("labels_truncated"):
             decision = Decision(
                 SKIP,
-                "Status not on the fetched fieldValues page (truncated) — "
-                "indeterminate, refusing to treat as unset",
+                "field or label page truncated — indeterminate, refusing "
+                "to arbitrate from a partial snapshot",
             )
             _emit("poll", item, decision, dry_run=dry_run)
             out.append(decision)
@@ -800,6 +857,10 @@ def run_backfill(client: ProjectClient, *, dry_run: bool = False) -> list[Decisi
     for item in client.items():
         if not item["is_issue"]:
             decision = Decision(SKIP, "item content is not an issue (PR or draft)")
+        elif item.get("labels_truncated"):
+            decision = Decision(
+                SKIP, "label page truncated — indeterminate, refusing to mirror"
+            )
         else:
             decision = mirror_decision(
                 item["labels"], closed=item["closed"], current_option=item["option"]

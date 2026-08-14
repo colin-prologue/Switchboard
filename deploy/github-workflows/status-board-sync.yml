@@ -82,7 +82,10 @@ jobs:
           python-version: "3.12"
 
       - name: Mirror one issue's labels to the board
-        if: github.event_name == 'issues'
+        # Only a status:* label event can change the mirror's input; firing
+        # on every labeled/unlabeled event would overwrite a pending honored
+        # drag with the unchanged status label (codex review, PR #141).
+        if: github.event_name == 'issues' && startsWith(github.event.label.name, 'status:')
         run: |
           uv run --project orchestrator python -m orchestrator.status_board \
             --mode mirror \
