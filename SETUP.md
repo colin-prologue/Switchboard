@@ -296,7 +296,13 @@ keep going forever. Detection is on you, via the log:
   grep -c 'tick error' ~/Library/Logs/switchboard/$SLUG.log
   ```
   A non-zero and growing count with no new banner is a wedged process. Restart
-  it by hand (`launchctl stop com.switchboard.$SLUG`).
+  it by hand — and note `stop` alone leaves it DOWN, because this agent sets
+  `SuccessfulExit: false` (a clean stop is a successful exit, so launchd does
+  not respawn it; this section says so above):
+  ```bash
+  launchctl stop com.switchboard.$SLUG
+  launchctl start com.switchboard.$SLUG
+  ```
 
 One more thing worth knowing before you restart anything: parked issues stay
 parked across a restart (`status:parked` is a durable label), but the
