@@ -15,9 +15,22 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = REPO_ROOT / "deploy" / "com.switchboard.__SLUG__.plist.template"
 
-# The poll interval a crash loop must not outpace (workflow/WORKFLOW.base.md:16,
-# polling.interval_ms: 30000).
-POLL_INTERVAL_SECONDS = 30
+
+def _poll_interval_seconds() -> float:
+    """Read polling.interval_ms out of the workflow frontmatter — derived,
+    never duplicated, so raising the interval keeps this guard honest (codex
+    review, PR #142). Extracted by regex: the template's {{PLACEHOLDER}}
+    tokens make the frontmatter unparseable as strict YAML."""
+    import re
+    text = (REPO_ROOT / "workflow" / "WORKFLOW.base.md").read_text(
+        encoding="utf-8")
+    frontmatter = text.split("---", 2)[1]
+    match = re.search(r"^\s*interval_ms:\s*(\d+)", frontmatter, re.M)
+    assert match, "polling.interval_ms not found in WORKFLOW.base.md"
+    return int(match.group(1)) / 1000
+
+
+POLL_INTERVAL_SECONDS = _poll_interval_seconds()
 
 
 def _load() -> dict:

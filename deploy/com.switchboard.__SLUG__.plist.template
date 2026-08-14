@@ -117,9 +117,12 @@
   <key>ThrottleInterval</key>
   <integer>60</integer>
 
-  <!-- Explicit operator choice: start at login and on `launchctl load`. Set it
-       to <false/> if you would rather start the project by hand with
-       `launchctl start com.switchboard.__SLUG__`. -->
+  <!-- Explicit operator choice: start at login and on `launchctl load`.
+       NOTE: setting this to <false/> alone does NOT give manual start —
+       launchd.plist(5): the KeepAlive SuccessfulExit subkey above "implies
+       that RunAtLoad is set to true". For a load-without-start job, remove
+       the KeepAlive block as well (and lose crash respawn), or keep this
+       template and use `launchctl unload` when you want it fully off. -->
   <key>RunAtLoad</key>
   <true/>
 </dict>

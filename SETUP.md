@@ -235,6 +235,7 @@ path is unwritable fails to spawn.**
 ```bash
 SLUG=switchboard-self
 
+mkdir -p ~/Library/LaunchAgents               # absent on a fresh account
 sed -e "s/__SLUG__/$SLUG/g" -e "s/__USER__/$(id -un)/g" \
   deploy/com.switchboard.__SLUG__.plist.template \
   > ~/Library/LaunchAgents/com.switchboard.$SLUG.plist
