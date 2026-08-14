@@ -70,10 +70,10 @@ seed_if_absent() {
   rel="$(sed -n 's/^SB_WORKSPACE_ROOT=//p' "$ENV_FILE" 2>/dev/null | head -1)"
   local ok=1
   case "$rel" in
-    ""|/*|"~"*)
+    ""|/*|"~"*|"\$"*)
       cp "$TRACKED_WF" "$tmp" 2>/dev/null || ok=0 ;;
     *)
-      sed "s|root: \"$rel\"|root: \"$SB_HOME/projects/$SLUG/$rel\"|" \
+      sed "s|root: \"$(printf '%s' "$rel" | sed -e 's/[&|\\]/\\&/g')\"|root: \"$(printf '%s' "$SB_HOME/projects/$SLUG/$rel" | sed -e 's/[&|\\]/\\&/g')\"|" \
         "$TRACKED_WF" > "$tmp" 2>/dev/null || ok=0 ;;
   esac
   if [ "$ok" = 1 ] && mv -f "$tmp" "$COMPOSED" 2>/dev/null; then
@@ -110,8 +110,15 @@ target_sha="$(git -C "$SB_HOME" rev-parse "origin/$SELF_REF" 2>/dev/null || true
 # ONE count subsuming both conditions: checkout-behind-origin AND
 # process-behind-checkout. Pathspec-limited, so a workflow-only advance
 # intentionally raises no marker — that path is config, and config recomposes.
-behind="$(git -C "$SB_HOME" rev-list --count "${loaded_sha:-HEAD}..origin/$SELF_REF" \
-            -- orchestrator/src/ 2>/dev/null || true)"
+if ! behind="$(git -C "$SB_HOME" rev-list --count \
+      "${loaded_sha:-HEAD}..origin/$SELF_REF" -- orchestrator/src/ 2>/dev/null)"; then
+  # Traversal failure (pruned loaded sha, corrupt ref) is NOT freshness:
+  # deleting the marker here would report clean exactly when staleness
+  # cannot be determined (codex review, PR #140). Keep whatever marker
+  # exists and let a later successful traversal arbitrate.
+  warn "rev-list failed measuring staleness — keeping any existing marker (fail-open)"
+  return 0
+fi
 case "$behind" in
   ''|*[!0-9]*) behind=0;;
 esac
@@ -215,7 +222,9 @@ p_template="${p_template:-base}"
 # otherwise existing issue workspaces would be abandoned and recreated under
 # .run (codex review, PR #140).
 case "$p_wsroot" in
-  /*|"~"*) ;;
+  /*|"~"*|"\$"*) ;;  # absolute, home-anchored, or variable-based ($HOME/…):
+                     # Config._expand_path expands $VAR before the
+                     # absoluteness test (codex review, PR #140)
   *) p_wsroot="$SB_HOME/projects/$SLUG/$p_wsroot";;
 esac
 # p_conv is legitimately empty for root projects — never a completeness failure.
@@ -233,11 +242,26 @@ if ! raw="$(git -C "$SB_HOME" show "origin/$SELF_REF:$TEMPLATE" 2>/dev/null)"; t
   fail_open "template $TEMPLATE absent at origin/$SELF_REF — skipping recompose (fail-open)"
 fi
 
-composed="$(printf '%s\n' "$raw" | sed \
-  -e "s|{{REPO}}|$p_repo|g" \
-  -e "s|{{WORKSPACE_ROOT}}|$p_wsroot|g" \
-  -e "s|{{MAX_AGENTS}}|$p_agents|g" \
-  -e "s|{{CONVENTION_ROOT}}|$p_conv|g")"
+# sed replacement text treats & \ and the delimiter specially: a checkout
+# path like /srv/R&D would re-inject the pattern, and a | would abort the
+# substitution (codex review, PR #140) — escape every interpolated value.
+sed_escape() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
+
+if ! composed="$(printf '%s\n' "$raw" | sed \
+  -e "s|{{REPO}}|$(sed_escape "$p_repo")|g" \
+  -e "s|{{WORKSPACE_ROOT}}|$(sed_escape "$p_wsroot")|g" \
+  -e "s|{{MAX_AGENTS}}|$(sed_escape "$p_agents")|g" \
+  -e "s|{{CONVENTION_ROOT}}|$(sed_escape "$p_conv")|g")" || [ -z "$composed" ]; then
+  fail_open "substitution failed composing $TEMPLATE — skipping recompose (fail-open)"
+fi
+
+# An unresolved scaffold placeholder means origin's template grew a token
+# this older preflight cannot bind; installing it would hand the loader a
+# corrupt workflow. Keep the last usable composed file instead (codex
+# review, PR #140).
+if printf '%s\n' "$composed" | grep -q '{{[A-Z_][A-Z_]*}}'; then
+  fail_open "unresolved placeholder(s) in composed $TEMPLATE — origin template newer than this preflight; skipping recompose (fail-open)"
+fi
 
 # Content identity, NOT hand-edit detection: the comparison is against this
 # routine's own freshly composed bytes, never the tracked blob. So every origin
