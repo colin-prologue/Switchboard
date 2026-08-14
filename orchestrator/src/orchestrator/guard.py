@@ -60,6 +60,13 @@ def _decode_ansi_c(body: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
+# redirection operators, longest-first; the fd-digit prefix is only an
+# operator at a word boundary (`2>` redirects; `a2>` is word `a2` + `>`)
+_REDIR_OPS = r"(?P<op><<-|<<<|<<|&>>|&>|>>|>\||<>|>&|<&|>|<)"
+_REDIR_RE = re.compile(_REDIR_OPS)
+_REDIR_WORD_RE = re.compile(r"\d*" + _REDIR_OPS)
+
+
 def _normalize_quoting(command: str) -> str:
     """Rewrite the bash quoting forms shlex does not know, QUOTE-AWARE: a
     `$'` or `$"` is shell syntax only OUTSIDE ordinary quotes — inside double
@@ -67,15 +74,19 @@ def _normalize_quoting(command: str) -> str:
     mentioning `$'` must not trip the undecodable-quoting denial). An
     unterminated unquoted `$'` raises so the caller denies in-band.
 
-    Heredoc bodies are DATA (codex review r18, PR #136: the PR-handoff
-    pattern `--body-file - <<'EOF'` may discuss `$'` literally): after an
-    unquoted `<<`, everything past the first unquoted newline is dropped —
-    same-line arguments after the delimiter word are kept (bash still passes
-    them to the command), and a command hidden after the heredoc body is the
-    already-named compound-command residual (tokens[0] anchoring)."""
+    Redirections are removed from the stream entirely — bash removes them
+    from the arg list, so a redirection left in place both hides verbs
+    (`gh </dev/null pr merge`, `git 2>/dev/null push -f`, `git <<X push -f`
+    — codex reviews r18/r19, PR #136) and, for heredocs, misreads body DATA
+    as syntax (the PR-handoff pattern `--body-file - <<'EOF'` may discuss
+    `$'` literally). After an unquoted heredoc operator, everything past the
+    first unquoted newline is dropped; a command hidden after the heredoc
+    body is the already-named compound-command residual (tokens[0]
+    anchoring)."""
     out: list[str] = []
     state = ""  # "" outside, "'" in single, '"' in double
     heredoc_pending = False
+    at_word_start = True
     i = 0
     n = len(command)
     while i < n:
@@ -83,37 +94,40 @@ def _normalize_quoting(command: str) -> str:
         if state == "":
             if heredoc_pending and c == "\n":
                 break
-            if c == "<" and command[i + 1:i + 2] == "<":
-                # swallow the operator AND its word: bash removes redirections
-                # from the arg list, so leaving `<<X` (or the separated `X`)
-                # in the stream would occupy command position and hide the
-                # real verb (`git <<X push -f`). `<<<` is a herestring: its
-                # word is stdin data, no body follows.
-                j = i + 2
-                here_string = command[j:j + 1] == "<"
-                if here_string or command[j:j + 1] == "-":
-                    j += 1
-                while j < n and command[j] in " \t":
-                    j += 1
-                wstate = ""
-                while j < n:
-                    wc = command[j]
-                    if wstate:
-                        if wc == wstate:
-                            wstate = ""
-                    elif wc in "'\"":
-                        wstate = wc
-                    elif wc == "\\":
+            redir = _REDIR_WORD_RE.match(command, i) if at_word_start \
+                else _REDIR_RE.match(command, i)
+            if redir:
+                op = redir.group("op")
+                j = redir.end()
+                if op in (">&", "<&") and command[j:j + 1].isdigit():
+                    # fd duplication (2>&1): the target is attached digits
+                    while j < n and command[j].isdigit():
                         j += 1
-                    elif wc in " \t\n":
-                        break
-                    j += 1
-                if not here_string:
+                else:
+                    # the target/delimiter is the next word; swallow it
+                    while j < n and command[j] in " \t":
+                        j += 1
+                    wstate = ""
+                    while j < n:
+                        wc = command[j]
+                        if wstate:
+                            if wc == wstate:
+                                wstate = ""
+                        elif wc in "'\"":
+                            wstate = wc
+                        elif wc == "\\":
+                            j += 1
+                        elif wc in " \t\n":
+                            break
+                        j += 1
+                if op in ("<<", "<<-"):
                     heredoc_pending = True
                 i = j
+                at_word_start = True
                 continue
             if c == "\\":
                 out.append(command[i:i + 2])
+                at_word_start = False
                 i += 2
                 continue
             if c == "$" and command[i + 1:i + 2] == "'":
@@ -123,12 +137,14 @@ def _normalize_quoting(command: str) -> str:
                 if j >= n:
                     raise ValueError("unterminated ANSI-C quoting")
                 out.append(_decode_ansi_c(command[i + 2:j]))
+                at_word_start = False
                 i = j + 1
                 continue
             if c == "$" and command[i + 1:i + 2] == '"':
                 # locale quoting is plain double-quoting
                 out.append('"')
                 state = '"'
+                at_word_start = False
                 i += 2
                 continue
             if c in ("'", '"'):
@@ -144,6 +160,7 @@ def _normalize_quoting(command: str) -> str:
             if c == '"':
                 state = ""
         out.append(c)
+        at_word_start = state == "" and c in " \t\n"
         i += 1
     return "".join(out)
 

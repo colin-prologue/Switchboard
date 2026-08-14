@@ -411,10 +411,26 @@ def test_heredoc_bodies_are_data(command, tmp_path):
     "git <<-'DELIM' push --mirror origin\nbody\nDELIM",    # <<- + quoted word
     "gh <<< data pr merge 12",                             # herestring
     "git push -f origin main <<'EOF'\n$'\nEOF",            # verb before heredoc
+    "gh </dev/null pr merge 12",                           # r19: ordinary redirs
+    "git 2>/dev/null push -f origin main",
+    "gh pr >log merge 12",
+    "git push -f >out 2>&1 origin main",
 ])
 def test_redirections_cannot_hide_denied_verbs(command, tmp_path):
     r = _run_bash(command, tmp_path)
     assert r.returncode == 2
+
+
+@pytest.mark.parametrize("command", [
+    "git push origin main >push.log 2>&1",                 # trailing redirs fine
+    "gh pr view 12 >file",
+    "git commit -m 'msg with > arrow'",                    # quoted > is text
+    'gh pr comment 5 --body "2>&1 is a redirection"',
+    "git push origin a2b",                                 # digit inside a word
+])
+def test_benign_redirections_and_quoted_arrows_allowed(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0
 
 
 # --- line continuations, non-push config, alias smuggling (round 9, PR #136) --
