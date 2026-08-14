@@ -65,14 +65,53 @@ def _normalize_quoting(command: str) -> str:
     `$'` or `$"` is shell syntax only OUTSIDE ordinary quotes — inside double
     quotes it is literal text (codex review r17, PR #136: a PR body
     mentioning `$'` must not trip the undecodable-quoting denial). An
-    unterminated unquoted `$'` raises so the caller denies in-band."""
+    unterminated unquoted `$'` raises so the caller denies in-band.
+
+    Heredoc bodies are DATA (codex review r18, PR #136: the PR-handoff
+    pattern `--body-file - <<'EOF'` may discuss `$'` literally): after an
+    unquoted `<<`, everything past the first unquoted newline is dropped —
+    same-line arguments after the delimiter word are kept (bash still passes
+    them to the command), and a command hidden after the heredoc body is the
+    already-named compound-command residual (tokens[0] anchoring)."""
     out: list[str] = []
     state = ""  # "" outside, "'" in single, '"' in double
+    heredoc_pending = False
     i = 0
     n = len(command)
     while i < n:
         c = command[i]
         if state == "":
+            if heredoc_pending and c == "\n":
+                break
+            if c == "<" and command[i + 1:i + 2] == "<":
+                # swallow the operator AND its word: bash removes redirections
+                # from the arg list, so leaving `<<X` (or the separated `X`)
+                # in the stream would occupy command position and hide the
+                # real verb (`git <<X push -f`). `<<<` is a herestring: its
+                # word is stdin data, no body follows.
+                j = i + 2
+                here_string = command[j:j + 1] == "<"
+                if here_string or command[j:j + 1] == "-":
+                    j += 1
+                while j < n and command[j] in " \t":
+                    j += 1
+                wstate = ""
+                while j < n:
+                    wc = command[j]
+                    if wstate:
+                        if wc == wstate:
+                            wstate = ""
+                    elif wc in "'\"":
+                        wstate = wc
+                    elif wc == "\\":
+                        j += 1
+                    elif wc in " \t\n":
+                        break
+                    j += 1
+                if not here_string:
+                    heredoc_pending = True
+                i = j
+                continue
             if c == "\\":
                 out.append(command[i:i + 2])
                 i += 2

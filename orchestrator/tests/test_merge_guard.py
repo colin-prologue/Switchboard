@@ -394,6 +394,29 @@ def test_unterminated_bare_ansi_c_denies(tmp_path):
     assert r.returncode == 2
 
 
+# --- heredoc bodies are data; redirections cannot hide verbs (round 18) -------
+
+@pytest.mark.parametrize("command", [
+    "gh pr create --body-file - <<'EOF'\nDocument the literal $' form\nEOF",
+    "gh pr create -t x --body-file - <<EOF\nbody with $'x' and \" quote\nEOF",
+])
+def test_heredoc_bodies_are_data(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0
+
+
+@pytest.mark.parametrize("command", [
+    "git <<X push -f origin main\nbody\nX",                # attached delimiter
+    "git << X push -f origin main\nbody\nX",               # separated delimiter
+    "git <<-'DELIM' push --mirror origin\nbody\nDELIM",    # <<- + quoted word
+    "gh <<< data pr merge 12",                             # herestring
+    "git push -f origin main <<'EOF'\n$'\nEOF",            # verb before heredoc
+])
+def test_redirections_cannot_hide_denied_verbs(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+
+
 # --- line continuations, non-push config, alias smuggling (round 9, PR #136) --
 
 @pytest.mark.parametrize("command", [
