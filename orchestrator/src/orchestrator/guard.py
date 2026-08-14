@@ -220,15 +220,6 @@ def _normalize_quoting(command: str) -> str:
                     break
                 i = nl
                 continue
-            if c in "{}":
-                # mark UNQUOTED braces with sentinels so _expand_words can
-                # apply bash brace expansion after shlex strips quotes —
-                # quoted braces stay literal (codex review r22, PR #136:
-                # `gh pr m{e..e}rge` executes `gh pr merge`)
-                out.append("\x00" if c == "{" else "\x01")
-                at_word_start = False
-                i += 1
-                continue
             redir = _REDIR_WORD_RE.match(command, i) if at_word_start \
                 else _REDIR_RE.match(command, i)
             if redir:
@@ -277,6 +268,17 @@ def _normalize_quoting(command: str) -> str:
                     heredoc_pending = True
                 i = j
                 at_word_start = True
+                continue
+            if c in "{}":
+                # mark UNQUOTED braces with sentinels so _expand_words can
+                # apply bash brace expansion after shlex strips quotes —
+                # quoted braces stay literal (codex review r22, PR #136:
+                # `gh pr m{e..e}rge` executes `gh pr merge`). This branch
+                # sits AFTER the redirection match: a brace-fd prefix
+                # ({fd}>) is a redirection, not an expansion.
+                out.append("\x00" if c == "{" else "\x01")
+                at_word_start = False
+                i += 1
                 continue
             if c == "\\":
                 out.append(command[i:i + 2])
