@@ -584,3 +584,83 @@ def test_workflow_header_documents_the_snap_back_and_the_60_day_disable():
     assert "Blocked" in header          # no edges: rubber-bands every drag
     assert "60 days" in header          # scheduled-workflow auto-disable
     assert "re-enable" in header.lower()
+
+
+# --- repo scoping + fieldValues truncation (codex review, PR #141) ------------
+
+
+def _gh_node(number, repo="colin-prologue/Switchboard", *, status=None,
+             truncated=False):
+    field_values = {"pageInfo": {"hasNextPage": truncated}, "nodes": []}
+    if status is not None:
+        field_values["nodes"].append(
+            {"name": status, "updatedAt": "2026-08-13T00:00:00Z",
+             "field": {"name": "Status"}}
+        )
+    return {
+        "id": f"node-{number}",
+        "type": "ISSUE",
+        "content": {
+            "__typename": "Issue",
+            "number": number,
+            "state": "OPEN",
+            "repository": {"nameWithOwner": repo},
+            "labels": {"nodes": [{"name": "status:todo"}]},
+        },
+        "fieldValues": field_values,
+    }
+
+
+def _gh_client_with_nodes(monkeypatch, nodes):
+    from orchestrator.status_board import GhClient
+    client = GhClient.__new__(GhClient)
+    client._owner = "colin-prologue"
+    client._project = 1
+    client._repo = "colin-prologue/Switchboard"
+    client._field_name = "Status"
+    payload = {"data": {"user": {"projectV2": {"items": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+        "nodes": nodes,
+    }}}}}
+    monkeypatch.setattr(client, "_gh", lambda args: payload)
+    return client
+
+
+def test_foreign_repo_items_are_invisible(monkeypatch):
+    # Issue numbers collide across repos: the foreign #7 must not shadow or
+    # stand in for the local #7 (codex review, PR #141 — a number match alone
+    # relabeled an unrelated local issue from foreign labels).
+    client = _gh_client_with_nodes(monkeypatch, [
+        _gh_node(7, repo="other/elsewhere", status="Todo"),
+        _gh_node(7, status="In progress"),
+    ])
+    items = client.items()
+    assert [i["repo"] for i in items] == ["colin-prologue/Switchboard"]
+    assert client.item_for_issue(7)["option"] == "In progress"
+
+
+def test_repo_match_is_case_insensitive(monkeypatch):
+    client = _gh_client_with_nodes(monkeypatch, [
+        _gh_node(3, repo="Colin-Prologue/switchboard", status="Todo"),
+    ])
+    assert len(client.items()) == 1
+
+
+def test_truncated_field_page_reads_indeterminate_not_unset(monkeypatch):
+    client = _gh_client_with_nodes(monkeypatch, [
+        _gh_node(9, status=None, truncated=True),
+    ])
+    (item,) = client.items()
+    assert item["option"] is None
+    assert item["field_page_truncated"] is True
+
+
+def test_poll_skips_indeterminate_items():
+    fake = FakeProject([
+        _item(9, ["status:todo"], is_issue=True, closed=False, option=None,
+              field_updated_at=None, field_page_truncated=True),
+    ])
+    decisions = run_poll(fake, dry_run=False)
+    assert decisions[0].action == SKIP
+    assert "indeterminate" in decisions[0].reason
+    assert fake.option_writes == []

@@ -439,10 +439,12 @@ query($owner: String!, $number: Int!, $after: String) {
             ... on Issue {
               number
               state
+              repository { nameWithOwner }
               labels(first: 50) { nodes { name } }
             }
           }
-          fieldValues(first: 20) {
+          fieldValues(first: 100) {
+            pageInfo { hasNextPage }
             nodes {
               ... on ProjectV2ItemFieldSingleSelectValue {
                 name
@@ -548,7 +550,20 @@ class GhClient:
                 .get("items", {})
             )
             for node in page.get("nodes") or []:
-                out.append(self._normalize_item(node))
+                item = self._normalize_item(node)
+                # Issue numbers are only unique per repository: a user-owned
+                # Project can hold foreign issues whose numbers collide with
+                # this repo's, and matching by number alone would read the
+                # foreign item's labels/field and relabel an unrelated local
+                # issue (codex review, PR #141). Foreign items are invisible
+                # to every mode.
+                if (
+                    item["is_issue"]
+                    and item["repo"]
+                    and item["repo"].lower() != self._repo.lower()
+                ):
+                    continue
+                out.append(item)
             info = page.get("pageInfo") or {}
             if not info.get("hasNextPage"):
                 return out
@@ -557,15 +572,27 @@ class GhClient:
     def _normalize_item(self, node: dict) -> dict:
         content = node.get("content") or {}
         is_issue = content.get("__typename") == "Issue"
+        field_values = node.get("fieldValues") or {}
         value = None
-        for fv in (node.get("fieldValues") or {}).get("nodes") or []:
+        for fv in field_values.get("nodes") or []:
             if (fv.get("field") or {}).get("name") == self._field_name:
                 value = fv
                 break
+        # `first: 100` exceeds Projects v2's per-project field limit, so a
+        # truncated page should be impossible — but if it ever happens, an
+        # absent Status must read as INDETERMINATE, not unset: treating it as
+        # unset would mirror the label back over a legitimate drag (codex
+        # review, PR #141).
+        truncated = bool(
+            value is None
+            and (field_values.get("pageInfo") or {}).get("hasNextPage")
+        )
         return {
             "item_id": node["id"],
             "is_issue": is_issue,
             "number": content.get("number") if is_issue else None,
+            "repo": (content.get("repository") or {}).get("nameWithOwner")
+                    if is_issue else None,
             "closed": (content.get("state") == "CLOSED") if is_issue else False,
             "labels": [
                 n["name"]
@@ -573,6 +600,7 @@ class GhClient:
             ],
             "option": (value or {}).get("name"),
             "field_updated_at": (value or {}).get("updatedAt"),
+            "field_page_truncated": truncated,
         }
 
     def item_for_issue(self, number: int) -> dict | None:
@@ -684,6 +712,15 @@ def run_poll(client: ProjectClient, *, dry_run: bool = False) -> list[Decision]:
     allowlist = honored_drags()
     out: list[Decision] = []
     for item in client.items():
+        if item.get("field_page_truncated"):
+            decision = Decision(
+                SKIP,
+                "Status not on the fetched fieldValues page (truncated) — "
+                "indeterminate, refusing to treat as unset",
+            )
+            _emit("poll", item, decision, dry_run=dry_run)
+            out.append(decision)
+            continue
         label_ts = (
             client.last_label_event_at(item["number"])
             if item["is_issue"] and item["number"] is not None
