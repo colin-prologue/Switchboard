@@ -138,9 +138,31 @@ SELF_REF="${SB_SELF_BASE_BRANCH:-main}"
 # Bounded so a hung transport cannot wedge the tick. Concurrent-fetch
 # collisions (three processes, one .git, staggered clocks) are an EXPECTED
 # fail-open cause, not a bug.
-if ! git -C "$SB_HOME" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
-       fetch --quiet origin "$SELF_REF" >/dev/null 2>&1; then
-  fail_open "fetch of origin/$SELF_REF failed — skipping recompose (fail-open)"
+#
+# The http.lowSpeed* knobs abort only a slow in-progress HTTP transfer — they
+# are neither a wall-clock deadline nor applicable to SSH (codex review,
+# PR #140), so the fetch also runs under a transport-independent watchdog:
+# a stall in DNS, connection setup, or an SSH transport is killed after
+# SB_FETCH_DEADLINE seconds and takes the same fail-open path.
+fetch_with_deadline() {
+  git -C "$SB_HOME" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+      fetch --quiet origin "$SELF_REF" >/dev/null 2>&1 &
+  local gitpid=$!
+  # the watchdog holds /dev/null, not our stdio: an orphaned sleep that
+  # inherited the caller's pipe would hold it open to EOF and stall any
+  # harness reading this script's output for the full deadline
+  ( sleep "${SB_FETCH_DEADLINE:-30}"; kill -TERM "$gitpid" 2>/dev/null ) \
+    >/dev/null 2>&1 &
+  local wd=$!
+  wait "$gitpid" 2>/dev/null
+  local rc=$?
+  kill -TERM "$wd" 2>/dev/null
+  wait "$wd" 2>/dev/null || true
+  return "$rc"
+}
+
+if ! fetch_with_deadline; then
+  fail_open "fetch of origin/$SELF_REF failed or timed out — skipping recompose (fail-open)"
 fi
 FETCHED=1
 
