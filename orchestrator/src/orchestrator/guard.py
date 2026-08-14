@@ -63,8 +63,38 @@ def _decode_ansi_c(body: str) -> str:
 # redirection operators, longest-first; the fd-digit prefix is only an
 # operator at a word boundary (`2>` redirects; `a2>` is word `a2` + `>`)
 _REDIR_OPS = r"(?P<op><<-|<<<|<<|&>>|&>|>>|>\||<>|>&|<&|>|<)"
-_REDIR_RE = re.compile(_REDIR_OPS)
-_REDIR_WORD_RE = re.compile(r"\d*" + _REDIR_OPS)
+_REDIR_RE = re.compile(r"(?P<fd>)" + _REDIR_OPS)
+_REDIR_WORD_RE = re.compile(r"(?P<fd>\d*)" + _REDIR_OPS)
+
+
+def _balanced_paren_end(command: str, k: int) -> int:
+    """Index just past the `)` matching the `(` at k (quote/escape-aware);
+    len(command) when unbalanced."""
+    depth = 0
+    qstate = ""
+    i = k
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if qstate:
+            if c == "\\" and qstate == '"':
+                i += 2
+                continue
+            if c == qstate:
+                qstate = ""
+        elif c == "\\":
+            i += 2
+            continue
+        elif c in "'\"":
+            qstate = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
 
 
 def _normalize_quoting(command: str) -> str:
@@ -99,27 +129,45 @@ def _normalize_quoting(command: str) -> str:
             if redir:
                 op = redir.group("op")
                 j = redir.end()
+                if (op in ("<", ">") and not redir.group("fd")
+                        and command[j:j + 1] == "("):
+                    # process SUBSTITUTION, not a redirection (codex review
+                    # r20, PR #136 — swallowing `<(echo)` shifted a later
+                    # `--approve` into value position): bash passes it as an
+                    # argument (/dev/fd/N), so emit an opaque placeholder
+                    # token that is neither flag, verb, nor force refspec.
+                    j = _balanced_paren_end(command, j)
+                    out.append(" procsubst ")
+                    i = j
+                    at_word_start = True
+                    continue
                 if op in (">&", "<&") and command[j:j + 1].isdigit():
                     # fd duplication (2>&1): the target is attached digits
                     while j < n and command[j].isdigit():
                         j += 1
                 else:
-                    # the target/delimiter is the next word; swallow it
+                    # the target/delimiter is the next word; swallow it —
+                    # including a process-substitution target (`< <(cmd)` /
+                    # `2>(cmd)`), which must go as one balanced group or its
+                    # tail would leak into the token stream
                     while j < n and command[j] in " \t":
                         j += 1
-                    wstate = ""
-                    while j < n:
-                        wc = command[j]
-                        if wstate:
-                            if wc == wstate:
-                                wstate = ""
-                        elif wc in "'\"":
-                            wstate = wc
-                        elif wc == "\\":
+                    if command[j:j + 2] in ("<(", ">("):
+                        j = _balanced_paren_end(command, j + 1)
+                    else:
+                        wstate = ""
+                        while j < n:
+                            wc = command[j]
+                            if wstate:
+                                if wc == wstate:
+                                    wstate = ""
+                            elif wc in "'\"":
+                                wstate = wc
+                            elif wc == "\\":
+                                j += 1
+                            elif wc in " \t\n":
+                                break
                             j += 1
-                        elif wc in " \t\n":
-                            break
-                        j += 1
                 if op in ("<<", "<<-"):
                     heredoc_pending = True
                 i = j

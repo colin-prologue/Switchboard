@@ -433,6 +433,27 @@ def test_benign_redirections_and_quoted_arrows_allowed(command, tmp_path):
     assert r.returncode == 0
 
 
+# --- process substitutions are arguments, not redirections (round 20) ---------
+
+@pytest.mark.parametrize("command", [
+    "gh pr review 1 --body <(echo) --approve",             # r20 repro: value shift
+    "git push -o <(echo) origin +HEAD:main",               # r20 repro: positional
+    "git < <(echo x y) push -f origin main",               # procsub redir target
+])
+def test_process_substitutions_do_not_shift_denials(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr review 1 --body <(echo gen) -c",                # procsub as body value
+    "git push origin main < <(echo y)",                    # trailing procsub redir
+])
+def test_benign_process_substitutions_allowed(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0
+
+
 # --- line continuations, non-push config, alias smuggling (round 9, PR #136) --
 
 @pytest.mark.parametrize("command", [
