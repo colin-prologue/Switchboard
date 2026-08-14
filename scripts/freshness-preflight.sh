@@ -61,7 +61,22 @@ seed_if_absent() {
   [ -f "$COMPOSED" ] && return 0
   [ -f "$TRACKED_WF" ] || return 0
   local tmp="$COMPOSED.tmp.$$"
-  if cp "$TRACKED_WF" "$tmp" 2>/dev/null && mv -f "$tmp" "$COMPOSED" 2>/dev/null; then
+  # A RELATIVE workspace root in the tracked file anchored to
+  # projects/<slug>/ (Config.workspace_root resolves against the workflow
+  # file's parent); the composed copy lives under .run/<slug>/, so seeding
+  # the literal bytes would silently move every issue workspace (codex
+  # review, PR #140). Re-anchor the exact generated form on the way through.
+  local rel
+  rel="$(sed -n 's/^SB_WORKSPACE_ROOT=//p' "$ENV_FILE" 2>/dev/null | head -1)"
+  local ok=1
+  case "$rel" in
+    ""|/*|"~"*)
+      cp "$TRACKED_WF" "$tmp" 2>/dev/null || ok=0 ;;
+    *)
+      sed "s|root: \"$rel\"|root: \"$SB_HOME/projects/$SLUG/$rel\"|" \
+        "$TRACKED_WF" > "$tmp" 2>/dev/null || ok=0 ;;
+  esac
+  if [ "$ok" = 1 ] && mv -f "$tmp" "$COMPOSED" 2>/dev/null; then
     return 0
   fi
   rm -f "$tmp" 2>/dev/null || true
@@ -194,6 +209,15 @@ p_template="${p_template:-base}"
   || fail_open "SB_GITHUB_REPO missing from $ENV_FILE — skipping recompose (fail-open)"
 [ -n "$p_wsroot" ] \
   || fail_open "SB_WORKSPACE_ROOT missing from $ENV_FILE — skipping recompose (fail-open)"
+# A relative root historically anchored to projects/<slug>/ (the tracked
+# workflow's parent); the composed file lives under .run/<slug>/, so the
+# value is absolutized against the ORIGINAL anchor before substitution —
+# otherwise existing issue workspaces would be abandoned and recreated under
+# .run (codex review, PR #140).
+case "$p_wsroot" in
+  /*|"~"*) ;;
+  *) p_wsroot="$SB_HOME/projects/$SLUG/$p_wsroot";;
+esac
 # p_conv is legitimately empty for root projects — never a completeness failure.
 
 case "$p_template" in
