@@ -67,10 +67,59 @@ seed_if_absent() {
   rm -f "$tmp" 2>/dev/null || true
 }
 
+# Set once origin/$SELF_REF has been fetched: from that point a fail-open
+# skips only the RECOMPOSE — the staleness check still runs (codex review,
+# PR #140: a binding/template failure must not mute the restart signal when
+# the same origin update also moved orchestrator/src/).
+FETCHED=0
+
 fail_open() {
   warn "$1"
   seed_if_absent
+  [ "$FETCHED" = 1 ] && check_staleness
   exit 0
+}
+
+check_staleness() {
+if [ -n "${SB_LAUNCH_SHA:-}" ]; then
+  loaded_sha="$SB_LAUNCH_SHA"
+  sha_source="launch-sha"
+else
+  sha_source="HEAD-fallback"
+  warn "SB_LAUNCH_SHA unbound — measuring staleness from HEAD instead (degraded)"
+  loaded_sha="$(git -C "$SB_HOME" rev-parse HEAD 2>/dev/null || true)"
+fi
+
+target_sha="$(git -C "$SB_HOME" rev-parse "origin/$SELF_REF" 2>/dev/null || true)"
+
+# ONE count subsuming both conditions: checkout-behind-origin AND
+# process-behind-checkout. Pathspec-limited, so a workflow-only advance
+# intentionally raises no marker — that path is config, and config recomposes.
+behind="$(git -C "$SB_HOME" rev-list --count "${loaded_sha:-HEAD}..origin/$SELF_REF" \
+            -- orchestrator/src/ 2>/dev/null || true)"
+case "$behind" in
+  ''|*[!0-9]*) behind=0;;
+esac
+
+# Per-project: "needs restart" is a property of a PROCESS, not of the checkout.
+# A checkout-scoped marker reported clean for all three processes the moment
+# any one of them restarted.
+if [ "$behind" -gt 0 ]; then
+  tmp="$MARKER.tmp.$$"
+  # behind_commits is a COMMIT count (rev-list --count); no file list is
+  # derivable from it, and inventing one would be fake fidelity.
+  if printf '{\n  "target_sha": "%s",\n  "loaded_sha": "%s",\n  "loaded_sha_source": "%s",\n  "behind_commits": %s,\n  "written_at": "%s"\n}\n' \
+       "$target_sha" "$loaded_sha" "$sha_source" "$behind" \
+       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" 2>/dev/null \
+     && mv -f "$tmp" "$MARKER" 2>/dev/null; then
+    warn "RESTART NEEDED for '$SLUG': loaded code is $behind commit(s) behind origin/$SELF_REF under orchestrator/src/ — see $MARKER"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+    warn "could not write $MARKER (fail-open)"
+  fi
+else
+  rm -f "$MARKER" 2>/dev/null || true
+fi
 }
 
 # --- 1. reachability ---------------------------------------------------------
@@ -93,6 +142,7 @@ if ! git -C "$SB_HOME" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
        fetch --quiet origin "$SELF_REF" >/dev/null 2>&1; then
   fail_open "fetch of origin/$SELF_REF failed — skipping recompose (fail-open)"
 fi
+FETCHED=1
 
 # --- 2. binding --------------------------------------------------------------
 [ -f "$ENV_FILE" ] \
@@ -172,45 +222,8 @@ fi
 # Measured from the sha the PROCESS LOADED, not from HEAD. A HEAD-based
 # detector self-clears on the operator's own `git pull` while the process is
 # still running pre-pull code — precisely the blind spot this signal exists to
-# close.
-if [ -n "${SB_LAUNCH_SHA:-}" ]; then
-  loaded_sha="$SB_LAUNCH_SHA"
-  sha_source="launch-sha"
-else
-  sha_source="HEAD-fallback"
-  warn "SB_LAUNCH_SHA unbound — measuring staleness from HEAD instead (degraded)"
-  loaded_sha="$(git -C "$SB_HOME" rev-parse HEAD 2>/dev/null || true)"
-fi
+# close. A function so post-fetch fail-open paths run it too (codex review,
+# PR #140).
 
-target_sha="$(git -C "$SB_HOME" rev-parse "origin/$SELF_REF" 2>/dev/null || true)"
-
-# ONE count subsuming both conditions: checkout-behind-origin AND
-# process-behind-checkout. Pathspec-limited, so a workflow-only advance
-# intentionally raises no marker — that path is config, and config recomposes.
-behind="$(git -C "$SB_HOME" rev-list --count "${loaded_sha:-HEAD}..origin/$SELF_REF" \
-            -- orchestrator/src/ 2>/dev/null || true)"
-case "$behind" in
-  ''|*[!0-9]*) behind=0;;
-esac
-
-# Per-project: "needs restart" is a property of a PROCESS, not of the checkout.
-# A checkout-scoped marker reported clean for all three processes the moment
-# any one of them restarted.
-if [ "$behind" -gt 0 ]; then
-  tmp="$MARKER.tmp.$$"
-  # behind_commits is a COMMIT count (rev-list --count); no file list is
-  # derivable from it, and inventing one would be fake fidelity.
-  if printf '{\n  "target_sha": "%s",\n  "loaded_sha": "%s",\n  "loaded_sha_source": "%s",\n  "behind_commits": %s,\n  "written_at": "%s"\n}\n' \
-       "$target_sha" "$loaded_sha" "$sha_source" "$behind" \
-       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" 2>/dev/null \
-     && mv -f "$tmp" "$MARKER" 2>/dev/null; then
-    warn "RESTART NEEDED for '$SLUG': loaded code is $behind commit(s) behind origin/$SELF_REF under orchestrator/src/ — see $MARKER"
-  else
-    rm -f "$tmp" 2>/dev/null || true
-    warn "could not write $MARKER (fail-open)"
-  fi
-else
-  rm -f "$MARKER" 2>/dev/null || true
-fi
-
+check_staleness
 exit 0

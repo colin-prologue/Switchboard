@@ -92,5 +92,16 @@ cd "$SB_HOME"
 # when it does not yet exist), never path-level — a conditional path would move
 # the file the scheduler stats once at startup, so a later recompose would go
 # unwatched.
+#
+# LAST RESORT (codex review, PR #140): when the composed file STILL does not
+# exist — .run/ unwritable, so neither recompose nor seeding can ever create
+# it — launch from the tracked workflow rather than aborting a checkout that
+# worked read-only before #32. The unconditional-path rationale does not
+# apply here: with .run/ unwritable there is nothing to hot-reload, so no
+# recompose can go unwatched.
+if [ ! -f "$COMPOSED_WORKFLOW" ]; then
+  echo "WARN composed workflow missing at $COMPOSED_WORKFLOW (.run unwritable?) — launching from tracked $WORKFLOW; hot config reload is INACTIVE" >&2
+  COMPOSED_WORKFLOW="$WORKFLOW"
+fi
 # shellcheck disable=SC2086
 exec $SB_ORCHESTRATOR_CMD --workflow "$COMPOSED_WORKFLOW"
