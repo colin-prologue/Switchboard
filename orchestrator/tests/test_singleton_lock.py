@@ -127,6 +127,29 @@ def test_holder_pid_falls_back_to_unknown_when_unwritten(tmp_path: Path) -> None
         holder.wait()
 
 
+def test_dead_published_pid_is_labelled_stale(tmp_path: Path) -> None:
+    """A refuser racing the holder's pid write can read a PREVIOUS holder's
+    pid (codex review, PR #139); a dead pid must be labelled stale, never
+    reported as the live holder — pid reuse would send the operator to an
+    unrelated process."""
+    workflow = tmp_path / "WORKFLOW.md"
+    lock = lock_path_for(workflow)
+    holder = _spawn_holder(lock)
+    # a just-reaped child is a genuinely dead pid (reuse within the test
+    # window is vanishingly unlikely)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    lock.write_text(f"{dead.pid}\n")  # simulate the pre-overwrite window
+    try:
+        with pytest.raises(SingletonLockError) as excinfo:
+            acquire_singleton_lock(workflow)
+        assert f"{dead.pid} (stale: process dead)" in str(excinfo.value)
+        assert "Verify before acting" in str(excinfo.value)
+    finally:
+        holder.kill()
+        holder.wait()
+
+
 def test_acquired_lock_is_held_against_a_probing_subprocess(tmp_path: Path) -> None:
     """The missing direction: the helper as HOLDER.
 

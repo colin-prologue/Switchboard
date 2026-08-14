@@ -63,7 +63,10 @@ def acquire_singleton_lock(workflow_path: Path) -> int:
         raise SingletonLockError(
             f"another orchestrator already holds {path} (holder pid {holder}); "
             f"refusing to start a second orchestrator for this project. That pid "
-            f"is the python child, not the `uv run` wrapper a process tree shows"
+            f"is the python child, not the `uv run` wrapper a process tree shows. "
+            f"Verify before acting on it (`ps -p <pid> -o command=`): the holder "
+            f"publishes its pid AFTER taking the lock, so a refuser racing that "
+            f"write can read a previous holder's pid (codex review, PR #139)"
         ) from None
     except BaseException:
         os.close(fd)
@@ -80,13 +83,27 @@ def acquire_singleton_lock(workflow_path: Path) -> int:
 
 
 def _read_holder_pid(path: Path) -> str:
-    """The holder's pid as text, or `unknown`.
+    """The holder's pid as text, `<pid> (stale: process dead)`, or `unknown`.
 
     An empty file is the normal race window (the holder took the flock but has
-    not written its pid yet), not an error.
+    not written its pid yet), not an error. A published pid can also be STALE:
+    the new holder overwrites the file only after `flock` succeeds, so a
+    refuser racing that write reads the PREVIOUS holder's pid (codex review,
+    PR #139). A dead pid is labelled stale rather than reported as the holder
+    — pid reuse would otherwise send the operator to an unrelated process. A
+    live-but-reused pid cannot be distinguished here; the error text tells the
+    operator to verify before acting.
     """
     try:
         raw = path.read_text().strip()
     except OSError:
         return UNKNOWN_HOLDER
-    return raw if raw.isdigit() else UNKNOWN_HOLDER
+    if not raw.isdigit():
+        return UNKNOWN_HOLDER
+    try:
+        os.kill(int(raw), 0)
+    except ProcessLookupError:
+        return f"{raw} (stale: process dead)"
+    except OSError:
+        pass  # EPERM etc.: process exists but is not ours to signal
+    return raw
