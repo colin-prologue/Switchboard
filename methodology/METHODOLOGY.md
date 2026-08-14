@@ -69,7 +69,10 @@ means a human/agent already moved the issue, so the orchestrator leaves it alone
   `status:human-review`. A human merges. Agents never self-merge. Merge review
   includes ratifying (or overturning) any AgDRs the PR added under
   `<convention_root>.decisions/` — a PR that changed spec/methodology
-  semantics without one is incomplete.
+  semantics without one is incomplete. It also checks the `## In brief` block
+  (see "Writing for the reader" below): a PR body with no block, or whose
+  **What could be wrong** names a quality rather than a consequence, is
+  incomplete the same way and bounces the same way.
 
 ## Triage — adversarial ticket verification (active state)
 
@@ -162,6 +165,8 @@ the entry state. Match the path to the risk.
 
 For gated work, the issue body should contain:
 
+- an `## In brief` block (see "Writing for the reader" below) as the first
+  section,
 - a one-paragraph **intent** (what + why),
 - **acceptance criteria** written as checks (pass/fail, eval-shaped),
 - **non-goals** (hard scope boundaries),
@@ -171,6 +176,72 @@ For gated work, the issue body should contain:
 Acceptance criteria are the agent's definition of done; non-goals are boundaries
 it must not cross. (Product-intent files, the verification contract, and the
 elicitation front door arrive in later roadmap phases.)
+
+## Writing for the reader — the `## In brief` block
+
+Everything else in this methodology optimizes for an implementing agent: exact
+citations, enumerated consumers, `file:line` at a named sha. That precision is
+load-bearing and stays. It is also unreadable to a human catching up — the
+operator between context switches, or somebody helping review the board.
+
+So every agent-written ticket body, PR body, and judgment-carrying triage
+verdict opens with a fixed, grep-able block carrying **insight, not
+information**:
+
+```
+## In brief
+
+**What this does:** <one sentence>
+
+**What could be wrong:** <one decision or assumption, and what breaks if it is
+false>
+```
+
+**"Judgment-carrying" excludes exactly two of the five verdict routes.** NEEDS
+WORK, NEEDS DECISION, and SPLIT each reach a conclusion a reader can argue with,
+so each carries the block. A PASS verdict is one line saying the ticket passed,
+and an unchanged-body fast-path referral re-routes per a prior verdict having
+run no rubric and produced no new findings by construction. Neither holds
+judgment for a reader to scrutinize, so on those two a block would be ceremony
+wrapped around nothing — and the surest way to teach readers to skip it.
+
+Two rules make the fields hard to pad, and they are the whole mechanism:
+
+1. **"What this does" bans identifiers** — no issue numbers, no file paths, no
+   AgDR/ADR/OBS identifiers, no `status:*` label names, no function, class, or
+   field names. An author who cannot clear this bar has not understood its own
+   change well enough to summarize it. This is what buys the twenty-second
+   glance.
+
+2. **"What could be wrong" requires a conditional and a consequence** — the
+   *if X, then Y* shape. Naming a quality ("coverage could be broader", "this
+   could be more robust") fails; naming a trigger and its damage passes. This is
+   the scrutiny surface: it tells a reviewer what to argue with before merging.
+
+**Placement.** The block is the first section, with exactly two exceptions, each
+for its own reason. On a PR body, the `Closes #N` line comes first: the
+orchestrator resolves the issue link through GitHub's closing references, which
+match a closing keyword anywhere in the body — so the line's **presence** is
+machine-enforced by the handoff check, but its **position** is convention only,
+kept first so it stays visible and never gets edited away. On a triage verdict,
+**two** lines precede the block and the block is third, because both of those
+lines are contracts rather than courtesies: the `## Triage verdict` heading,
+which the workflow prompt pins as the comment's first line so verdicts stay
+grep-able, and the `body-sha1:` line directly under it, which the next triage
+session parses to tell a revised body from an unchanged one. A human-facing
+layer never displaces a machine-read one. Everything the author would otherwise
+write goes below the block, unchanged. The block adds a layer; it removes
+nothing.
+
+**Enforcement is asymmetric on purpose.** PR bodies are gated at Gate C — a
+missing or hedged block bounces the PR, the same as a missing AgDR. Ticket
+bodies and triage verdicts get the block from their templates but are never
+bounced for it: a triage round costs a full dispatched session, and a bounce for
+prose does not reduce implementation risk.
+
+The orchestrator's own generated comments (park notices, dispatch refusals) need
+no block — they already lead with a plain sentence and a concrete next action,
+and are the model this section generalizes.
 
 ## Drafting-quality checklist — the recurring failure classes
 

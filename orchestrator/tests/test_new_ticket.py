@@ -47,6 +47,7 @@ def test_scaffold_emits_all_sections_and_exits_clean() -> None:
     assert proc.returncode == 0, proc.stderr
     out = proc.stdout
     for section in (
+        "## In brief",
         "## Intent",
         "## Acceptance criteria",
         "## Non-goals",
@@ -74,6 +75,27 @@ def test_scaffold_pins_drafting_quality_content() -> None:
         "Every cited mechanism carries a `file:line` verified at a named HEAD sha;"
         " uncitable claims are labeled guesses." in out
     )
+
+
+def test_scaffold_leads_with_in_brief_block() -> None:
+    # The plain-language layer (spec 2026-08-08) sits ABOVE the citation-dense
+    # body, not instead of it. Two rules make the fields hard to pad, and both
+    # must reach the author inside the skeleton itself: the identifier ban on
+    # the first field, and the if/then consequence shape on the second.
+    proc = run("--scaffold")
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout
+    assert out.lstrip().startswith("## In brief"), (
+        "## In brief must be the FIRST section of the skeleton, above ## Intent"
+    )
+    assert "**What this does:**" in out
+    assert "**What could be wrong:**" in out
+    # Rule 1 — the identifier ban.
+    assert "no issue numbers, file paths, AgDR ids" in out
+    # Rule 2 — the conditional-and-consequence shape.
+    assert '"if X, then Y"' in out
+    # The dense body survives underneath, in order.
+    assert out.index("## In brief") < out.index("## Intent")
 
 
 # --- dry-run: flag -> payload mapping ----------------------------------------
@@ -145,7 +167,7 @@ def test_scaffold_output_is_valid_dry_run_body() -> None:
     scaffold = run("--scaffold")
     proc = run("--dry-run", "--title", "T", "--repo", "o/n", stdin=scaffold.stdout)
     assert proc.returncode == 0, proc.stderr
-    for section in ("## Intent", "## Acceptance criteria", "## Non-goals", "## Assumptions"):
+    for section in ("## In brief", "## Intent", "## Acceptance criteria", "## Non-goals", "## Assumptions"):
         assert section in proc.stdout
 
 

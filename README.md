@@ -167,6 +167,8 @@ The path a ticket takes *is* the risk control — match it to the risk:
 `scripts/new-ticket.sh --scaffold` emits the template. For gated work the body
 needs:
 
+- **`## In brief`** — a two-field plain-language summary (what this does, what
+  could be wrong), first section, above the rest.
 - **Intent** — one paragraph, what + why. State the problem, not the solution.
 - **Acceptance criteria** — pass/fail checks, eval-shaped. These are the agent's
   definition of done.
