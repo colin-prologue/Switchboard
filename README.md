@@ -33,7 +33,10 @@ repo:
 # 1. Scaffold the binding + create the status labels on the repo's issue board.
 scripts/register-project.sh --slug acme-api --repo acme/api --base main
 
-# 2. Launch its orchestrator process (one per project; see deploy/ for systemd).
+# 2. Launch its orchestrator process (one per project). This runs in the
+#    foreground and dies with the terminal — to leave it running unattended,
+#    supervise it: SETUP.md "Stage 5b — macOS supervision (launchd)", or
+#    deploy/switchboard@.service on Linux.
 export SB_ORCHESTRATOR_CMD="uv run --project orchestrator python -m orchestrator"
 scripts/run-project.sh acme-api
 
@@ -269,7 +272,8 @@ switchboard/
   hooks/           # workspace population: after_create / before_run / after_run
   scripts/         # register-project, run-project, list-projects, new-ticket,
                    #   verify-setup
-  deploy/          # optional systemd template (switchboard@.service)
+  deploy/          # optional supervision templates: switchboard@.service
+                   #   (systemd) + com.switchboard.__SLUG__.plist.template (launchd)
   projects/<slug>/ # per-project binding (created by register-project.sh)
   self/            # dogfood scope: this repo managed as its own project
                    #   (.switchboard/intents/ + .decisions/ ADRs/AgDRs)

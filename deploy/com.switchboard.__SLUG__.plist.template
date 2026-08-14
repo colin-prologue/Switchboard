@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent template: one supervised orchestrator process per
+  registered project. The macOS half of deploy/switchboard@.service, whose
+  header promised launchd and never delivered it (issue #112).
+
+  Render it by substituting the two placeholders, then install:
+
+      SLUG=switchboard-self
+      sed -e "s/__SLUG__/$SLUG/g" -e "s/__USER__/$(id -un)/g" \
+        deploy/com.switchboard.__SLUG__.plist.template \
+        > ~/Library/LaunchAgents/com.switchboard.$SLUG.plist
+
+  The placeholders are __SLUG__ / __USER__ rather than angle-bracket tokens
+  so this file stays well-formed XML as checked in: it is parsed verbatim by
+  orchestrator/tests/test_launchd_template.py, which is the only in-workspace
+  verification an agent has (plutil is not on the worker allowlist).
+
+  LaunchAgent, NOT LaunchDaemon: the agent CLIs authenticate against the
+  logged-in user session, which a system-context daemon cannot reach.
+
+  See SETUP.md, "macOS supervision (launchd)", for load/unload and for how to
+  read the log — including the one degraded state this file cannot detect.
+-->
+<plist version="1.0">
+<dict>
+  <!-- `launchctl load` rejects a plist with no Label, and the Label is the
+       handle for `launchctl stop|start|unload`. Before this file only the
+       filename implied it. -->
+  <key>Label</key>
+  <string>com.switchboard.__SLUG__</string>
+
+  <!-- ProgramArguments[0] is ABSOLUTE on purpose. A LaunchAgent's working
+       directory defaults to `/`, so a relative path is ENOENT, and KeepAlive
+       below turns that into a permanent spawn-failure retry whose log shows
+       nothing but the failure. Find your own value by running `pwd` at the
+       repo root and appending /scripts/run-project.sh.
+
+       No WorkingDirectory key is required: run-project.sh:59 does
+       `cd "$SB_HOME"` (derived from BASH_SOURCE at :16), which anchors the
+       repo-relative project path inside SB_ORCHESTRATOR_CMD once the script
+       itself has been found. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/__USER__/Developer/Switchboard/scripts/run-project.sh</string>
+    <string>__SLUG__</string>
+  </array>
+
+  <!-- NO CREDENTIAL VALUES HERE, deliberately. run-project.sh:31-46 sources
+       the GitHub App identity from ~/.config/switchboard/app.env, which is
+       the only credential path that works without an interactive shell (there
+       is no exported GITHUB_TOKEN under launchd). A token pasted below would
+       be a long-lived secret at rest in a plist. If the loaded agent cannot
+       reach app.env, fix app.env; do not add SB_APP_* or GITHUB_TOKEN here. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Required: run-project.sh:27 hard-fails without it. Value is the one
+         documented at SETUP.md Stage 3. -->
+    <key>SB_ORCHESTRATOR_CMD</key>
+    <string>uv run --project orchestrator python -m orchestrator</string>
+    <!-- launchd runs the job with no shell profile, so nothing is on PATH by
+         default. This must cover uv, gh, claude and git. Find each of your own
+         with `command -v uv` (then gh, claude, git) in a normal terminal and
+         make sure every directory it prints appears below. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/Users/__USER__/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- Two decisions live in these two keys.
+
+       (a) The path is ABSOLUTE because launchd passes plist string values
+           through literally and does not expand `~` — a `~/Library/...` value
+           writes nowhere at all. Find your own value with `echo $HOME`. It is
+           deliberately outside the repository and outside SB_WORKSPACE_ROOT
+           (projects/<slug>/project.env), not merely gitignored: these logs
+           carry issue identifiers and error text and must never land in a
+           workspace clone that gets committed or wiped.
+
+       (b) Both streams share ONE file so a traceback on stderr can be read
+           against the startup banner on stdout. Neither stream is timestamped,
+           so splitting them across two files makes that correlation
+           impossible, which is the entire point of this ticket.
+
+       launchd does NOT create the parent directory. `mkdir -p` it before the
+       first `launchctl load` (SETUP.md). -->
+  <key>StandardOutPath</key>
+  <string>/Users/__USER__/Library/Logs/switchboard/__SLUG__.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/__USER__/Library/Logs/switchboard/__SLUG__.log</string>
+
+  <!-- Restart on abnormal exit only.
+
+       Do NOT "fix" this to <true/>. The SIGTERM path exits 0 (main.py:77,
+       after a bounded shutdown: SHUTDOWN_TEARDOWN_GRACE_MS = 5000 at
+       scheduler.py:73, comfortably inside launchd's 20s default ExitTimeOut,
+       so the clean exit is reached rather than SIGKILLed into a restart).
+       SuccessfulExit=false is therefore what makes a deliberate
+       `launchctl stop` stay stopped; KeepAlive=true would fight the operator.
+
+       Startup failures do exit non-zero (main.py:45 on a missing workflow
+       file, main.py:68 on a run-loop exception), so they are genuinely
+       covered — and a process that dies before dispatching burns no
+       sessions. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <!-- Spawn-rate limit, in seconds. launchd has no MaxRestarts, so restarts
+       are unbounded by design here (see SETUP.md); this only guarantees they
+       are SLOW. 60 >= the 30s poll interval (polling.interval_ms: 30000,
+       workflow/WORKFLOW.base.md:16), so a crash loop cannot outpace one
+       dispatch cycle. That inequality is the whole justification for the
+       number; keep it if you change either side. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <!-- Explicit operator choice: start at login and on `launchctl load`. Set it
+       to <false/> if you would rather start the project by hand with
+       `launchctl start com.switchboard.__SLUG__`. -->
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

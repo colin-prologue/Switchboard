@@ -211,7 +211,99 @@ gate) — and watch it get picked up → a PR opened → the issue moved to
 `status:human-review`. That round trip is the whole loop proven end to end.
 
 For many projects, manage one process per project with the systemd template in
-`deploy/switchboard@.service`.
+`deploy/switchboard@.service` (Linux) or the launchd template below (macOS).
+
+---
+
+## Stage 5b — macOS supervision (launchd)  [OPTIONAL, per project]
+
+A foreground `run-project.sh` dies with its terminal, and its only output
+surface dies with it — so you cannot tell afterwards whether it crashed or was
+killed. `deploy/com.switchboard.__SLUG__.plist.template` is a per-project
+LaunchAgent that fixes both: it survives the terminal and it logs to a file.
+
+It is a **LaunchAgent**, not a LaunchDaemon, because the agent CLIs authenticate
+against your logged-in user session. It is opt-in per slug; registering a
+project does not start one.
+
+### Install
+
+Render the two placeholders, create the log directory, then load. **`mkdir -p`
+is not optional — launchd will not create the directory, and a job whose log
+path is unwritable fails to spawn.**
+
+```bash
+SLUG=switchboard-self
+
+sed -e "s/__SLUG__/$SLUG/g" -e "s/__USER__/$(id -un)/g" \
+  deploy/com.switchboard.__SLUG__.plist.template \
+  > ~/Library/LaunchAgents/com.switchboard.$SLUG.plist
+
+# Check the rendered file before loading, and fix PATH / the repo path if the
+# template's defaults don't match your machine (`pwd` at the repo root,
+# `command -v uv`, `echo $HOME`).
+plutil -lint ~/Library/LaunchAgents/com.switchboard.$SLUG.plist
+
+mkdir -p ~/Library/Logs/switchboard          # launchd will NOT do this for you
+launchctl load ~/Library/LaunchAgents/com.switchboard.$SLUG.plist
+```
+
+Stop it with `launchctl unload ~/Library/LaunchAgents/com.switchboard.$SLUG.plist`
+(or `launchctl stop com.switchboard.$SLUG` to stop the process while leaving the
+job loaded). A `stop` exits cleanly with status 0 and is **not** restarted —
+that is what `KeepAlive = {SuccessfulExit: false}` buys you over
+`KeepAlive: true`.
+
+Credentials are **not** in the plist. The loaded agent has no interactive shell
+and therefore no exported `GITHUB_TOKEN`, so it needs a complete `SB_APP_*` set
+in `~/.config/switchboard/app.env` (Stage 0b). Do not paste a token into
+`EnvironmentVariables`; a successful start logs
+`[run-project] App identity: <login>`, which is your proof it reached `app.env`.
+
+### The log
+
+```bash
+tail -f ~/Library/Logs/switchboard/$SLUG.log
+```
+
+Both stdout and stderr go to that one file, on purpose: neither stream is
+timestamped, so splitting them would make it impossible to line a traceback up
+with the startup banner it followed. There is no rotation — the file grows
+without bound, which is accepted for now (issue #12).
+
+### Reading it: two failure modes, one of which launchd cannot see
+
+**Restarts are unbounded.** launchd has no `MaxRestarts`; `ThrottleInterval`
+only rate-limits respawns. The template sets 60s, which is ≥ the 30s poll
+interval, so a crash loop can never outpace one dispatch cycle — but it will
+keep going forever. Detection is on you, via the log:
+
+- **Crash loop** — the startup banner
+  `[run-project] <slug> -> <repo> (workspaces: …)` repeating every ~60 seconds.
+  ```bash
+  grep -c '^\[run-project\] '"$SLUG"' ->' ~/Library/Logs/switchboard/$SLUG.log
+  ```
+  More than one line per intentional restart means the process is dying and
+  being respawned.
+
+- **Wedged ticks — `KeepAlive` cannot detect this one.** The scheduler swallows
+  every per-tick exception by design (`scheduler.py:450-451`, *"a tick must
+  never kill the service"*), so the more likely degraded state is not a crash at
+  all: the process stays alive and healthy-looking while every tick fails. You
+  get **one** startup banner and then `tick error` forever. No restart policy
+  can see this. Grep for it:
+  ```bash
+  grep -c 'tick error' ~/Library/Logs/switchboard/$SLUG.log
+  ```
+  A non-zero and growing count with no new banner is a wedged process. Restart
+  it by hand (`launchctl stop com.switchboard.$SLUG`).
+
+One more thing worth knowing before you restart anything: parked issues stay
+parked across a restart (`status:parked` is a durable label), but the
+per-issue **session counter is process memory only**, so every restart refunds
+each issue's attempt budget. An issue only parks if it burns
+`max_sessions_per_issue` failures inside a single process lifetime. Durable
+session counts are issue #15.
 
 ---
 
@@ -247,6 +339,7 @@ scripts/list-projects.sh
 scripts/new-ticket.sh
 scripts/verify-setup.sh
 deploy/switchboard@.service
+deploy/com.switchboard.__SLUG__.plist.template
 orchestrator/pyproject.toml
 orchestrator/uv.lock
 orchestrator/src/orchestrator/…   # scheduler, runner, tracker, workspace, …
