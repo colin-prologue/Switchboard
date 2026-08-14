@@ -501,6 +501,8 @@ def test_alias_config_is_denied(command, tmp_path):
     "git push --for{c..c}e origin main",
     "gh pr m{e,x}rge 12",                      # expands: merge mxrge -> verb merge
     "g{i..i}t push -f origin main",
+    "gh pr m{e..e..1}rge 12",                  # r23: stepped char range
+    "git push --for{c..c..1}e origin main",
 ])
 def test_brace_expansion_cannot_spell_denied_verbs(command, tmp_path):
     r = _run_bash(command, tmp_path)
@@ -514,6 +516,7 @@ def test_brace_expansion_cannot_spell_denied_verbs(command, tmp_path):
     "git commit -m 'msg with {1..3}'",
     "git push origin 'br{a}nch'",              # quoted braces stay literal
     "mkdir -p a/{b,c}/d",                      # non-git/gh expansion unaffected
+    "git add " + " ".join(f"f{i}.txt" for i in range(300)),  # r23: cap is growth-only
 ])
 def test_comments_and_quoted_braces_are_not_flags(command, tmp_path):
     r = _run_bash(command, tmp_path)

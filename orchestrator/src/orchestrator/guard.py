@@ -139,9 +139,12 @@ def _expand_word(word: str) -> list[str]:
             s = s or 1
             rng = range(a, z + 1, s) if a <= z else range(a, z - 1, -s)
             alts = [str(v) for v in rng]
-        elif len(lo) == 1 and len(hi) == 1 and not step:
+        elif len(lo) == 1 and len(hi) == 1:
+            # char ranges take a step too: {e..e..1} == e (codex r23)
             a, z = ord(lo), ord(hi)
-            rng = range(a, z + 1) if a <= z else range(a, z - 1, -1)
+            s = abs(int(step)) if step else 1
+            s = s or 1
+            rng = range(a, z + 1, s) if a <= z else range(a, z - 1, -s)
             alts = [chr(v) for v in rng]
     if not alts:
         # split on top-level commas
@@ -175,11 +178,12 @@ def _expand_word(word: str) -> list[str]:
 
 
 def _expand_words(tokens: list[str]) -> list[str]:
+    # the cap bounds EXPANSION growth per word (inside _expand_word), never
+    # the ordinary token count — `git add` with 300 plain paths is not an
+    # expansion (codex review r23, PR #136)
     out: list[str] = []
     for tok in tokens:
         out.extend(_expand_word(tok))
-        if len(out) > _MAX_EXPANSIONS:
-            raise ValueError("brace expansion too large")
     return out
 
 
