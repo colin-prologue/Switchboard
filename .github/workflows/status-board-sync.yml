@@ -1,0 +1,90 @@
+# status:* labels <-> GitHub Project v2 "Status" field (issue #22).
+#
+# The board is a kanban surface you can DRAG on, but the two directions are not
+# symmetric, and the asymmetry is the safety argument:
+#
+#   label -> field   UNCONDITIONAL. Native labels stay the single source of
+#                    truth, so every label change mirrors to the board. Fires on
+#                    the `issues: [labeled, unlabeled]` REPOSITORY webhook.
+#
+#   field -> label   RESTRICTED to three drags derived from
+#                    workflow/transitions.yml. Every other drag is SNAPPED BACK
+#                    (the field is rewritten from the label) with a line in the
+#                    run log. The honored set is: Todo -> Plan review,
+#                    Plan review -> Drafting, Decision -> Drafting.
+#
+# WHY YOUR DRAG BOUNCED. The orchestrator reads labels to decide what to
+# dispatch, so a drag may never make an issue dispatchable (-> Todo, Triage,
+# In progress), park or unpark it, or hand it to Gate C (Human review is
+# orchestrator-owned, written only after handoff evidence validates). Blocked is
+# the one that surprises people: it has NO edges in transitions.yml at all, so
+# every drag into or out of *Blocked* rubber-bands. Move the label, not the
+# card, when you mean it.
+#
+# WHY A POLL AND NOT A WEBHOOK. GitHub Actions has no `on:` event for Projects
+# v2 — `projects_v2_item` is an ORGANIZATION webhook event, never delivered to a
+# repository workflow, and this repo's owner is a User account. So the write
+# direction diffs on a schedule instead. A drag takes effect within one cycle,
+# BEST EFFORT: Actions delays scheduled runs under load.
+#
+# 60 DAYS OF INACTIVITY DISABLES THIS WORKFLOW. GitHub auto-disables scheduled
+# workflows in a repository with no activity for 60 days, which would silently
+# kill the field -> label direction with no in-repo signal. Re-enable is one
+# click: Actions -> status-board-sync -> "Enable workflow".
+#
+# CREDENTIAL. secrets.GITHUB_TOKEN cannot touch Projects v2 (the `permissions:`
+# block has no v2 key; `repository-projects` is the CLASSIC boards scope), and
+# BOTH directions write Projects on every run — the mirror included. So this
+# workflow runs on PROJECT_SYNC_PAT, a personal token with `project` scope.
+name: status-board-sync
+
+on:
+  issues:
+    types: [labeled, unlabeled]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# A poll must not interleave with an in-flight mirror. Never cancel: a cancelled
+# mirror is a card left showing the wrong column until the next poll.
+concurrency:
+  group: status-board-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.PROJECT_SYNC_PAT }}
+      SB_PROJECT_OWNER: colin-prologue
+      SB_PROJECT_NUMBER: ${{ vars.SB_PROJECT_NUMBER }}
+      # Event payload reaches the shell through env, never through `${{ }}`
+      # interpolation into a run: line — the standard Actions injection guard.
+      SB_REPO: ${{ github.repository }}
+      SB_ISSUE: ${{ github.event.issue.number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Mirror one issue's labels to the board
+        if: github.event_name == 'issues'
+        run: |
+          uv run --project orchestrator python -m orchestrator.status_board \
+            --mode mirror \
+            --issue "$SB_ISSUE" \
+            --owner "$SB_PROJECT_OWNER" \
+            --project "$SB_PROJECT_NUMBER" \
+            --repo "$SB_REPO"
+
+      - name: Diff the board against the labels (drag arbitration)
+        if: github.event_name != 'issues'
+        run: |
+          uv run --project orchestrator python -m orchestrator.status_board \
+            --mode poll \
+            --owner "$SB_PROJECT_OWNER" \
+            --project "$SB_PROJECT_NUMBER" \
+            --repo "$SB_REPO"
