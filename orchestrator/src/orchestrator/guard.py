@@ -99,6 +99,90 @@ def _balanced_paren_end(command: str, k: int) -> int:
     return n
 
 
+_BRACE_OPEN = "\x00"
+_BRACE_CLOSE = "\x01"
+_MAX_EXPANSIONS = 256
+_RANGE_RE = re.compile(r"^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$")
+
+
+def _expand_word(word: str) -> list[str]:
+    """Bash brace expansion over sentinel-marked braces (codex review r22,
+    PR #136). Expressions with a top-level comma or a valid `..` range
+    expand; anything else is literal, braces restored. Results are capped —
+    the caller denies in-band on overflow (a legit worker command never
+    needs hundreds of expansions; an obfuscated one gets no benefit of the
+    doubt)."""
+    start = word.find(_BRACE_OPEN)
+    if start == -1:
+        return [word.replace(_BRACE_CLOSE, "}")]
+    depth = 0
+    end = -1
+    for k in range(start, len(word)):
+        if word[k] == _BRACE_OPEN:
+            depth += 1
+        elif word[k] == _BRACE_CLOSE:
+            depth -= 1
+            if depth == 0:
+                end = k
+                break
+    if end == -1:  # unmatched: literal
+        return [word.replace(_BRACE_OPEN, "{").replace(_BRACE_CLOSE, "}")]
+    prefix, body, suffix = word[:start], word[start + 1:end], word[end + 1:]
+
+    alts: list[str] = []
+    m = _RANGE_RE.match(body)
+    if m and _BRACE_OPEN not in body:
+        lo, hi, step = m.group(1), m.group(2), m.group(3)
+        if lo.lstrip("-").isdigit() and hi.lstrip("-").isdigit():
+            a, z = int(lo), int(hi)
+            s = abs(int(step)) if step else 1
+            s = s or 1
+            rng = range(a, z + 1, s) if a <= z else range(a, z - 1, -s)
+            alts = [str(v) for v in rng]
+        elif len(lo) == 1 and len(hi) == 1 and not step:
+            a, z = ord(lo), ord(hi)
+            rng = range(a, z + 1) if a <= z else range(a, z - 1, -1)
+            alts = [chr(v) for v in rng]
+    if not alts:
+        # split on top-level commas
+        parts: list[str] = [""]
+        d = 0
+        for ch in body:
+            if ch == _BRACE_OPEN:
+                d += 1
+            elif ch == _BRACE_CLOSE:
+                d -= 1
+            if ch == "," and d == 0:
+                parts.append("")
+            else:
+                parts[-1] += ch
+        if len(parts) < 2:  # no expansion form: literal braces
+            return [
+                prefix.replace(_BRACE_OPEN, "{").replace(_BRACE_CLOSE, "}")
+                + "{" + _expand_word(body)[0] + "}" + s
+                for s in _expand_word(suffix)
+            ][:1] or [word]
+        alts = parts
+    if len(alts) > _MAX_EXPANSIONS:
+        raise ValueError("brace expansion too large")
+    out: list[str] = []
+    for alt in alts:
+        for expanded in _expand_word(prefix + alt + suffix):
+            out.append(expanded)
+            if len(out) > _MAX_EXPANSIONS:
+                raise ValueError("brace expansion too large")
+    return out
+
+
+def _expand_words(tokens: list[str]) -> list[str]:
+    out: list[str] = []
+    for tok in tokens:
+        out.extend(_expand_word(tok))
+        if len(out) > _MAX_EXPANSIONS:
+            raise ValueError("brace expansion too large")
+    return out
+
+
 def _normalize_quoting(command: str) -> str:
     """Rewrite the bash quoting forms shlex does not know, QUOTE-AWARE: a
     `$'` or `$"` is shell syntax only OUTSIDE ordinary quotes — inside double
@@ -126,6 +210,25 @@ def _normalize_quoting(command: str) -> str:
         if state == "":
             if heredoc_pending and c == "\n":
                 break
+            if c == "#" and at_word_start:
+                # an unquoted # at a word boundary starts a comment bash
+                # never passes to the CLI (codex review r22, PR #136 —
+                # `git push origin b # never --force` is an ordinary push);
+                # drop through end-of-line
+                nl = command.find("\n", i)
+                if nl == -1:
+                    break
+                i = nl
+                continue
+            if c in "{}":
+                # mark UNQUOTED braces with sentinels so _expand_words can
+                # apply bash brace expansion after shlex strips quotes —
+                # quoted braces stay literal (codex review r22, PR #136:
+                # `gh pr m{e..e}rge` executes `gh pr merge`)
+                out.append("\x00" if c == "{" else "\x01")
+                at_word_start = False
+                i += 1
+                continue
             redir = _REDIR_WORD_RE.match(command, i) if at_word_start \
                 else _REDIR_RE.match(command, i)
             if redir:
@@ -226,9 +329,10 @@ def _tokenize(command: str) -> list[str]:
     command = command.replace("\\\n", "")
     command = _normalize_quoting(command)
     try:
-        return shlex.split(command)
+        tokens = shlex.split(command)
     except ValueError:
-        return command.split()
+        tokens = command.split()
+    return _expand_words(tokens)
 
 
 def _bundled_bool(token: str, target: str, value_takers: str) -> bool:

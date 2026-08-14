@@ -492,3 +492,29 @@ def test_push_config_on_non_push_commands_is_allowed(command, tmp_path):
 def test_alias_config_is_denied(command, tmp_path):
     r = _run_bash(command, tmp_path)
     assert r.returncode == 2
+
+
+# --- brace expansion + comments (round 22, PR #136) ---------------------------
+
+@pytest.mark.parametrize("command", [
+    "gh pr m{e..e}rge 12",
+    "git push --for{c..c}e origin main",
+    "gh pr m{e,x}rge 12",                      # expands: merge mxrge -> verb merge
+    "g{i..i}t push -f origin main",
+])
+def test_brace_expansion_cannot_spell_denied_verbs(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 2
+
+
+@pytest.mark.parametrize("command", [
+    "git push origin branch # never --force",
+    "gh pr review 12 -c -b ok # never --approve",
+    "gh pr comment 5 --body 'has # hash and {a,b} braces'",
+    "git commit -m 'msg with {1..3}'",
+    "git push origin 'br{a}nch'",              # quoted braces stay literal
+    "mkdir -p a/{b,c}/d",                      # non-git/gh expansion unaffected
+])
+def test_comments_and_quoted_braces_are_not_flags(command, tmp_path):
+    r = _run_bash(command, tmp_path)
+    assert r.returncode == 0
