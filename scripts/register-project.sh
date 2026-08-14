@@ -60,6 +60,7 @@ cat > "$PROJ_DIR/project.env" <<EOF
 # so the workspace hooks can see it. Secrets stay in the environment, not here.
 SB_PROJECT_SLUG=$SLUG
 SB_WORKFLOW_TEMPLATE=base
+SB_MAX_AGENTS=$MAX_AGENTS
 SB_GITHUB_REPO=$REPO
 SB_BASE_BRANCH=$BASE
 SB_WORKSPACE_ROOT=$WORKSPACE_ROOT
