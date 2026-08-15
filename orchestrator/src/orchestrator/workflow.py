@@ -292,6 +292,53 @@ class Config:
             )
         return value
 
+    # -- runtime freshness (issue #131: the per-tick preflight caller) ---------
+    #
+    # Both keys are DEFAULT-ONLY — they ship in no template, exactly like
+    # `polling.interval_ms`'s own default, and are read in that accessor's
+    # shape: section `get`, keyed default, wrong type -> silently default,
+    # out-of-range -> WorkflowError. Both are force-called from
+    # `validate_dispatch` so an out-of-range value fails at load/reload rather
+    # than inside `_tick`, where the blanket handler would repeat it every tick.
+
+    def freshness_timeout_ms(self) -> int:
+        """Wall-clock bound on ONE preflight invocation from the tick.
+
+        Deliberately not `hooks.timeout_ms`'s 60000: `polling.interval_ms` is
+        the SLEEP BETWEEN ticks, so a hung preflight EXTENDS the cycle rather
+        than eating into it.
+        """
+        raw = self._config.get("freshness")
+        raw = raw if isinstance(raw, dict) else {}
+        value = raw.get("timeout_ms", 20000)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return 20000
+        if value <= 0:
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"freshness.timeout_ms must be a positive integer, got {value!r}"
+                " (a non-positive bound kills every preflight before it runs)",
+            )
+        return value
+
+    def freshness_min_interval_ms(self) -> int:
+        """Minimum spacing between preflight invocations from the tick.
+
+        Binds THIS caller only — the launch path fetches unconditionally.
+        """
+        raw = self._config.get("freshness")
+        raw = raw if isinstance(raw, dict) else {}
+        value = raw.get("min_interval_ms", 300000)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return 300000
+        if value <= 0:
+            raise WorkflowError(
+                "workflow_parse_error",
+                "freshness.min_interval_ms must be a positive integer, got "
+                f"{value!r} (fetch on every tick; use 1 if that is intended)",
+            )
+        return value
+
     # -- fold (issue #51 part a: operator fold-signal detection) ---------------
 
     def fold(self) -> FoldConfig:
@@ -988,5 +1035,7 @@ def validate_dispatch(cfg: Config, *, provider_id: str = "claude") -> None:
     cfg.hooks()
     cfg.workspace_root()
     cfg.polling_interval_ms()
+    cfg.freshness_timeout_ms()
+    cfg.freshness_min_interval_ms()
     cfg.fold()
     cfg.review_response()

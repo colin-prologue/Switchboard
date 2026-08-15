@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -78,6 +79,11 @@ SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
 # decision survives a process restart (AgDR-002 weakest point → resolved).
 PARK_LABEL = "status:parked"
 
+# Runtime freshness (issue #131). The tick execs #32's standalone preflight by
+# ABSOLUTE path under $SB_HOME — never resolved against the process CWD, which
+# the scheduler does not own.
+FRESHNESS_SCRIPT_RELPATH = ("scripts", "freshness-preflight.sh")
+
 # Session-budget roles (issue #35 / AgDR-033). `max_sessions_per_issue` is
 # accounted PER ROLE, not per issue: a `status:triage` dispatch runs a VERIFIER
 # session (the triage rubric), every other active state runs an IMPLEMENTER
@@ -102,6 +108,23 @@ VERIFY_STATES = frozenset({"triage", "review"})
 def session_role(state: str) -> str:
     """The session role a dispatch in `state` runs as (issue #35 / AgDR-033)."""
     return VERIFY_ROLE if state.lower() in VERIFY_STATES else IMPLEMENT_ROLE
+
+
+async def _kill_process_group(proc: asyncio.subprocess.Process | None) -> None:
+    """Best-effort SIGKILL of a `start_new_session=True` child's whole GROUP,
+    then reap it. Same shape (and same reason) as `WorkspaceManager`'s: a
+    subprocess must not outlive the await that supervises it, and killing only
+    the leader leaves its own background children holding the pipes."""
+    if proc is None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        await proc.wait()
+    except Exception:  # noqa: BLE001 - best-effort reap after kill
+        pass
 
 # Claim-visibility status labels (issue #14 / AgDR-010) plus the terminal
 # handoff label (issue #61 / AgDR-028). The orchestrator owns all four status
@@ -294,6 +317,15 @@ class Orchestrator:
         # are cadence and log-once bookkeeping only.
         self._review_last_poll_at: datetime | None = None
         self._review_disabled_logged = False
+
+        # Runtime-freshness preflight cadence (issue #131). In-memory, per
+        # instance, and deliberately UNSET at construction so the first
+        # eligible tick always execs. Stamped AT EXEC (before the await), so
+        # every fail-open outcome — non-zero exit, spawn failure, timeout —
+        # and the cancellation re-raise all consume the interval; stamping on
+        # success instead would let a hanging preflight re-exec on every tick
+        # and turn one long tick into a permanently long cycle.
+        self._freshness_last_run_at: datetime | None = None
 
         self._stopping = False
         self._workflow_broken: str | None = None  # §5.5 dispatch block reason
@@ -506,9 +538,115 @@ class Orchestrator:
             return
         await wsm.cleanup_terminal([i.identifier for i in terminal])
 
+    # -- runtime-freshness preflight (issue #131) --------------------------------
+
+    async def _run_freshness_preflight(self) -> None:
+        """Exec #32's freshness preflight for THIS project, non-blocking and
+        bounded, immediately before `_maybe_reload()` in the same tick.
+
+        The script recomposes `$SB_HOME/.run/<slug>/composed-WORKFLOW.md` from
+        origin — which is the file the launch path points the scheduler at — so
+        awaiting it here (rather than firing it off) is what makes a recompose
+        adoptable in the SAME tick.
+
+        Every failure mode this caller can see is fail-open with a named
+        warning and the tick PROCEEDS: `_tick` runs inside the blanket handler
+        in `run()`, where any raise aborts the whole tick (no reload, no
+        reconciliation, no dispatch) — a freshness check must never cost that.
+        `CancelledError` is the one carve-out: it is a `BaseException` on
+        `requires-python >= 3.12`, the blanket `except Exception` never sees
+        it, and swallowing it would defeat cooperative shutdown on exactly the
+        tick that is mid-preflight.
+        """
+        # Skip rule: an unbound OR EMPTY variable means this process was not
+        # launched by run-project.sh (test suites, ad-hoc runs). `SB_HOME=""`
+        # — what a `set -a` over a blank assignment yields — is bound but
+        # degrades the script to a `/scripts/...` path, so falsiness (not
+        # membership) is the test. Never exec a degraded path.
+        sb_home = os.environ.get("SB_HOME")
+        slug = os.environ.get("SB_PROJECT_SLUG")
+        if not sb_home or not slug:
+            log("freshness preflight skipped: SB_HOME/SB_PROJECT_SLUG unbound "
+                "or empty; not launched by run-project.sh")
+            return
+
+        cfg = self._cfg
+        timeout_ms = cfg.freshness_timeout_ms() if cfg is not None else 20000
+        min_interval_ms = cfg.freshness_min_interval_ms() if cfg is not None else 300000
+
+        now = datetime.now(timezone.utc)
+        if self._freshness_last_run_at is not None:
+            elapsed_ms = (now - self._freshness_last_run_at).total_seconds() * 1000
+            if elapsed_ms < min_interval_ms:
+                return
+        # Stamp AT EXEC, before the await — see `_freshness_last_run_at`.
+        self._freshness_last_run_at = now
+
+        script = Path(sb_home).joinpath(*FRESHNESS_SCRIPT_RELPATH)
+        proc: asyncio.subprocess.Process | None = None
+        try:
+            # `bash <script>` rather than executing it directly, mirroring
+            # run-project.sh:77: the launch path does not depend on the exec
+            # bit surviving a copy/checkout, and neither should the tick.
+            #
+            # No `env=`: the child INHERITS this process's environment, which
+            # is how SB_LAUNCH_SHA reaches the script unchanged when bound and
+            # is absent when it is not. Building an explicit dict here (the
+            # `runner.py` token shape) is the trap — one forgotten key
+            # silently re-degrades the script to a HEAD-based staleness
+            # detector, the substitution #32 removed.
+            proc = await asyncio.create_subprocess_exec(
+                "bash",
+                str(script),
+                slug,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_ms / 1000.0
+            )
+        except asyncio.TimeoutError:
+            # The subprocess must not outlive the await that supervises it
+            # (workspace.py `_run_hook`): the script backgrounds its own fetch
+            # and watchdog, so killing the leader alone would leave them
+            # holding the pipes past the bound.
+            await _kill_process_group(proc)
+            log("freshness preflight timed out; tick continues (fail-open)",
+                timeout_ms=timeout_ms, slug=slug)
+            return
+        except asyncio.CancelledError:
+            await _kill_process_group(proc)
+            log("freshness preflight cancelled; killed process group", slug=slug)
+            raise
+        except Exception as exc:  # noqa: BLE001 - spawn failure is fail-open
+            await _kill_process_group(proc)
+            log("freshness preflight could not be run; tick continues "
+                "(fail-open)", script=str(script), error=repr(exc))
+            return
+
+        # Re-log the child's streams: the script's named warnings — including
+        # #32's loaded-sha degradation warning — reach the operator through
+        # here and nowhere else. There is no separate tick-side warning for
+        # them; the script emits, the tick re-logs.
+        for stream, name in ((stderr, "stderr"), (stdout, "stdout")):
+            for line in stream.decode(errors="replace").splitlines():
+                if line.strip():
+                    log("freshness preflight output", stream=name, line=line)
+
+        if proc.returncode != 0:
+            # Exit 0 is the script's contract on every fail-open path, so a
+            # non-zero exit is a usage/spawn-shape error on OUR side. Still
+            # fail-open: dispatch this tick is not the place to litigate it.
+            log("freshness preflight exited non-zero; tick continues "
+                "(fail-open)", returncode=proc.returncode, slug=slug)
+
     # -- poll tick (core §16.2) --------------------------------------------------
 
     async def _tick(self) -> None:
+        # Awaited BEFORE the reload so a recompose from origin is adopted in
+        # this same tick (issue #131).
+        await self._run_freshness_preflight()
         self._maybe_reload()
         await self._reconcile_running()
 
