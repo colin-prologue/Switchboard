@@ -47,6 +47,14 @@
   + fresh clone + the same allowlist.
 - **Guard matcher superset:** the PreToolUse guard also matches `MultiEdit`
   (harmless superset of the Write/Edit/NotebookEdit list above).
+- **Scope limit narrowed (2026-08-09, issue #133 / AgDR-036).** "Bash commands
+  are not statically analyzed" is no longer absolute: the guard now matches
+  `Bash` and denies an ENUMERATED set of Gate-C-violating shapes (`gh pr merge`,
+  `gh pr review … --approve`, `gh pr close`, force-pushes), matched by verb
+  position anchored at `tokens[0]`. It is a pinned enumeration, not a parser,
+  and — under the soft denial semantics ratified above — it raises the cost of a
+  Gate C violation and makes attempts observable rather than making them
+  impossible. Everything else about Bash remains unanalyzed. See AgDR-036.
 - **Environment inheritance made explicit:** the agent subprocess inherits
   the orchestrator's environment including `GITHUB_TOKEN`; "the token never
   enters the workspace" means never written to disk in the clone. Bash-level
