@@ -229,7 +229,39 @@ workflow's mtime, so it takes effect without a restart. A project may also move
 *down* the ladder for an exploratory push — stance is a property of the work in
 front of you, not a rank the project earns.
 
+### Writing a stance: it is not just prompt text
+
+Every stance shipped so far needed runtime changes the prompt could not supply,
+and each one was discovered in production rather than at review. Before a new
+recipe is considered done, walk this list:
+
+1. **Every state the prompt names must be in `active_states`, or nothing
+   dispatches it.** A gate is a state nobody dispatches — so a prompt that tells
+   an agent to pick work up at `status:review` describes a gate unless the recipe
+   also lists `review` as active.
+2. **Set `handoff_label` if the stance ends anywhere but the human gate.** The
+   orchestrator writes this on a validated handoff; leaving the default parks
+   completed work at `status:human-review` no matter what the prompt says. The
+   loader refuses a non-default target absent from `active_states`, which is the
+   check that catches (1) and (2) together.
+3. **Check the session-role split covers the new states.** Per-role budgets key
+   on `(issue, role)`. A new state that is not registered as its own role shares
+   the implementer's budget and exhausts it early — the QA role ran as
+   `implement` for exactly this reason.
+4. **Ask what the stance implies about *permissions*, not just flow.** Handing
+   Gate C to an agent means the merge guard has to know. A stance that changes
+   who reviews and does not change what the tool layer permits will be silently
+   overridden by the tool layer.
+5. **Compose it once and read the output.** Substituting a value into a
+   YAML scalar can produce invalid YAML that the template alone never shows.
+
+The pattern behind all five: **a stance adds a concept the runtime usually has a
+slot for already.** The question to ask of each new prompt instruction is not
+"is this clear?" but "which existing runtime field carries this, and did I set
+it?"
+
 Rationale and refutation: `self/.decisions/AgDR-039-per-project-stance-ladder.md`.
+The permission dimension in (4) is `self/.decisions/AgDR-043-gate-c-owner-is-a-stance-property.md`.
 
 ### Per ticket — the entry state
 
