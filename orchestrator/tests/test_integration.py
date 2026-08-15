@@ -905,9 +905,32 @@ async def test_verify_spend_leaves_implementer_budget_intact(tmp_path, monkeypat
     assert tracker.comments == []            # never parked, never refused
     assert "node-1" not in orch.parked
 
+
     runner.release.set()
     tracker.candidates = []                  # quiesce the continuation retry
     await wait_for(lambda: not orch.running)
+
+def test_agent_qa_review_state_is_a_verify_role() -> None:
+    """`status:review` is verification, so it must not spend the implement budget.
+
+    The prototype stance (AgDR-039) added an agent QA state without registering
+    it as a verification state, so a QA dispatch logged session_role=implement
+    and shared the implementer's counter. On a ticket that took four
+    implementation passes, QA would have inherited one session — the exact
+    failure AgDR-033 introduced per-role budgets to prevent, reappearing through
+    a state the runtime did not know was verification.
+
+    VERIFY_STATES is the union across stances: `triage` never occurs at
+    prototype, `review` never occurs at base, so listing both is free.
+    """
+    assert scheduler_mod.session_role("review") == VERIFY_ROLE
+    assert scheduler_mod.session_role("Review") == VERIFY_ROLE      # normalized
+    assert scheduler_mod.session_role("triage") == VERIFY_ROLE      # base, unchanged
+    assert scheduler_mod.session_role("todo") == IMPLEMENT_ROLE
+    assert scheduler_mod.session_role("in progress") == IMPLEMENT_ROLE
+    # The human gate is NOT a verify role: nothing dispatches it, so a dispatch
+    # in that state would be a bug rather than a verification session.
+    assert scheduler_mod.session_role("human review") == IMPLEMENT_ROLE
 
 
 async def test_verify_budget_exhaustion_park_comment_names_the_budget(
@@ -930,6 +953,37 @@ async def test_verify_budget_exhaustion_park_comment_names_the_budget(
     assert "verify budget exhausted (2/2 verify sessions)" in tracker.comments[0][1]
     # Label set unchanged: the sole park label, no new status:* vocabulary.
     assert tracker.labels_added == [("node-1", ("status:parked",))]
+
+
+async def test_verify_unpark_resets_the_verify_counter(tmp_path, monkeypatch):
+    """Twin of the IMPLEMENT_ROLE unpark assertion (issue #130).
+
+    Counters are per-role, so the unpark reset has to be asserted per-role too:
+    an unparked verify issue must re-dispatch as a FRESH verify session 1, not
+    a continuation of the pre-park count — which would re-park it immediately,
+    the sticky-re-park shape the 2026-08-09 incident showed.
+    """
+    tmpl = WORKFLOW_TMPL.replace(
+        'active_states: ["todo", "in progress"]',
+        'active_states: ["triage", "todo", "in progress"]')
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+    issue = make_issue(1, "triage")          # verifier never routes a verdict
+    tracker.candidates = [issue]
+    tracker.states = {"node-1": issue}
+
+    await orch._tick()
+    await wait_for(lambda: "node-1" in orch.parked)
+    assert orch.sessions_for_issue("node-1") == {VERIFY_ROLE: 2}
+
+    # human removes status:parked -> unparked, verify counter reset
+    unparked = make_issue(1, "triage")       # labels back to just status:triage
+    tracker.candidates = [unparked]
+    tracker.states = {"node-1": make_issue(1, "human review")}
+    await orch._tick()
+
+    assert "node-1" not in orch.parked
+    assert orch.sessions_for_issue("node-1") == {VERIFY_ROLE: 1}
+    await wait_for(lambda: not orch.running)
 
 
 async def test_next_turn_token_refresh_remains_reconcilable(tmp_path, monkeypatch):
@@ -1209,6 +1263,58 @@ async def test_incomplete_turn_resumes_same_session_with_continuation_prompt(
     err = capfd.readouterr().err
     assert "worker completed" in err
     assert "worker failed" not in err
+
+
+@pytest.mark.asyncio
+async def test_handoff_rejection_detail_reaches_the_next_turns_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd
+) -> None:
+    """A rejected handoff must be told to the WORKER, not just the log.
+
+    The worker is the only party that can rewrite the evidence file. If the
+    rejection reaches the orchestrator log and the resumed session re-reads an
+    unchanged continuation prompt, it rewrites the same malformed file every
+    turn until a cap ends the session — the loop is unwinnable however good the
+    diagnostic is. Observed live on civ-life#4: ~15 rejected handoffs and a full
+    budget ceiling. This pins that the detail is carried into the next prompt.
+    """
+    tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 2")
+
+    # Evidence is validated ONLY after a terminal-success turn, and a rejection
+    # deliberately lets the session continue so the worker can repair. So every
+    # turn succeeds here: turn 1 succeeds -> evidence rejected -> turn 2 must
+    # carry the reason.
+    def factory(n, resume):
+        return TurnResult(status="succeeded", session_id=f"s-{n}", cost_usd=0.01)
+
+    runner = ScriptedRunner(factory)
+    orch, tracker, _, ws_root = _build_harness(tmp_path, monkeypatch, tmpl, runner=runner)
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}
+
+    # Malformed evidence in the workspace the worker will use: `issue` as a bare
+    # int, the exact shape that occurred in the field.
+    run_dir = ws_root / "1" / ".run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "handoff-evidence.json").write_text(
+        '{"issue": 1, "pr_number": 5, "head_sha": "abc123"}', encoding="utf-8"
+    )
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+
+    assert len(runner.turns) >= 2, "expected a continuation turn after the rejection"
+    second_prompt = runner.turns[1][2]
+    # The worker must be told it was rejected, and told WHAT to fix.
+    assert "REJECTED" in second_prompt
+    assert "malformed_evidence" in second_prompt
+    assert "STRING" in second_prompt, (
+        "the expected type must reach the worker, not just the log:\n" + second_prompt
+    )
+    # And told not to redo the implementation.
+    assert "not the code" in second_prompt
 
 
 async def test_incomplete_leaves_turn_succeeded_false_and_cancellable(
