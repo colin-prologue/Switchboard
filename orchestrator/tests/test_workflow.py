@@ -167,6 +167,108 @@ def test_tracker_defaults(tmp_path: Path):
     assert t.terminal_states == ["closed"]
 
 
+def test_tracker_handoff_label_defaults_to_human_review(tmp_path: Path):
+    """Absent config, the terminal handoff still lands on the Gate C label.
+
+    The default is what keeps every pre-stance binding behaving identically:
+    only a stance that explicitly opts into an agent QA state changes it.
+    """
+    defn = WorkflowDefinition(config={"tracker": {"kind": "github", "repo": "acme/widgets"}}, prompt_template="")
+    cfg = Config(defn, tmp_path)
+    assert cfg.tracker().handoff_label == "status:human-review"
+
+
+def test_tracker_handoff_label_override_targets_an_active_qa_state(tmp_path: Path):
+    """An autonomous stance points the handoff at a state it also dispatches.
+
+    If `handoff_label` named a state absent from `active_states`, a validated
+    handoff would park the issue forever — so the two are set together, and
+    this pins that pairing.
+    """
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["todo", "in progress", "review"],
+                "handoff_label": "status:review",
+            }
+        },
+        prompt_template="",
+    )
+    t = Config(defn, tmp_path).tracker()
+    assert t.handoff_label == "status:review"
+    assert t.handoff_label.removeprefix("status:").replace("-", " ") in t.active_states
+
+
+def test_tracker_handoff_label_rejects_a_non_dispatchable_target(tmp_path: Path):
+    """A non-default handoff target absent from active_states must not load.
+
+    The transition itself would succeed, so the failure is silent: every
+    completed ticket lands on a label the eligibility filter excludes and parks
+    forever with neither QA nor a human handoff. Fail at load instead.
+    """
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["todo", "in progress"],
+                "handoff_label": "status:review",
+            }
+        },
+        prompt_template="",
+    )
+    with pytest.raises(WorkflowError) as exc:
+        Config(defn, tmp_path).tracker()
+    assert exc.value.code == "invalid_handoff_label"
+    assert "active_states" in str(exc.value)
+
+
+def test_tracker_handoff_label_rejects_a_non_status_label(tmp_path: Path):
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["todo", "review"],
+                "handoff_label": "review",
+            }
+        },
+        prompt_template="",
+    )
+    with pytest.raises(WorkflowError) as exc:
+        Config(defn, tmp_path).tracker()
+    assert exc.value.code == "invalid_handoff_label"
+
+
+def test_tracker_default_handoff_label_is_exempt_from_the_active_check(tmp_path: Path):
+    """The default is a HUMAN gate — gated stances keep it out of active_states
+    deliberately, so validating it would break every pre-stance binding."""
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["triage", "todo", "in progress"],
+            }
+        },
+        prompt_template="",
+    )
+    t = Config(defn, tmp_path).tracker()
+    assert t.handoff_label == "status:human-review"
+    assert "human review" not in t.active_states
+
+
+def test_tracker_handoff_label_blank_falls_back_to_default(tmp_path: Path):
+    """An empty string is a composition accident, not an intent to unset."""
+    defn = WorkflowDefinition(
+        config={"tracker": {"kind": "github", "repo": "acme/widgets", "handoff_label": "   "}},
+        prompt_template="",
+    )
+    assert Config(defn, tmp_path).tracker().handoff_label == "status:human-review"
+
+
 def test_tracker_api_key_dollar_var_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
     defn = WorkflowDefinition(config={"tracker": {"kind": "github", "repo": "acme/widgets"}}, prompt_template="")
@@ -997,6 +1099,79 @@ def test_base_and_composed_workflow_are_in_sync():
     )
 
 
+def test_workflow_prompt_pins_in_brief_block():
+    """The plain-language block must reach the agent through the prompt itself.
+
+    Pinned in BOTH files: the base template and the composed mirror. The
+    sync test above proves they match; this test proves the content is
+    actually there, so a well-intentioned "simplification" of either file
+    cannot silently drop the requirement while staying in sync.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    for rel in ("workflow/WORKFLOW.base.md", "projects/switchboard-self/WORKFLOW.md"):
+        text = (repo_root / rel).read_text(encoding="utf-8")
+        assert "## In brief" in text, f"{rel}: block heading absent"
+        assert "**What this does:**" in text, f"{rel}: first field absent"
+        assert "**What could be wrong:**" in text, f"{rel}: second field absent"
+        # The PR-handoff step must keep Closes #N ahead of the block. The
+        # orchestrator resolves the issue link through GitHub's closing
+        # references, which match anywhere in the body — presence is what the
+        # handoff check enforces; staying first is convention only, so the
+        # line stays visible and doesn't get edited away.
+        assert "Keep the `Closes #N` line first" in text, f"{rel}: ordering rule absent"
+        # Gate C consequence must be stated where the agent reads it.
+        assert "is incomplete at the merge gate" in text, f"{rel}: gate consequence absent"
+        # The closing reference is instructed, not assumed — handoff.py rejects
+        # a PR that does not close this issue with `pr_linkage_missing`.
+        assert "a literal\n   closing reference, not prose that mentions the issue" in text, (
+            f"{rel}: Closes #N instruction absent"
+        )
+        # Three of the five verdict routes carry the block (NEEDS WORK, NEEDS
+        # DECISION, SPLIT); PASS and the unchanged-body fast-path deliberately
+        # do not. Each of the three is pinned by a string that occurs ONCE in
+        # the file and only inside its own route, so deleting any single
+        # insertion turns this test red — the sync test alone cannot catch a
+        # deletion mirrored across both files.
+        #
+        # On a verdict comment the block is THIRD: the `## Triage verdict`
+        # heading and the machine-parsed `body-sha1:` line keep lines 1-2.
+        # Counted, not just present: one occurrence per block-carrying route,
+        # so losing the rule from any single route is red.
+        assert text.count("the machine-read hash stays second") == 3, (
+            f"{rel}: verdict-block placement rule must appear once per "
+            f"block-carrying route, found {text.count('the machine-read hash stays second')}"
+        )
+        # NEEDS WORK — lives only in that route's insertion, not the step-8
+        # PR-handoff insertion.
+        assert (
+            "the single finding the author has the strongest\n  > case to push back on"
+            in text
+        ), f"{rel}: NEEDS WORK In brief block absent"
+        # NEEDS DECISION — the route main added; its second field asks how the
+        # decision request's own framing could be wrong.
+        assert (
+            "an option you left off, or a two-way choice that is really three" in text
+        ), f"{rel}: NEEDS DECISION In brief block absent"
+        # SPLIT-verdict child issues must also open with the block.
+        assert "each\n  body opens with the `## In brief` block" in text, (
+            f"{rel}: SPLIT child-issue body block instruction absent"
+        )
+        # The SPLIT verdict's own `## Triage verdict` comment must also carry
+        # the block, not just the child bodies — this string lives ONLY inside
+        # that SPLIT-comment insertion (distinct from the NEEDS WORK and NEEDS
+        # DECISION blocks above and the SPLIT child-body clause just checked),
+        # so a regression that drops just this insertion turns this test red.
+        assert "the split decision most likely to be wrong" in text, (
+            f"{rel}: SPLIT triage-verdict comment In brief block absent"
+        )
+        # The two mechanical routes stay block-free on purpose. Without this,
+        # nothing distinguishes "deliberately excluded" from "forgotten", and a
+        # later session would add ceremony back to a one-line PASS.
+        assert "The fast-path comment carries no `## In brief` block" in text, (
+            f"{rel}: PASS/fast-path exclusion rationale absent"
+        )
+
+
 # --- decision-record numbering (self/.decisions) -------------------------------
 #
 # Parallel worker sessions each pick "next free AgDR number on their own branch",
@@ -1202,9 +1377,8 @@ def test_validate_dispatch_forces_fold_validation(tmp_path: Path, monkeypatch):
     assert exc_info.value.code == "workflow_parse_error"
 
 
-def test_real_workflow_base_declares_an_empty_fold_allowlist(tmp_path: Path):
-    """The scaffold ships detection OFF: an allowlist nobody vetted must never
-    grant fold authority by default."""
+def _real_base_config(tmp_path: Path, name: str = "WORKFLOW.md") -> Config:
+    """The committed `WORKFLOW.base.md`, scaffold placeholders substituted."""
     real_path = Path(__file__).resolve().parents[2] / "workflow" / "WORKFLOW.base.md"
     substituted = (
         real_path.read_text(encoding="utf-8")
@@ -1213,6 +1387,131 @@ def test_real_workflow_base_declares_an_empty_fold_allowlist(tmp_path: Path):
         .replace("{{MAX_AGENTS}}", "10")
         .replace("{{CONVENTION_ROOT}}", "")
     )
-    p = tmp_path / "WORKFLOW.md"
+    p = tmp_path / name
     p.write_text(substituted)
-    assert Config(load_workflow(p), tmp_path).fold().operator_logins == ()
+    return Config(load_workflow(p), tmp_path)
+
+
+def test_real_workflow_base_declares_an_empty_fold_allowlist(tmp_path: Path):
+    """The scaffold ships detection OFF: an allowlist nobody vetted must never
+    grant fold authority by default."""
+    assert _real_base_config(tmp_path).fold().operator_logins == ()
+
+
+# --- review_response.bot_logins (issue #43 / AgDR-037) ------------------------
+#
+# Same posture and same reason as `fold` above: this allowlist is the loop's
+# only botness definition, and a typo'd key that silently disabled the responder
+# would be indistinguishable from "the bot hasn't reviewed yet". Without this
+# accessor the shipped block would load clean and be inert — no top-level
+# unknown-key check exists to catch it.
+
+def _rr_cfg(tmp_path: Path, block: str) -> Config:
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        f"{block}"
+        "---\n"
+        "body\n"
+    )
+    return Config(load_workflow(p), tmp_path)
+
+
+def test_review_response_block_absent_disables_the_loop(tmp_path: Path):
+    assert _rr_cfg(tmp_path, "").review_response().bot_logins == ()
+
+
+def test_review_response_empty_list_disables_the_loop(tmp_path: Path):
+    cfg = _rr_cfg(tmp_path, "review_response:\n  bot_logins: []\n")
+    assert cfg.review_response().bot_logins == ()
+
+
+def test_review_response_logins_are_lowercased_and_deduped(tmp_path: Path):
+    cfg = _rr_cfg(
+        tmp_path,
+        "review_response:\n"
+        "  bot_logins: [\"ChatGPT-Codex-Connector\", \" chatgpt-codex-connector \","
+        " \"other-bot\"]\n",
+    )
+    # The stored form is canonical because it is ALSO what gets written into the
+    # round marker's `bots=` field, which a session parses in another process.
+    assert cfg.review_response().bot_logins == (
+        "chatgpt-codex-connector", "other-bot",
+    )
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "review_response: not-a-map\n",
+        "review_response:\n  bot_logins: codex\n",
+        "review_response:\n  bot_logins: [\"\"]\n",
+        "review_response:\n  bot_logins: [123]\n",
+        "review_response:\n  bot_lgoins: [\"codex\"]\n",  # typo'd key: no silent pass
+    ],
+)
+def test_review_response_malformed_config_raises(tmp_path: Path, block: str):
+    with pytest.raises(WorkflowError) as exc_info:
+        _rr_cfg(tmp_path, block).review_response()
+    assert exc_info.value.code == "workflow_parse_error"
+
+
+def test_validate_dispatch_forces_review_response_validation(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(
+        "---\n"
+        "tracker:\n"
+        "  kind: github\n"
+        "  repo: acme/widgets\n"
+        "  api_key: $GITHUB_TOKEN\n"
+        "review_response:\n"
+        "  bot_logins: 7\n"
+        "---\n"
+        "body\n"
+    )
+    with pytest.raises(WorkflowError) as exc_info:
+        validate_dispatch(Config(load_workflow(p), tmp_path))
+    assert exc_info.value.code == "workflow_parse_error"
+
+
+def test_real_workflow_base_ships_the_response_loop_disabled(tmp_path: Path):
+    """SHIPPED CONFIG AC: the loop lands DISABLED, dead code by design.
+
+    Going live is a deliberate post-merge config edit, never a merge side
+    effect — and with no `bot_logins` no trigger fires, so no round marker is
+    ever written and the prompt addendum stays inert too.
+    """
+    assert _real_base_config(tmp_path).review_response().bot_logins == ()
+
+
+def test_composed_self_workflow_ships_the_response_loop_disabled(tmp_path: Path):
+    """The OTHER carrying file. `projects/switchboard-self/WORKFLOW.md` is the
+    composed copy the live instance actually loads; shipping it enabled would
+    activate the loop on merge regardless of what the base template says."""
+    real = Path(__file__).resolve().parents[2] / "projects" / "switchboard-self"
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text((real / "WORKFLOW.md").read_text(encoding="utf-8"))
+    assert Config(load_workflow(p), tmp_path).review_response().bot_logins == ()
+
+
+def test_review_response_rejects_logins_that_break_the_marker_grammar(tmp_path: Path):
+    """Codex review (PR #134): a whitespace-bearing entry would serialize into
+    the round marker's `bots=` field (matched as \\S*), making every marker
+    parse as round 0 — the cap never engages and response sessions dispatch
+    indefinitely. Malformed config fails the LOAD, never the marker."""
+    for bad in ("codex bot", "bots=evil", "a<b", "-lead", "trail-"):
+        cfg = _rr_cfg(
+            tmp_path, f'review_response:\n  bot_logins: ["{bad}"]\n'
+        )
+        with pytest.raises(WorkflowError):
+            cfg.review_response()
+    ok = _rr_cfg(
+        tmp_path, 'review_response:\n  bot_logins: ["Codex-Bot[bot]"]\n'
+    ).review_response()
+    assert ok.bot_logins == ("codex-bot[bot]",)

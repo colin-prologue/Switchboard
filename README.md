@@ -70,7 +70,8 @@ the state machine — the orchestrator dispatches **active** states and parks at
 | `status:in-progress`  | **yes** | An agent is working it                                            |
 | `status:decision`     | no      | Waiting-on-operator gate — triage found an unmade human decision; reply with your choice, fold it, relabel to drafting |
 | `status:plan-review`  | no      | Gate B handoff — plan/ADR awaiting human approval                 |
-| `status:human-review` | no      | Gate C handoff — implementation done, awaiting human merge        |
+| `status:review`       | *stance*| Gate C handoff to an **agent** reviewer — active at `prototype`, absent from `base` |
+| `status:human-review` | no      | Gate C handoff to a **human** — awaiting human merge              |
 | `status:blocked`      | no      | Parked (fallback when native dependencies aren't available)       |
 | `status:parked`       | no      | Cap-park: halted at session cap — remove the label to re-dispatch |
 | *(issue closed)*      | —       | Terminal                                                          |
@@ -106,7 +107,7 @@ flowchart TD
     inprog -->|"Gate B: plan + ADR<br/>(architecture work only)"| planrev
     planrev -->|"human approves plan"| todo
     inprog -->|"Gate C: PR opened"| humrev
-    humrev -->|"human merges<br/>(never the agent)"| closed
+    humrev -->|"human merges"| closed
 
     triage & inprog -.->|"per-issue session cap hit:<br/>claim released, workspace kept"| parked
     parked -.->|"human removes label:<br/>re-dispatch, counter resets"| triage & inprog
@@ -122,9 +123,12 @@ The three human gates:
 - **Gate A** — intent/spec approved: a human moves `drafting → todo`.
 - **Gate B** — plan approved: for architecture-touching work, the agent parks a
   plan + ADR at `plan-review`; a human approves before child tickets are filed.
-- **Gate C** — final review: every implementation hands off at `human-review`.
-  **Agents never self-merge.** Merge review includes ratifying any AgDRs the PR
-  added — a PR that changed spec/methodology semantics without one is incomplete.
+- **Gate C** — final review: **nothing merges unreviewed.** *Who* reviews is the
+  project's stance — a gated stance parks at `human-review` for a human, an
+  autonomous one hands off to a QA state it dispatches and lets a reviewer
+  session merge inside a bounded escalation list. Merge review, by whoever
+  performs it, includes ratifying any AgDRs the PR added — a PR that changed
+  spec/methodology semantics without one is incomplete.
 
 ### Worker handoff evidence
 
@@ -167,6 +171,8 @@ The path a ticket takes *is* the risk control — match it to the risk:
 `scripts/new-ticket.sh --scaffold` emits the template. For gated work the body
 needs:
 
+- **`## In brief`** — a two-field plain-language summary (what this does, what
+  could be wrong), first section, above the rest.
 - **Intent** — one paragraph, what + why. State the problem, not the solution.
 - **Acceptance criteria** — pass/fail checks, eval-shaped. These are the agent's
   definition of done.

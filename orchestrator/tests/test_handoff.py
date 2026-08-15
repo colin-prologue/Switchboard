@@ -84,6 +84,11 @@ def test_no_evidence_file_is_not_a_handoff_attempt(workspace: Path) -> None:
         '{"issue": "7", "pr_number": true, "head_sha": "x"}',
         '{"issue": "", "pr_number": 12, "head_sha": "x"}',
         '{"issue": "7", "pr_number": -1, "head_sha": "x"}',
+        # The shape that actually occurred: a bare integer issue. The types are
+        # asymmetric (issue is a string, pr_number an int), so writing the issue
+        # the way pr_number is written is the natural mistake.
+        '{"issue": 4, "pr_number": 5, "head_sha": "x"}',
+        '{"issue": "7", "pr_number": "5", "head_sha": "x"}',   # quoted pr_number
     ],
 )
 def test_malformed_evidence_is_rejected(workspace: Path, content: str) -> None:
@@ -91,6 +96,33 @@ def test_malformed_evidence_is_rejected(workspace: Path, content: str) -> None:
     parsed = read_evidence(workspace)
     assert isinstance(parsed, HandoffRejection)
     assert parsed.reason == "malformed_evidence"
+
+
+@pytest.mark.parametrize(
+    ("content", "must_mention"),
+    [
+        ('{"issue": 4, "pr_number": 5, "head_sha": "x"}', ("issue", "STRING", "int", "4")),
+        ('{"issue": "4", "pr_number": "5", "head_sha": "x"}', ("pr_number", "INTEGER", "str")),
+        ('{"issue": "4", "pr_number": 5, "head_sha": 9}', ("head_sha", "STRING", "int")),
+        ('{"pr_number": 5, "head_sha": "x"}', ("issue", "STRING", "absent")),
+    ],
+)
+def test_malformed_evidence_diagnostic_is_actionable(
+    workspace: Path, content: str, must_mention: tuple[str, ...]
+) -> None:
+    """A rejected worker is re-dispatched and writes the file again, so the
+    diagnostic has to say what was wrong or the retry loop cannot converge.
+
+    Observed live on civ-life#4: ~15 rejected handoffs and a full budget
+    ceiling, all from `"issue": 4` — because "missing/invalid 'issue'" gave a
+    retrying session nothing to correct. Each message must name the expected
+    type AND what it actually received.
+    """
+    (workspace / EVIDENCE_RELPATH).write_text(content, encoding="utf-8")
+    parsed = read_evidence(workspace)
+    assert isinstance(parsed, HandoffRejection)
+    for token in must_mention:
+        assert token in parsed.detail, f"{token!r} missing from: {parsed.detail}"
 
 
 @pytest.mark.asyncio

@@ -57,6 +57,8 @@ from orchestrator.types import (
     IssueComment,
     FailureClass,
     Issue,
+    ReviewThread,
+    ReviewThreadComment,
     TrackerError,
     TurnResult,
 )
@@ -124,6 +126,17 @@ class FakeTracker:
         self.labels_removed: list[tuple[str, tuple[str, ...]]] = []
         self.open_prs: dict[str, list[dict]] = {}
         self.issue_comments: dict[str, list] = {}  # issue number -> IssueComment
+        # issue #43 review-response fixtures. Fidelity set (OBS-023): the fake
+        # stores exactly what the server derives and the predicate reads —
+        # `isResolved`, per-comment author login, comment `createdAt` — and
+        # NEVER a hard-coded needs_response verdict. `pr_comments` is a separate
+        # map from `issue_comments` because the real tracker needs a separate
+        # query for it (repository.issue(number:) is null for a PR).
+        self.pr_review_threads: dict[int, list] = {}  # PR number -> ReviewThread
+        self.pr_comments: dict[int, list] = {}        # PR number -> IssueComment
+        # Every network-shaped read/write bumps this. The disable-path AC is
+        # "ZERO API calls", which is only assertable if the fake counts them.
+        self.api_calls = 0
         self.sole_status_swaps: list[tuple[str, str]] = []
         self.add_labels_error: TrackerError | None = None  # set to simulate a write failure
         self.remove_labels_error: TrackerError | None = None
@@ -159,6 +172,7 @@ class FakeTracker:
         # filterless fake would green-wash the defect this method exists to fix
         # (gate states are invisible to fetch_candidate_issues because they are
         # not active states), so the fake filters the same way.
+        self.api_calls += 1
         wanted = {s.strip().lower() for s in status_names if s and s.strip()}
         if not wanted:
             return []
@@ -195,6 +209,7 @@ class FakeTracker:
             issue.updated_at = bump
 
     async def add_issue_comment(self, issue_id, body):
+        self.api_calls += 1
         if self.add_comment_error is not None:
             raise self.add_comment_error
         self.comments.append((issue_id, body))
@@ -233,12 +248,23 @@ class FakeTracker:
             self._after_label_write(issue)
 
     async def fetch_open_prs(self, head_ref):
-        # issue #61 handoff surface: [{"number", "head_sha", "closes"}].
+        # issue #61 handoff surface + issue #43's PR node `id` (the marker
+        # write target): [{"id", "number", "head_sha", "closes"}].
+        self.api_calls += 1
         return [dict(pr) for pr in self.open_prs.get(head_ref, [])]
+
+    async def fetch_pr_review_threads(self, pr_number):
+        self.api_calls += 1
+        return list(self.pr_review_threads.get(int(pr_number), []))
+
+    async def fetch_pr_comments(self, pr_number):
+        self.api_calls += 1
+        return list(self.pr_comments.get(int(pr_number), []))
 
     async def set_sole_status_label(
             self, issue_id, label,
             expected_status=("status:in-progress", "status:todo")):
+        self.api_calls += 1
         # Mirror of the real tracker method: preemption guard, then add +
         # remove-other-status inside one call, then a read-back verification
         # that derives state from labels the same way (fake fidelity).
@@ -879,9 +905,32 @@ async def test_verify_spend_leaves_implementer_budget_intact(tmp_path, monkeypat
     assert tracker.comments == []            # never parked, never refused
     assert "node-1" not in orch.parked
 
+
     runner.release.set()
     tracker.candidates = []                  # quiesce the continuation retry
     await wait_for(lambda: not orch.running)
+
+def test_agent_qa_review_state_is_a_verify_role() -> None:
+    """`status:review` is verification, so it must not spend the implement budget.
+
+    The prototype stance (AgDR-039) added an agent QA state without registering
+    it as a verification state, so a QA dispatch logged session_role=implement
+    and shared the implementer's counter. On a ticket that took four
+    implementation passes, QA would have inherited one session — the exact
+    failure AgDR-033 introduced per-role budgets to prevent, reappearing through
+    a state the runtime did not know was verification.
+
+    VERIFY_STATES is the union across stances: `triage` never occurs at
+    prototype, `review` never occurs at base, so listing both is free.
+    """
+    assert scheduler_mod.session_role("review") == VERIFY_ROLE
+    assert scheduler_mod.session_role("Review") == VERIFY_ROLE      # normalized
+    assert scheduler_mod.session_role("triage") == VERIFY_ROLE      # base, unchanged
+    assert scheduler_mod.session_role("todo") == IMPLEMENT_ROLE
+    assert scheduler_mod.session_role("in progress") == IMPLEMENT_ROLE
+    # The human gate is NOT a verify role: nothing dispatches it, so a dispatch
+    # in that state would be a bug rather than a verification session.
+    assert scheduler_mod.session_role("human review") == IMPLEMENT_ROLE
 
 
 async def test_verify_budget_exhaustion_park_comment_names_the_budget(
@@ -1183,6 +1232,58 @@ async def test_incomplete_turn_resumes_same_session_with_continuation_prompt(
     err = capfd.readouterr().err
     assert "worker completed" in err
     assert "worker failed" not in err
+
+
+@pytest.mark.asyncio
+async def test_handoff_rejection_detail_reaches_the_next_turns_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd
+) -> None:
+    """A rejected handoff must be told to the WORKER, not just the log.
+
+    The worker is the only party that can rewrite the evidence file. If the
+    rejection reaches the orchestrator log and the resumed session re-reads an
+    unchanged continuation prompt, it rewrites the same malformed file every
+    turn until a cap ends the session — the loop is unwinnable however good the
+    diagnostic is. Observed live on civ-life#4: ~15 rejected handoffs and a full
+    budget ceiling. This pins that the detail is carried into the next prompt.
+    """
+    tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 2")
+
+    # Evidence is validated ONLY after a terminal-success turn, and a rejection
+    # deliberately lets the session continue so the worker can repair. So every
+    # turn succeeds here: turn 1 succeeds -> evidence rejected -> turn 2 must
+    # carry the reason.
+    def factory(n, resume):
+        return TurnResult(status="succeeded", session_id=f"s-{n}", cost_usd=0.01)
+
+    runner = ScriptedRunner(factory)
+    orch, tracker, _, ws_root = _build_harness(tmp_path, monkeypatch, tmpl, runner=runner)
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}
+
+    # Malformed evidence in the workspace the worker will use: `issue` as a bare
+    # int, the exact shape that occurred in the field.
+    run_dir = ws_root / "1" / ".run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "handoff-evidence.json").write_text(
+        '{"issue": 1, "pr_number": 5, "head_sha": "abc123"}', encoding="utf-8"
+    )
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+
+    assert len(runner.turns) >= 2, "expected a continuation turn after the rejection"
+    second_prompt = runner.turns[1][2]
+    # The worker must be told it was rejected, and told WHAT to fix.
+    assert "REJECTED" in second_prompt
+    assert "malformed_evidence" in second_prompt
+    assert "STRING" in second_prompt, (
+        "the expected type must reach the worker, not just the log:\n" + second_prompt
+    )
+    # And told not to redo the implementation.
+    assert "not the code" in second_prompt
 
 
 async def test_incomplete_leaves_turn_succeeded_false_and_cancellable(
@@ -3274,3 +3375,359 @@ async def test_tracker_error_on_any_of_applys_three_reads_is_re_emittable(
     assert len(_marker_comments(tracker)) == 1
     assert _status_labels(issue) == ["status:triage"]
     assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}
+
+# --- review-response sub-poll (issue #43 / AgDR-037) --------------------------
+#
+# The ENABLING config is BOTH conditions: a non-empty `review_response.bot_logins`
+# AND a set `SB_APP_BOT_LOGIN`. Either missing disables the loop, so every test
+# below that expects a trigger states both explicitly.
+
+RR_BOT = "codex-bot"
+RR_SELF = "switchboard-agent"
+RR_TMPL = WORKFLOW_TMPL.replace(
+    "polling:", f"review_response:\n  bot_logins: [\"{RR_BOT}\"]\n\npolling:"
+)
+
+
+def _enable_app_identity(monkeypatch, login: str | None = RR_SELF):
+    """The App credential set, or the dogfood path that lacks it.
+
+    The set must be COMPLETE or `validate_dispatch` refuses the whole tick (a
+    partial set is an unnoticed identity switch, PR #42 P2). So "SB_APP_BOT_LOGIN
+    unset" is NOT a partial App set — it is reachable exactly one way, the
+    documented GITHUB_TOKEN dogfood path, where all five are unset and worker
+    replies are authored by the OPERATOR's login. That is what `login=None`
+    models.
+    """
+    if login is None:
+        for var in ("SB_APP_ID", "SB_APP_INSTALLATION_ID",
+                    "SB_APP_PRIVATE_KEY_FILE", "SB_APP_BOT_LOGIN",
+                    "SB_APP_BOT_USER_ID"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+        return
+    for var, value in (
+        ("SB_APP_ID", "1"), ("SB_APP_INSTALLATION_ID", "2"),
+        ("SB_APP_PRIVATE_KEY_FILE", "/dev/null"), ("SB_APP_BOT_USER_ID", "3"),
+        ("SB_APP_BOT_LOGIN", login),
+    ):
+        monkeypatch.setenv(var, value)
+
+
+def rr_thread(*logins_and_minutes, resolved=False, id_="RT_1") -> ReviewThread:
+    """A review thread carrying ONLY the fidelity set the predicate reads:
+    `isResolved`, per-comment author login, comment `createdAt`. No verdict is
+    stored — `needs_response` derives it, exactly as it does from the server's
+    payload (OBS-023)."""
+    base = datetime(2026, 8, 9, 10, 0, tzinfo=UTC)
+    return ReviewThread(
+        id=id_,
+        is_resolved=resolved,
+        comments=tuple(
+            ReviewThreadComment(
+                id=f"{id_}_C{i}", login=login,
+                created_at=base + timedelta(minutes=minutes),
+            )
+            for i, (login, minutes) in enumerate(logins_and_minutes)
+        ),
+    )
+
+
+def rr_issue(n: int) -> Issue:
+    """A `status:human-review` issue as one REALLY looks at Gate C.
+
+    It carries `gate:triage-passed`: the issue reached human-review through
+    `todo`, and that marker deliberately survives — which is exactly why the
+    relabeled todo is claimable without the sub-poll stamping a marker of its
+    own. `make_issue` only stamps it for `state="todo"`, so a test that dropped
+    it would be asserting against an issue the pipeline cannot produce, and
+    would hide the dispatch guard refusing the relabeled issue.
+    """
+    issue = make_issue(n, state="human review")
+    issue.labels.append("gate:triage-passed")
+    return issue
+
+
+def _bind_pr(tracker, issue_number: int, pr_number: int = 500, closes=None):
+    tracker.open_prs[f"switchboard/issue-{issue_number}"] = [{
+        "id": f"PR_node_{pr_number}", "number": pr_number, "head_sha": "a" * 40,
+        "closes": [issue_number] if closes is None else closes,
+    }]
+    return pr_number
+
+
+def _rr_harness(tmp_path, monkeypatch, *, login=RR_SELF, tmpl=RR_TMPL):
+    _enable_app_identity(monkeypatch, login)
+    return _build_harness(tmp_path, monkeypatch, workflow_tmpl=tmpl)
+
+
+async def test_review_trigger_relabels_and_writes_a_full_round_marker(
+    tmp_path, monkeypatch, capfd
+):
+    """AC 1: a human-review issue whose bound PR owes a bot reply is relabeled
+    to todo within one poll cycle, with the round marker's CONTENT asserted.
+
+    Presence-only would let a short-form marker ship green and silently defeat
+    the prompt addendum's guard, which reads `bots=` and `self=` off this line.
+    """
+    orch, tracker, _, _ = _rr_harness(tmp_path, monkeypatch)
+    issue = rr_issue(43)
+    tracker.candidates = [issue]
+    pr = _bind_pr(tracker, 43)
+    tracker.pr_review_threads[pr] = [rr_thread((RR_BOT, 0))]
+
+    assert await orch._poll_review_responses(tracker) == ["43"]
+
+    # The marker is written BEFORE the relabel: a crash between them burns a
+    # round harmlessly, while the reverse order hands out an unaccounted round.
+    assert tracker.comments == [(
+        f"PR_node_{pr}",
+        f"<!-- switchboard:response-round n=1 bots={RR_BOT} self={RR_SELF} -->",
+    )]
+    assert tracker.sole_status_swaps == [(issue.id, TODO_LABEL)]
+    assert issue.labels.count("status:todo") == 1
+    assert "status:human-review" not in issue.labels
+    assert "review-response triggered" in capfd.readouterr().err
+
+
+async def test_review_trigger_marker_records_the_parsed_not_the_raw_config(
+    tmp_path, monkeypatch
+):
+    """The marker records NORMALIZED values — lowercased, deduped, and the
+    `[bot]` suffix stripped from the identity. A session in another process
+    parses this line, so what lands must be what the predicate would match."""
+    tmpl = WORKFLOW_TMPL.replace(
+        "polling:",
+        'review_response:\n  bot_logins: ["Codex-Bot", " codex-bot ", "Other"]\n\n'
+        "polling:",
+    )
+    orch, tracker, _, _ = _rr_harness(
+        tmp_path, monkeypatch, login="Switchboard-Agent[bot]", tmpl=tmpl,
+    )
+    tracker.candidates = [rr_issue(43)]
+    pr = _bind_pr(tracker, 43)
+    tracker.pr_review_threads[pr] = [rr_thread((RR_BOT, 0))]
+
+    await orch._poll_review_responses(tracker)
+    assert tracker.comments[0][1] == (
+        "<!-- switchboard:response-round n=1 bots=codex-bot,other "
+        "self=switchboard-agent -->"
+    )
+
+
+async def test_review_poll_leaves_an_issue_with_nothing_owed_untouched(
+    tmp_path, monkeypatch
+):
+    """AC 1, other half. Three settled shapes, none of which is a trigger:
+    resolved, answered-by-Switchboard, and an unlisted author."""
+    orch, tracker, _, _ = _rr_harness(tmp_path, monkeypatch)
+    issue = rr_issue(43)
+    tracker.candidates = [issue]
+    pr = _bind_pr(tracker, 43)
+    tracker.pr_review_threads[pr] = [
+        rr_thread((RR_BOT, 0), resolved=True, id_="RT_resolved"),
+        rr_thread((RR_BOT, 0), (RR_SELF, 5), id_="RT_answered"),
+        rr_thread(("some-human", 0), id_="RT_human"),
+    ]
+
+    assert await orch._poll_review_responses(tracker) == []
+    assert (tracker.comments, tracker.sole_status_swaps) == ([], [])
+    assert "status:human-review" in issue.labels
+
+
+async def test_review_round_cap_stops_relabeling_and_comments_once(
+    tmp_path, monkeypatch
+):
+    """AC 2: at the cap the orchestrator STOPS RELABELING and posts exactly one
+    operator comment — it does not park (no active human-review -> parked edge
+    exists, and `_park` clears only IN_PROGRESS_LABEL, stranding a dual label).
+
+    The cap comment is guarded by its OWN marker: at the cap the round marker is
+    present by construction and so cannot guard it.
+    """
+    orch, tracker, _, _ = _rr_harness(tmp_path, monkeypatch)
+    issue = rr_issue(43)
+    tracker.candidates = [issue]
+    pr = _bind_pr(tracker, 43)
+    tracker.pr_review_threads[pr] = [rr_thread((RR_BOT, 0))]
+    tracker.pr_comments[pr] = [
+        IssueComment(
+            id="IC_1", login=RR_SELF,
+            body=f"<!-- switchboard:response-round n=1 bots={RR_BOT} self={RR_SELF} -->",
+        ),
+        IssueComment(
+            id="IC_2", login=RR_SELF,
+            body=f"<!-- switchboard:response-round n=2 bots={RR_BOT} self={RR_SELF} -->",
+        ),
+    ]
+
+    assert await orch._poll_review_responses(tracker) == []
+    assert tracker.sole_status_swaps == []            # no further relabel
+    assert "status:human-review" in issue.labels
+    assert len(tracker.comments) == 1
+    assert scheduler_mod.CAP_MARKER in tracker.comments[0][1]
+
+    # Idempotent: the cap comment the poll just wrote is now on the PR, so a
+    # later cycle must recognize its own guard marker and stay silent.
+    tracker.pr_comments[pr].append(
+        IssueComment(id="IC_cap", login=RR_SELF, body=tracker.comments[0][1])
+    )
+    orch._review_last_poll_at = None
+    assert await orch._poll_review_responses(tracker) == []
+    assert len(tracker.comments) == 1
+
+
+async def test_review_round_markers_survive_an_orchestrator_restart(
+    tmp_path, monkeypatch
+):
+    """AC 2, durability. The count is NOT process state: it is a comment on the
+    PR, re-read every poll. A restarted orchestrator must not hand out a fresh
+    budget of rounds — so a rebuilt scheduler over the SAME tracker still caps.
+    """
+    orch, tracker, _, _ = _rr_harness(tmp_path, monkeypatch)
+    tracker.candidates = [rr_issue(43)]
+    pr = _bind_pr(tracker, 43)
+    tracker.pr_review_threads[pr] = [rr_thread((RR_BOT, 0))]
+    tracker.pr_comments[pr] = [
+        IssueComment(
+            id=f"IC_{n}", login=RR_SELF,
+            body=f"<!-- switchboard:response-round n={n} bots={RR_BOT} self={RR_SELF} -->",
+        )
+        for n in (1, 2)
+    ]
+
+    restarted, _, _, _ = _rr_harness(tmp_path, monkeypatch)
+    assert restarted._review_last_poll_at is None     # genuinely fresh process state
+    assert await restarted._poll_review_responses(tracker) == []
+    assert tracker.sole_status_swaps == []
+    assert scheduler_mod.CAP_MARKER in tracker.comments[0][1]
+
+
+async def test_review_poll_skips_a_parked_issue(tmp_path, monkeypatch):
+    """AC 4: `_park` leaves the status label in place, so a hand-parked issue
+    still reads `status:human-review`. Triggering it would burn a round on
+    `_should_dispatch`'s park refusal and drop the issue from the state list."""
+    orch, tracker, _, _ = _rr_harness(tmp_path, monkeypatch)
+    issue = rr_issue(43)
+    issue.labels.append("status:parked")
+    tracker.candidates = [issue]
+    pr = _bind_pr(tracker, 43)
+    tracker.pr_review_threads[pr] = [rr_thread((RR_BOT, 0))]
+
+    assert await orch._poll_review_responses(tracker) == []
+    assert (tracker.comments, tracker.sole_status_swaps) == ([], [])
+
+
+@pytest.mark.parametrize(
+    "prs,unbindable",
+    [
+        # (i) the open PR does not close this issue: a real mis-binding.
+        ([{"id": "PR_a", "number": 500, "head_sha": "a" * 40, "closes": [99]}], True),
+        # (ii) two open PRs on one branch: ambiguous write target.
+        ([{"id": "PR_a", "number": 500, "head_sha": "a" * 40, "closes": [43]},
+          {"id": "PR_b", "number": 501, "head_sha": "b" * 40, "closes": [43]}], True),
+        # (iii) ZERO open PRs — the NORMAL post-merge state, not an anomaly.
+        ([], False),
+    ],
+    ids=["closes-mismatch", "two-open-prs", "no-open-pr"],
+)
+async def test_review_poll_binding_failures(
+    tmp_path, monkeypatch, capfd, prs, unbindable
+):
+    """AC 3, the issue-first reachable set. The sub-poll CONSTRUCTS the head ref
+    from the issue it holds, so "head ref unparsable" is unreachable here.
+
+    Zero open PRs skips QUIETLY; the other two are flagged UNBINDABLE — loud,
+    never a silent drop. No relabel and no crash in all three.
+    """
+    orch, tracker, _, _ = _rr_harness(tmp_path, monkeypatch)
+    issue = rr_issue(43)
+    tracker.candidates = [issue]
+    tracker.open_prs["switchboard/issue-43"] = prs
+    tracker.pr_review_threads[500] = [rr_thread((RR_BOT, 0))]
+
+    assert await orch._poll_review_responses(tracker) == []
+    assert (tracker.comments, tracker.sole_status_swaps) == ([], [])
+    assert "status:human-review" in issue.labels
+    assert ("unbindable=True" in capfd.readouterr().err) is unbindable
+
+
+async def test_review_poll_disabled_when_the_app_identity_is_unset(
+    tmp_path, monkeypatch, capfd
+):
+    """AC 5: `bot_logins` configured but `SB_APP_BOT_LOGIN` unset => ZERO API
+    calls and ONE log line.
+
+    Reachable via the documented GITHUB_TOKEN dogfood path, under which worker
+    replies carry the OPERATOR's login and no login-based identification can
+    work. GATE FIRST: both checks precede the issue fetch, so copying the fold
+    poll's fetch-then-gate shape verbatim would fail this.
+    """
+    orch, tracker, _, _ = _rr_harness(tmp_path, monkeypatch, login=None)
+    tracker.candidates = [rr_issue(43)]
+    _bind_pr(tracker, 43)
+
+    assert await orch._poll_review_responses(tracker) == []
+    assert tracker.api_calls == 0
+    err = capfd.readouterr().err
+    assert err.count("review-response disabled") == 1
+
+    # Logged ONCE per process, not once per cycle: a per-poll repeat would bury
+    # every other line in the runner log at the fold cadence.
+    orch._review_last_poll_at = None
+    await orch._poll_review_responses(tracker)
+    assert "review-response disabled" not in capfd.readouterr().err
+    assert tracker.api_calls == 0
+
+
+async def test_review_poll_disabled_by_default_makes_no_calls(harness, monkeypatch):
+    """The SHIPPED default: an empty `bot_logins` disables the loop at zero API
+    cost, before any identity check — so it costs nothing even with the App set.
+    """
+    orch, tracker, _, _ = harness
+    _enable_app_identity(monkeypatch)
+    tracker.candidates = [rr_issue(43)]
+
+    assert await orch._poll_review_responses(tracker) == []
+    assert tracker.api_calls == 0
+
+
+async def test_review_trigger_resets_a_spent_session_budget(tmp_path, monkeypatch):
+    """AC 6: a PR whose issue has `spent == cap` still dispatches a responder.
+
+    The per-role counter is cumulative across the issue's life and is otherwise
+    cleared only by unpark — so the multi-session PRs that attract the MOST
+    findings would arrive here spent and park on the very first response
+    dispatch. (#43 itself sat parked at 3/3.) Every role is reset; the verify
+    budget is unreachable from `todo`, so dropping it is harmless.
+    """
+    orch, tracker, _, _ = _rr_harness(tmp_path, monkeypatch)
+    issue = rr_issue(43)
+    tracker.candidates = [issue]
+    pr = _bind_pr(tracker, 43)
+    tracker.pr_review_threads[pr] = [rr_thread((RR_BOT, 0))]
+    orch.sessions_per_issue[(issue.id, IMPLEMENT_ROLE)] = 2   # the configured cap
+    orch.sessions_per_issue[(issue.id, VERIFY_ROLE)] = 2
+
+    assert await orch._poll_review_responses(tracker) == ["43"]
+    assert orch.sessions_per_issue == {}
+    assert orch._tick_wakeup.is_set()      # dispatch is woken, not left to idle
+
+
+async def test_review_poll_runs_inside_the_tick(tmp_path, monkeypatch, capfd):
+    """Wiring: the sub-poll is reached from `_tick`, on the fold cadence, and a
+    second tick inside the interval does not re-poll."""
+    orch, tracker, _, _ = _rr_harness(tmp_path, monkeypatch)
+    tracker.candidates = [rr_issue(43)]
+    pr = _bind_pr(tracker, 43)
+    tracker.pr_review_threads[pr] = [rr_thread((RR_BOT, 0))]
+
+    def markers():
+        return [b for _, b in tracker.comments if "response-round" in b]
+
+    await orch._tick()
+    assert "review-response triggered" in capfd.readouterr().err
+    assert len(markers()) == 1
+
+    await orch._tick()   # inside REVIEW_POLL_INTERVAL_MS: no second round
+    assert len(markers()) == 1

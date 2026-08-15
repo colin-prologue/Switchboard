@@ -33,6 +33,8 @@ from orchestrator.types import (
     CommentReaction,
     Issue,
     IssueComment,
+    ReviewThread,
+    ReviewThreadComment,
     TrackerConfig,
     TrackerError,
 )
@@ -180,6 +182,7 @@ query($owner: String!, $name: String!, $headRef: String!) {
   repository(owner: $owner, name: $name) {
     pullRequests(headRefName: $headRef, states: [OPEN], first: 5) {
       nodes {
+        id
         number
         headRefOid
         closingIssuesReferences(first: 50) {
@@ -199,6 +202,63 @@ query($owner: String!, $name: String!, $prNumber: Int!, $cursor: String) {
       closingIssuesReferences(first: 50, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes { number }
+      }
+    }
+  }
+}
+"""
+
+# fetch_pr_comments: round-marker reader (issue #43). `repository.issue(number:)`
+# is NULL for a pull-request number, so ISSUE_COMMENTS_QUERY cannot serve this —
+# hence a sibling query on `pullRequest`. No reactions: no marker reader wants
+# them, and selecting them would cost a nested page per comment for nothing.
+PR_COMMENTS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      comments(first: 50, after: $after) {
+        nodes { id body createdAt author { login } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+# fetch_pr_review_threads: the review-response trigger's read surface (issue
+# #43). The selection is exactly the `needs_response` fixture set — `isResolved`
+# plus per-comment author login and `createdAt`. Bodies are NOT selected: the
+# predicate never reads text, and the responding session fetches the threads
+# itself. Verified live against PR #132 (2026-08-09): a Bot author's `login` is
+# the BARE login (`chatgpt-codex-connector`, `switchboard-agent`) with
+# `__typename: Bot` — never the `<login>[bot]` form git uses.
+PR_REVIEW_THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $after) {
+        nodes {
+          id
+          isResolved
+          comments(first: 50) {
+            nodes { id createdAt author { login } }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+REVIEW_THREAD_COMMENTS_PAGE_QUERY = """
+query($threadId: ID!, $cursor: String) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first: 50, after: $cursor) {
+        nodes { id createdAt author { login } }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
@@ -501,6 +561,7 @@ class GitHubTracker:
                 continue
             number = node.get("number")
             head_sha = node.get("headRefOid")
+            node_id = node.get("id")
             refs = node.get("closingIssuesReferences") or {}
             closes = [
                 c["number"] for c in (refs.get("nodes") or [])
@@ -525,10 +586,133 @@ class GitHubTracker:
                 )
                 page = refs.get("pageInfo") or {}
             if isinstance(number, int) and isinstance(head_sha, str):
+                # `id` (issue #43): the PR NODE id, the write target for the
+                # round/cap marker comments. addComment takes a subjectId, and
+                # nothing else in this payload can supply one.
                 out.append({
+                    "id": node_id if isinstance(node_id, str) else None,
                     "number": number, "head_sha": head_sha, "closes": closes,
                 })
         return out
+
+    async def fetch_pr_comments(self, pr_number: int) -> list[IssueComment]:
+        """Top-level (conversation) comments on one PR (issue #43).
+
+        `fetch_issue_comments` resolves `repository.issue(number:)`, which is
+        null for a PR number and raises — so the round-marker reader needs its
+        own query against `repository.pullRequest(number:)`. Reactions are not
+        selected: no marker reader looks at them.
+        """
+        owner, name = self._split_repo()
+        nodes: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            data = await self._request(
+                PR_COMMENTS_QUERY,
+                {"owner": owner, "name": name, "number": int(pr_number), "after": after},
+            )
+            pr = (data.get("repository") or {}).get("pullRequest")
+            if pr is None:
+                raise TrackerError(
+                    "github_unknown_payload",
+                    f"pull request #{pr_number} not found in repository payload",
+                )
+            conn = pr.get("comments")
+            if not isinstance(conn, dict):
+                raise TrackerError(
+                    "github_unknown_payload", "missing 'pullRequest.comments' connection"
+                )
+            page_nodes = conn.get("nodes")
+            page_info = conn.get("pageInfo")
+            if page_nodes is None or page_info is None:
+                raise TrackerError(
+                    "github_unknown_payload", "missing PR comments nodes/pageInfo"
+                )
+            nodes.extend(n for n in page_nodes if isinstance(n, dict))
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if after is None:
+                raise TrackerError(
+                    "github_missing_end_cursor", "hasNextPage true but endCursor missing"
+                )
+        return [self._normalize_comment(node) for node in nodes]
+
+    async def fetch_pr_review_threads(self, pr_number: int) -> list[ReviewThread]:
+        """Review threads on one PR, with each thread's comments (issue #43).
+
+        Read-only. Both connections paginate: a PR can carry more than one page
+        of threads, and a long-running argument more than one page of comments
+        inside a thread. Truncating either would make `needs_response` read a
+        partial history — the exact class of silent wrongness the predicate must
+        not have (a missed last-bot-comment reads as "already answered").
+        """
+        owner, name = self._split_repo()
+        raw_threads: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            data = await self._request(
+                PR_REVIEW_THREADS_QUERY,
+                {"owner": owner, "name": name, "number": int(pr_number), "after": after},
+            )
+            pr = (data.get("repository") or {}).get("pullRequest")
+            if pr is None:
+                raise TrackerError(
+                    "github_unknown_payload",
+                    f"pull request #{pr_number} not found in repository payload",
+                )
+            conn = pr.get("reviewThreads")
+            if not isinstance(conn, dict):
+                raise TrackerError(
+                    "github_unknown_payload",
+                    "missing 'pullRequest.reviewThreads' connection",
+                )
+            page_nodes = conn.get("nodes")
+            page_info = conn.get("pageInfo")
+            if page_nodes is None or page_info is None:
+                raise TrackerError(
+                    "github_unknown_payload", "missing reviewThreads nodes/pageInfo"
+                )
+            raw_threads.extend(n for n in page_nodes if isinstance(n, dict))
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if after is None:
+                raise TrackerError(
+                    "github_missing_end_cursor", "hasNextPage true but endCursor missing"
+                )
+
+        threads: list[ReviewThread] = []
+        for raw in raw_threads:
+            cconn = raw.get("comments") or {}
+            comment_nodes = list(cconn.get("nodes") or [])
+            page = cconn.get("pageInfo") or {}
+            while page.get("hasNextPage"):
+                cursor = page.get("endCursor")
+                if cursor is None:
+                    raise TrackerError(
+                        "github_missing_end_cursor",
+                        "hasNextPage true but endCursor missing",
+                    )
+                more = await self._request(
+                    REVIEW_THREAD_COMMENTS_PAGE_QUERY,
+                    {"threadId": raw.get("id"), "cursor": cursor},
+                )
+                cconn = ((more.get("node") or {}).get("comments")) or {}
+                comment_nodes.extend(cconn.get("nodes") or [])
+                page = cconn.get("pageInfo") or {}
+            threads.append(
+                ReviewThread(
+                    id=str(raw.get("id") or ""),
+                    is_resolved=bool(raw.get("isResolved")),
+                    comments=tuple(
+                        self._normalize_review_comment(node)
+                        for node in comment_nodes
+                        if isinstance(node, dict)
+                    ),
+                )
+            )
+        return threads
 
     async def set_sole_status_label(
         self,
@@ -906,6 +1090,23 @@ class GitHubTracker:
             login=login.strip().lower() if isinstance(login, str) else None,
             created_at=_parse_iso8601(raw.get("createdAt")),
             reactions=tuple(reactions),
+        )
+
+    @staticmethod
+    def _normalize_review_comment(raw: dict[str, Any]) -> ReviewThreadComment:
+        """Normalize one review-thread comment node (issue #43).
+
+        Same null-author posture as `_normalize_comment`: a deleted account
+        yields `login=None`, which can match neither the bot allowlist nor the
+        Switchboard identity — the safe direction for both conjuncts of
+        `needs_response`.
+        """
+        author = raw.get("author") or {}
+        login = author.get("login") if isinstance(author, dict) else None
+        return ReviewThreadComment(
+            id=str(raw.get("id") or ""),
+            login=login.strip().lower() if isinstance(login, str) else None,
+            created_at=_parse_iso8601(raw.get("createdAt")),
         )
 
 

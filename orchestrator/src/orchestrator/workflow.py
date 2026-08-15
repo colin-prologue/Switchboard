@@ -14,6 +14,7 @@ globally override YAML; only explicit `$VAR_NAME` values are resolved
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -27,6 +28,7 @@ from .types import (
     ClaudeConfig,
     CodexConfig,
     FoldConfig,
+    ReviewResponseConfig,
     HooksConfig,
     MixedExecutionConfig,
     TrackerConfig,
@@ -230,6 +232,39 @@ class Config:
             else ["closed"]
         )
 
+        # Terminal-handoff target (AgDR-028). A stance that keeps a human gate
+        # leaves this at the default; an autonomous stance points it at its own
+        # QA state (e.g. "status:review"), which its active_states also lists so
+        # the handoff lands somewhere the scheduler will actually dispatch.
+        handoff_label_raw = raw.get("handoff_label")
+        handoff_label = (
+            handoff_label_raw.strip()
+            if isinstance(handoff_label_raw, str) and handoff_label_raw.strip()
+            else "status:human-review"
+        )
+
+        # A non-default handoff target MUST be a state this workflow dispatches.
+        # Otherwise every successfully completed ticket is moved to a label the
+        # eligibility filter excludes, and parks permanently with no QA and no
+        # human handoff — silently, because the transition itself succeeded.
+        # The DEFAULT is exempt by design: status:human-review is a human gate,
+        # and gated stances deliberately keep it out of active_states.
+        if handoff_label != "status:human-review":
+            if not handoff_label.startswith("status:"):
+                raise WorkflowError(
+                    "invalid_handoff_label",
+                    f"handoff_label {handoff_label!r} must be a status:* label",
+                )
+            handoff_state = handoff_label[len("status:"):].replace("-", " ").strip().lower()
+            if handoff_state not in active_states:
+                raise WorkflowError(
+                    "invalid_handoff_label",
+                    f"handoff_label {handoff_label!r} resolves to state "
+                    f"{handoff_state!r}, which is absent from active_states "
+                    f"{active_states!r}; completed tickets would park there "
+                    f"permanently. Add it to active_states or use the default.",
+                )
+
         return TrackerConfig(
             kind=kind,
             repo=repo,
@@ -238,6 +273,7 @@ class Config:
             required_labels=required_labels,
             active_states=active_states,
             terminal_states=terminal_states,
+            handoff_label=handoff_label,
         )
 
     # -- polling ---------------------------------------------------------------
@@ -302,6 +338,68 @@ class Config:
             if login not in logins:  # duplicates are harmless; keep it canonical
                 logins.append(login)
         return FoldConfig(operator_logins=tuple(logins))
+
+    # -- review_response (issue #43: bot allowlist for the response loop) ------
+
+    def review_response(self) -> ReviewResponseConfig:
+        """Bot-login allowlist for the review-response sub-poll.
+
+        Absent block, absent key, or an empty list -> the feature is disabled
+        (the default; the sub-poll then makes zero API calls). Validated as
+        strictly as `fold()`, and for the same reason: a typo'd key that
+        silently disabled the loop would be indistinguishable from "the bot
+        hasn't reviewed yet".
+        """
+        raw = self._config.get("review_response")
+        if raw is None:
+            return ReviewResponseConfig()
+        if not isinstance(raw, dict):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"review_response must be a map, got {type(raw).__name__}",
+            )
+        unknown = [key for key in raw if key != "bot_logins"]
+        if unknown:
+            raise WorkflowError(
+                "workflow_parse_error",
+                "review_response contains unknown fields: "
+                + ", ".join(sorted(map(str, unknown))),
+            )
+        logins_raw = raw.get("bot_logins", [])
+        if not isinstance(logins_raw, list):
+            raise WorkflowError(
+                "workflow_parse_error",
+                "review_response.bot_logins must be a list of GitHub logins, "
+                f"got {type(logins_raw).__name__}",
+            )
+        logins: list[str] = []
+        for value in logins_raw:
+            if not isinstance(value, str) or not value.strip():
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    "review_response.bot_logins entries must be non-empty "
+                    f"strings, got {value!r}",
+                )
+            login = value.strip().lower()
+            # GitHub-login grammar, checked AFTER stripping an optional [bot]
+            # suffix (codex review, PR #134): a whitespace-bearing entry would
+            # serialize into the round marker's `bots=` field, which the
+            # marker regex reads as \S* — every marker would then parse as
+            # round 0 and the two-round cap would never engage, dispatching
+            # paid response sessions indefinitely. Malformed config fails the
+            # LOAD (the force-call block makes this startup-fatal), never the
+            # marker.
+            bare = login[: -len("[bot]")] if login.endswith("[bot]") else login
+            if not _GITHUB_LOGIN_RE.fullmatch(bare):
+                raise WorkflowError(
+                    "workflow_parse_error",
+                    "review_response.bot_logins entries must be GitHub logins "
+                    "(alphanumerics and inner hyphens, optional [bot] suffix), "
+                    f"got {value!r}",
+                )
+            if login not in logins:  # duplicates are harmless; keep it canonical
+                logins.append(login)
+        return ReviewResponseConfig(bot_logins=tuple(logins))
 
     # -- workspace ---------------------------------------------------------------
 
@@ -767,6 +865,8 @@ class Config:
 # identity pair drives before_run.sh's git author + credential helper. Codex
 # PR #42 P2: accepting the minting keys alone would mint bot tokens while
 # commits silently author as whatever git identity the workspace inherits.
+_GITHUB_LOGIN_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+
 _APP_ENV_KEYS = (
     "SB_APP_ID",
     "SB_APP_INSTALLATION_ID",
@@ -889,3 +989,4 @@ def validate_dispatch(cfg: Config, *, provider_id: str = "claude") -> None:
     cfg.workspace_root()
     cfg.polling_interval_ms()
     cfg.fold()
+    cfg.review_response()

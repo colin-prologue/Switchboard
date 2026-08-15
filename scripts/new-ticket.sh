@@ -41,6 +41,17 @@ done
 # --- scaffold: emit the body skeleton and exit (no title/network needed) ------
 if [ "$SCAFFOLD" -eq 1 ]; then
   cat <<'SKELETON'
+## In brief
+
+**What this does:** <one plain sentence, no issue numbers, file paths, AgDR ids,
+`status:` label names, or function/field names. If you cannot say it without
+them, you do not understand the change well enough to file it yet.>
+
+**What could be wrong:** <one assumption or decision, in "if X, then Y" shape:
+name the trigger and what concretely breaks. Naming a quality is not an answer
+("coverage could be broader"); naming a consequence is ("if the label API is not
+read-your-writes, the read-back false-negatives and the ticket strands").>
+
 ## Intent
 
 <one paragraph: what is being built and why. State the problem, not the solution.>
