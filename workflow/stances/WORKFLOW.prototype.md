@@ -339,11 +339,20 @@ session on a different model reviews it after you.
    The body must start with `Closes #{{ issue.identifier }}` on its own line,
    followed by the `## In brief` block below.
 
-5. **Hand off.** Write `.run/handoff-evidence.json` with the issue number
-   (`issue`), the PR number (`pr_number`), and the committed branch head
-   (`head_sha`). This is your **final action**. Do not change `status:*` labels
-   — the orchestrator validates your evidence and performs the transition to
-   `status:review` itself.
+5. **Hand off.** As your **final action**, write `.run/handoff-evidence.json` at
+   the workspace root, in exactly this shape:
+
+   ```
+   {"issue": "{{ issue.identifier }}", "pr_number": <PR number>, "head_sha": "<output of: git rev-parse HEAD>"}
+   ```
+
+   **The types are not interchangeable and the validator is strict about them:**
+   `issue` is a **quoted string**, `pr_number` is a **bare integer**, `head_sha`
+   is a **quoted string**. Writing `"issue": 4` instead of `"issue": "4"` is
+   rejected as malformed and the handoff silently does not happen.
+
+   Do not change `status:*` labels yourself — the orchestrator validates this
+   evidence and performs the transition to `status:review` itself.
 
 ### Your PR body
 
