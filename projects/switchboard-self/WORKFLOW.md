@@ -237,7 +237,18 @@ with nothing to compare against, which is the loop this mechanic exists to stop.
   drifted citation — the author can fix it without anyone choosing anything).
   Post a feedback comment whose first line is the exact heading
   `## Triage verdict` (grep-able) and whose second line is the `body-sha1:`
-  block, listing each failed rubric check and the fix, then relabel to
+  block. Under those two lines — the machine-read hash stays second — and
+  before the per-check list, write an `## In brief` block carrying the same two
+  fields a PR body does:
+
+  > **What this does:** one plain sentence saying what the verdict is and what
+  > the author has to change. No issue numbers, file paths, or rubric numbers.
+  >
+  > **What could be wrong:** the single finding the author has the strongest
+  > case to push back on, and why — in "if X, then Y" shape. You are the one
+  > adversary here; name where you might be the one who is wrong.
+
+  Then list each failed rubric check and the fix, and relabel to
   `status:drafting`. Clear `gate:triage-passed` in the same command (every route
   back to drafting drops the marker — idempotent if absent).
   ```
@@ -279,8 +290,19 @@ with nothing to compare against, which is the loop this mechanic exists to stop.
   Without this route the same body gets re-triaged to the same verdict every
   session and the unblocking conversation happens outside the ticket (issue #15).
   Post a comment whose first line is the exact heading `## Triage verdict` (it
-  IS a verdict comment) and whose second line is the `body-sha1:` block,
-  followed by the decision request:
+  IS a verdict comment) and whose second line is the `body-sha1:` block. Under
+  those two lines — the machine-read hash stays second — and before the
+  decision request, write an `## In brief` block carrying the same two fields:
+
+  > **What this does:** one plain sentence saying what choice is stalled and
+  > why nobody but the operator can make it. No issue numbers, file paths, or
+  > rubric numbers.
+  >
+  > **What could be wrong:** the way you framed the question, in "if X, then Y"
+  > shape — an option you left off, or a two-way choice that is really three.
+  > A decision request that hides the real answer costs the operator a round.
+
+  Then the decision request itself:
   1. **The question** — one sentence, the choice the operator must make.
   2. **The options** — each one steelmanned (the strongest case *for* it, not a
      strawman set around a preferred answer).
@@ -295,10 +317,22 @@ with nothing to compare against, which is the loop this mechanic exists to stop.
   gh issue comment {{ issue.identifier }} --repo colin-prologue/Switchboard --body "## Triage verdict"...
   gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:triage --add-label status:decision
   ```
-- **SPLIT** → file child issues at `status:drafting` with drafted bodies, chain
-  each to this parent with native blocked-by, and park this parent at
+- **SPLIT** → file child issues at `status:drafting` with drafted bodies — each
+  body opens with the `## In brief` block, same as any other ticket
+  (`scripts/new-ticket.sh --scaffold` emits it as the skeleton's first section)
+  — chain each to this parent with native blocked-by, and park this parent at
   `status:drafting`. Post a `## Triage verdict` comment (heading, `body-sha1:`
-  line) linking the children.
+  line); under those two lines — the machine-read hash stays second — and
+  before the links, write an `## In brief` block carrying the same two fields:
+
+  > **What this does:** one plain sentence saying why the ticket was split and
+  > what the pieces are. No issue numbers, file paths, or rubric numbers.
+  >
+  > **What could be wrong:** the split decision most likely to be wrong — a
+  > boundary drawn in the wrong place, or a dependency edge between children
+  > that may not hold — in "if X, then Y" shape.
+
+  Then link the children.
 
 **Unchanged-body fast-path (only when Step 0 found matching hashes).** Post ONE
 referral comment — first line `## Triage verdict`, second line the same
@@ -315,6 +349,11 @@ re-review, no new findings, no second opinion. Each row's flags complete
 | PASS | `--remove-label status:triage --add-label status:todo,gate:triage-passed` (one command, marker included) |
 | SPLIT | `--remove-label status:triage,gate:triage-passed --add-label status:drafting` |
 | no parseable `body-sha1:` line on the latest verdict | **not a fast-path case** — do the full review (retrofit fall-through) |
+
+The fast-path comment carries no `## In brief` block, and neither does PASS.
+Both are mechanical: PASS says "it passed" in one line, and the fast-path adds
+no new analysis by construction. A two-field block on either would be padding
+around a verdict that holds no judgment for a reader to scrutinize.
 
 The verifier never implements; feedback and splits only. Do not open a PR. Stop
 once the verdict is routed.
@@ -390,10 +429,40 @@ once the verdict is routed.
    the same PR: context, decision, rejected options steelmanned, blast radius,
    weakest point. A PR touching those layers with no AgDR is incomplete and
    will be bounced at the merge gate.
-8. **Hand off, don't self-merge.** Commit, push the branch, open a PR with `gh`
-   linking this issue, attach evidence of the criteria passing. Then, as your
-   FINAL action, write the handoff evidence file `.run/handoff-evidence.json`
-   at the workspace root (issue #61):
+8. **Hand off, don't self-merge.** Commit, push the branch, and open a PR with
+   `gh` whose body's FIRST line is `Closes #<this issue's number>` — a literal
+   closing reference, not prose that mentions the issue. The orchestrator
+   validates your handoff by resolving that reference, and rejects it with
+   `pr_linkage_missing` if the PR does not close this issue. Attach evidence of
+   the criteria passing.
+
+   The PR body opens with an `## In brief` block — two fields, before any other
+   section, for a reader who has none of your context:
+
+   > **What this does:** one plain sentence. No issue numbers, file paths, AgDR
+   > ids, `status:` label names, or function/field names. If you cannot say it
+   > without them, you have not understood your own change well enough to hand
+   > it off.
+   >
+   > **What could be wrong:** one assumption or decision you made, in "if X,
+   > then Y" shape — the trigger, and what concretely breaks when it does not
+   > hold. Naming a quality is not an answer ("coverage could be broader");
+   > naming a consequence is ("if the label API is not read-your-writes, the
+   > read-back false-negatives and the ticket strands").
+
+   Keep the `Closes #N` line first, block second: the orchestrator resolves the
+   issue link through GitHub's closing references, so the line must be
+   **present** anywhere in the body or your handoff is rejected — keeping it
+   first is convention, so it stays visible and never gets edited away.
+   Everything you would otherwise write goes below the block, unchanged — the
+   block adds a layer, it does not replace one.
+
+   A PR body with no block, or whose second field names a quality instead of a
+   consequence, is incomplete at the merge gate and will be bounced there, the
+   same way a missing AgDR is.
+
+   Then, as your FINAL action, write the handoff evidence file
+   `.run/handoff-evidence.json` at the workspace root (issue #61):
    ```
    {"issue": "<this issue's number>", "pr_number": <PR number>, "head_sha": "<output of: git rev-parse HEAD>"}
    ```
@@ -402,7 +471,9 @@ once the verdict is routed.
    only open PR for your branch, and its head must match your `head_sha`) and
    performs the single `status:human-review` transition itself. Invalid or
    stale evidence is rejected with a diagnostic and no transition. Stop after
-   writing the file. A human merges.
+   writing the file. A human merges — this stance parks at the human gate.
+   (Other stances hand off to an agent reviewer instead; see the stance ladder
+   in `methodology/METHODOLOGY.md`.)
 {% endif %}
 
 <!-- PHASE 4: before choosing any architecture, query the decision-corpus MCP for

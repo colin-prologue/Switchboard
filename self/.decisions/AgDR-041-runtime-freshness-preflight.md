@@ -1,8 +1,10 @@
-# AgDR-038: Runtime freshness — recompose config from origin, surface stale code
+# AgDR-041: Runtime freshness — recompose config from origin, surface stale code
 
-- **Status:** accepted (2026-08-13). Issue #32. (Numbered 038 rather than the
-  literally-free 036 to avoid colliding with anything in flight between 035 and
-  037.)
+- **Status:** accepted (2026-08-13). Issue #32. (Drafted as 038; renumbered to
+  041 on merge, when 038–040 landed on `main` from the stance-ladder work while
+  this branch was open. The gap-avoidance heuristic that picked 038 over the
+  free 036 did not help — the collision came from work that started later and
+  merged sooner, which numbering cannot anticipate.)
 
 ## Context
 
@@ -94,12 +96,19 @@ i.e. not fail-open at all. Non-zero is reserved for usage errors.
 ## Blast radius
 
 `scripts/freshness-preflight.sh` (new), `scripts/run-project.sh` (launch sha
-capture, preflight call, composed exec path, marker print),
-`scripts/register-project.sh` (emits `SB_MAX_AGENTS`), the three tracked
-`project.env` backfills, `SETUP.md`, and two test modules. No Python changes;
-no orchestrator behaviour change beyond *which file path* is passed to
-`--workflow`. The tracked `WORKFLOW.md` remains both a hard launch precondition
-and the fail-open seed source.
+capture, preflight call, composed exec path, marker print), `SETUP.md`, and two
+test modules. No Python changes; no orchestrator behaviour change beyond *which
+file path* is passed to `--workflow`. The tracked `WORKFLOW.md` remains both a
+hard launch precondition and the fail-open seed source.
+
+**No binding format change, and that is load-bearing.** The routine reads only
+keys `register-project.sh` already wrote, and derives `max_concurrent_agents`
+from the tracked `WORKFLOW.md` the way `verify-setup.sh` does. So it adopts
+origin for projects registered *before* it existed, with no re-registration —
+a freshness mechanism that first requires you to re-run the thing you were
+trying to stop re-running would not be one. The draft of this change did add
+`SB_MAX_AGENTS` and `SB_WORKFLOW_TEMPLATE` to the emitted binding plus three
+backfills; merging against the stance ladder removed all four.
 
 This ticket is the checkout-side sibling of #57's workspace-side contract, and
 it deliberately does **not** claim to solve workspace staleness. The per-tick
@@ -109,17 +118,22 @@ its launch caller only.
 
 ## Weakest point (accepted)
 
-`verify-setup.sh:114` back-derives `max_concurrent_agents` from the **tracked**
-`projects/<slug>/WORKFLOW.md` — a file this routine never writes. So the CI
-drift check and the actually-running config can diverge indefinitely with no
-signal: CI would keep validating a snapshot while the process runs something
-recomposed from origin. This PR seeds that divergence at zero (all three
-backfilled `SB_MAX_AGENTS` values are asserted equal to their tracked
-`WORKFLOW.md` counterpart) but does nothing to keep it there.
+The CI drift check validates the **tracked** `projects/<slug>/WORKFLOW.md`,
+which this routine never writes. So the thing CI validates and the thing the
+process runs can diverge indefinitely with no signal: CI keeps checking a
+snapshot while the orchestrator runs something recomposed from origin. That is
+inherent to composing into `.run/` and is not fixed here.
 
-A second, smaller asymmetry compounds it: the template is read from **origin**
+What the merge against the stance ladder *did* fix is the sharper version of
+it. The draft duplicated `max_concurrent_agents` into `project.env` as
+`SB_MAX_AGENTS` while `verify-setup.sh` back-derived it from the tracked
+workflow — two sources for one value, seeded equal and free to drift apart
+silently thereafter. Reading it from the same place `verify-setup.sh` does
+removes the second source, so the two routines now compose from identical
+inputs by construction rather than by a backfill assertion.
+
+One asymmetry remains and is accepted: the template is read from **origin**
 while the values bound into it are read from the **local** `project.env`,
-mirroring `verify-setup.sh:103-106`. An origin-side binding change is therefore
-not adopted without a pull. Both are the same accepted blind-spot class, and
-both are the seam to revisit if the composed output ever becomes the thing CI
-validates.
+mirroring `verify-setup.sh`. An origin-side *binding* change is therefore not
+adopted without a pull. That is the seam to revisit if the composed output ever
+becomes the thing CI validates.

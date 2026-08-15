@@ -32,7 +32,7 @@ from .agent_runner import AgentRunner
 from .fold import FoldSignal, detect_fold_signals
 from .fold_apply import apply_fold_signal
 from .log import log
-from .handoff import snapshot_evidence, validate_handoff
+from .handoff import HandoffRejection, snapshot_evidence, validate_handoff
 from .prompt import render_prompt
 from .review_response import (
     CAP_MARKER,
@@ -86,7 +86,17 @@ PARK_LABEL = "status:parked"
 # #15, #57). The cap VALUE is unchanged — each role gets the full budget.
 VERIFY_ROLE = "verify"
 IMPLEMENT_ROLE = "implement"
-VERIFY_STATES = frozenset({"triage"})
+# States dispatched as VERIFICATION rather than implementation. The union across
+# every stance, not one stance's set: a state absent from a stance's
+# `active_states` simply never reaches here, so listing both costs nothing and
+# means a stance cannot silently acquire a verification state that spends the
+# implementation budget.
+#   triage — the adversarial ticket verifier (AgDR-006), used by `base`
+#   review — the agent QA reviewer (AgDR-039), used by `prototype`
+# Per AgDR-033 the two roles are capped independently, so a ticket that took
+# four implementation passes must still get a full verification budget — which
+# is exactly what a shared counter would deny it.
+VERIFY_STATES = frozenset({"triage", "review"})
 
 
 def session_role(state: str) -> str:
@@ -1069,12 +1079,32 @@ class Orchestrator:
         cumulative_cost = 0.0
         turn_number = 1
         dispatch_state = issue.state.lower()
+        # Carries a handoff rejection from the turn that produced it into the
+        # NEXT turn's prompt. Without this the diagnostic reaches only the
+        # orchestrator log, the resumed worker re-reads the unchanged
+        # continuation prompt, and it rewrites the same malformed file until a
+        # cap ends the session — the loop is unwinnable no matter how good the
+        # message is, because the only party who can act on it never sees it.
+        pending_rejection: HandoffRejection | None = None
         try:
             while True:
                 if turn_number == 1:
                     prompt = render_prompt(defn.prompt_template, issue, attempt)
                 else:
                     prompt = CONTINUATION_PROMPT  # §7.1: don't resend the task prompt
+                if pending_rejection is not None:
+                    prompt = (
+                        f"{prompt}\n\n"
+                        f"IMPORTANT — your handoff evidence file was REJECTED and "
+                        f"no transition happened, so this issue is not handed off "
+                        f"yet.\n"
+                        f"Reason: {pending_rejection.reason}\n"
+                        f"Detail: {pending_rejection.detail}\n"
+                        f"Rewrite `.run/handoff-evidence.json` to fix exactly that, "
+                        f"then stop. Do not redo the implementation work — the "
+                        f"rejection is about the evidence file, not the code."
+                    )
+                    pending_rejection = None
                 entry = self.running.get(issue.id)
                 if entry:
                     # Preparing another turn is active work again, including
@@ -1138,7 +1168,7 @@ class Orchestrator:
                     if evidence is not None:
                         try:
                             await tracker.set_sole_status_label(
-                                issue.id, HUMAN_REVIEW_LABEL)
+                                issue.id, cfg.tracker().handoff_label)
                         except TrackerError as exc:
                             # Verified-write failed: leave state untouched and
                             # end the session; claim release reverts the claim
@@ -1159,6 +1189,8 @@ class Orchestrator:
                             issue_id=issue.id,
                             issue_identifier=issue.identifier,
                             reason=rejection.reason, detail=rejection.detail)
+                        # Hand it to the only party that can fix it.
+                        pending_rejection = rejection
 
                 try:  # §16.5: re-check tracker state between turns
                     refreshed = await tracker.fetch_issue_states_by_ids([issue.id])

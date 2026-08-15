@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -38,14 +39,34 @@ convention_root: {{CONVENTION_ROOT}}
 prompt body v1
 """
 
-PROJECT_ENV = """\
-SB_PROJECT_SLUG=demo
-SB_GITHUB_REPO=acme/widgets
-SB_BASE_BRANCH=main
-SB_MAX_AGENTS=3
-SB_WORKSPACE_ROOT=/tmp/ws
-SB_CONVENTION_ROOT=
+STANCE_TEMPLATE = """\
+---
+repo: {{REPO}}
+workspace:
+  root: {{WORKSPACE_ROOT}}
+pool:
+  max_concurrent_agents: {{MAX_AGENTS}}
+convention_root: {{CONVENTION_ROOT}}
+tracker:
+  base_branch: {{BASE_BRANCH}}
+review_response:
+  bot_logins: [{{REVIEW_BOT_YAML}}]
+---
+verify with: {{VERIFY_CMD}}
+tools: {{VERIFY_TOOLS}}
+reviewer: {{REVIEW_BOT}}
 """
+
+
+def tracked_workflow(max_agents: str = "3") -> str:
+    """The tracked `projects/<slug>/WORKFLOW.md`: register-project.sh's snapshot.
+
+    It is the fail-open seed source AND — since the stance ladder removed
+    `SB_MAX_AGENTS` from the binding — where the preflight reads
+    `max_concurrent_agents`, the same way verify-setup.sh does.
+    """
+    return (f"---\nrepo: acme/widgets\npool:\n"
+            f"  max_concurrent_agents: {max_agents}\n---\ntracked snapshot\n")
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -73,9 +94,8 @@ def add_project(home: Path, slug: str, *, max_agents: str = "3",
     proj.mkdir(parents=True, exist_ok=True)
     (proj / "project.env").write_text(
         f"SB_PROJECT_SLUG={slug}\nSB_GITHUB_REPO={repo}\nSB_BASE_BRANCH=main\n"
-        f"SB_MAX_AGENTS={max_agents}\nSB_WORKSPACE_ROOT=/tmp/ws\n"
-        f"SB_CONVENTION_ROOT=\n")
-    (proj / "WORKFLOW.md").write_text("tracked snapshot\n")
+        f"SB_WORKSPACE_ROOT=/tmp/ws\nSB_CONVENTION_ROOT=\n")
+    (proj / "WORKFLOW.md").write_text(tracked_workflow(max_agents))
     return proj
 
 
@@ -128,7 +148,7 @@ def marker(home: Path, slug: str = "demo") -> Path:
 
 # --- recompose ---------------------------------------------------------------
 
-def test_recomposes_from_origin_with_all_four_placeholders(repo):
+def test_recomposes_from_origin_with_all_placeholders(repo):
     home, _, _ = repo
     proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
     assert proc.returncode == 0, proc.stderr
@@ -139,15 +159,114 @@ def test_recomposes_from_origin_with_all_four_placeholders(repo):
     assert "convention_root: \n" in text  # empty CONVENTION_ROOT is legal
 
 
-def test_absent_template_key_defaults_to_base(repo):
-    """switchboard-self carries no SB_WORKFLOW_TEMPLATE — it must default to
-    `base`, agreeing with verify-setup.sh:107 and the CI drift check."""
+def test_max_agents_comes_from_the_tracked_workflow_not_the_binding(repo):
+    """The stance ladder does not persist max_concurrent_agents to project.env;
+    verify-setup.sh back-derives it from the tracked WORKFLOW.md and this
+    routine must read the same source, or the two compose different files from
+    the same inputs and the CI drift check stops meaning anything."""
     home, _, _ = repo
     env_file = home / "projects" / "demo" / "project.env"
+    assert "SB_MAX_AGENTS" not in env_file.read_text()
+    (home / "projects" / "demo" / "WORKFLOW.md").write_text(tracked_workflow("9"))
+    proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
+    assert proc.returncode == 0, proc.stderr
+    assert "max_concurrent_agents: 9" in composed(home).read_text()
+
+
+def test_absent_stance_key_defaults_to_base(repo):
+    """switchboard-self carries no stance key — it must default to `base`,
+    agreeing with verify-setup.sh and the CI drift check."""
+    home, _, _ = repo
+    env_file = home / "projects" / "demo" / "project.env"
+    assert "SB_WORKFLOW_STANCE" not in env_file.read_text()
     assert "SB_WORKFLOW_TEMPLATE" not in env_file.read_text()
     proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
     assert proc.returncode == 0, proc.stderr
     assert "prompt body v1" in composed(home).read_text()
+
+
+def test_stance_resolves_to_the_shared_ladder_with_every_placeholder_bound(repo):
+    """A stance name that is not one of the three legacy templates resolves to
+    workflow/stances/WORKFLOW.<stance>.md and binds the five stance-era
+    placeholders — including the quoted values, which a raw sed read of
+    project.env would carry the quotes into."""
+    home, _, up = repo
+    (up / "workflow" / "stances").mkdir(parents=True, exist_ok=True)
+    (up / "workflow" / "stances" / "WORKFLOW.prototype.md").write_text(STANCE_TEMPLATE)
+    git(up, "add", "-A")
+    git(up, "commit", "-qm", "add prototype stance")
+    git(up, "push", "-q", "origin", "main")
+
+    env_file = home / "projects" / "demo" / "project.env"
+    env_file.write_text(
+        env_file.read_text()
+        + "SB_WORKFLOW_STANCE=prototype\n"
+        + "SB_VERIFY_CMD='./test.sh --all'\n"
+        + "SB_VERIFY_TOOLS='Bash(godot:*)'\n"
+        + "SB_REVIEW_BOT='chatgpt-codex-connector'\n")
+
+    proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
+    assert proc.returncode == 0, proc.stderr
+    text = composed(home).read_text()
+    assert "{{" not in text, f"unsubstituted placeholder survived:\n{text}"
+    assert "base_branch: main" in text
+    assert "verify with: ./test.sh --all" in text
+    assert "tools: Bash(godot:*)" in text
+    assert "reviewer: chatgpt-codex-connector" in text
+    assert 'bot_logins: ["chatgpt-codex-connector"]' in text
+
+
+def test_unset_review_bot_composes_an_empty_yaml_list(repo):
+    """The default is no external reviewer: REVIEW_BOT_YAML must collapse to
+    `[]`, not `[""]`, or the sub-poll matches a bot named empty-string."""
+    home, _, up = repo
+    (up / "workflow" / "stances").mkdir(parents=True, exist_ok=True)
+    (up / "workflow" / "stances" / "WORKFLOW.prototype.md").write_text(STANCE_TEMPLATE)
+    git(up, "add", "-A")
+    git(up, "commit", "-qm", "add prototype stance")
+    git(up, "push", "-q", "origin", "main")
+
+    env_file = home / "projects" / "demo" / "project.env"
+    env_file.write_text(env_file.read_text() + "SB_WORKFLOW_STANCE=prototype\n")
+
+    proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
+    assert proc.returncode == 0, proc.stderr
+    assert "bot_logins: []" in composed(home).read_text()
+
+
+def test_project_local_stance_override_wins_over_the_shared_ladder(repo):
+    """verify-setup.sh prefers projects/<slug>/WORKFLOW.<stance>.md; so must
+    this, or a project with an override runs the ladder's version."""
+    home, _, up = repo
+    (up / "workflow" / "stances").mkdir(parents=True, exist_ok=True)
+    (up / "workflow" / "stances" / "WORKFLOW.prototype.md").write_text(
+        STANCE_TEMPLATE + "SHARED\n")
+    (up / "projects" / "demo" / "WORKFLOW.prototype.md").write_text(
+        STANCE_TEMPLATE + "LOCAL OVERRIDE\n")
+    git(up, "add", "-A")
+    git(up, "commit", "-qm", "add both")
+    git(up, "push", "-q", "origin", "main")
+
+    env_file = home / "projects" / "demo" / "project.env"
+    env_file.write_text(env_file.read_text() + "SB_WORKFLOW_STANCE=prototype\n")
+
+    proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
+    assert proc.returncode == 0, proc.stderr
+    assert "LOCAL OVERRIDE" in composed(home).read_text()
+
+
+def test_stance_absent_at_origin_fails_open_without_writing_a_broken_workflow(repo):
+    """An unknown stance is not an enum error here — it resolves to a ladder
+    path that origin does not carry, and must leave the last usable composed
+    file alone rather than installing a placeholder-riddled one."""
+    home, _, _ = repo
+    env_file = home / "projects" / "demo" / "project.env"
+    env_file.write_text(env_file.read_text() + "SB_WORKFLOW_STANCE=nope\n")
+    proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
+    assert proc.returncode == 0
+    assert "workflow/stances/WORKFLOW.nope.md" in proc.stderr
+    assert "fail-open" in proc.stderr
+    assert composed(home).read_text() == tracked_workflow()
 
 
 def test_origin_change_is_adopted_and_two_changes_both_land(repo):
@@ -321,7 +440,7 @@ def test_missing_repo_fails_open_and_seeds_from_tracked_workflow(tmp_path):
     proc = run_preflight(home)
     assert proc.returncode == 0, proc.stderr
     assert "no git repository" in proc.stderr
-    assert composed(home).read_text() == "tracked snapshot\n"
+    assert composed(home).read_text() == tracked_workflow()
 
 
 def test_missing_repo_reported_before_binding_gaps(tmp_path):
@@ -332,26 +451,25 @@ def test_missing_repo_reported_before_binding_gaps(tmp_path):
     shutil.copy(PREFLIGHT, home / "scripts" / "freshness-preflight.sh")
     proj = home / "projects" / "demo"
     proj.mkdir(parents=True)
-    (proj / "project.env").write_text("SB_GITHUB_REPO=acme/widgets\n")  # no MAX_AGENTS
-    (proj / "WORKFLOW.md").write_text("tracked snapshot\n")
+    (proj / "project.env").write_text("SB_GITHUB_REPO=acme/widgets\n")
+    (proj / "WORKFLOW.md").write_text("no agent count here\n")  # binding gap
     proc = run_preflight(home)
     assert proc.returncode == 0
     assert "no git repository" in proc.stderr
-    assert "SB_MAX_AGENTS" not in proc.stderr
+    assert "max_concurrent_agents" not in proc.stderr
 
 
-def test_absent_max_agents_skips_whole_recompose(repo):
+def test_unreadable_max_agents_skips_whole_recompose(repo):
     """No safe default exists, and emitting a literal {{MAX_AGENTS}} would hand
-    the loader a corrupt workflow."""
+    the loader a corrupt workflow. Reading it from the tracked workflow rather
+    than the binding moves the failure, it does not remove it."""
     home, _, _ = repo
-    env_file = home / "projects" / "demo" / "project.env"
-    env_file.write_text(
-        env_file.read_text().replace("SB_MAX_AGENTS=3\n", ""))
+    tracked = home / "projects" / "demo" / "WORKFLOW.md"
+    tracked.write_text("---\nrepo: acme/widgets\n---\ntracked snapshot\n")
     proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
     assert proc.returncode == 0, proc.stderr
-    assert "SB_MAX_AGENTS missing" in proc.stderr
+    assert "cannot read max_concurrent_agents" in proc.stderr
     assert "{{MAX_AGENTS}}" not in composed(home).read_text()
-    assert composed(home).read_text() == "tracked snapshot\n"
 
 
 def test_unreachable_remote_fails_open(repo):
@@ -360,7 +478,7 @@ def test_unreachable_remote_fails_open(repo):
     proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
     assert proc.returncode == 0, proc.stderr
     assert "fetch of origin/main failed" in proc.stderr
-    assert composed(home).read_text() == "tracked snapshot\n"
+    assert composed(home).read_text() == tracked_workflow()
 
 
 def test_missing_template_file_at_origin_fails_open(repo):
@@ -375,13 +493,21 @@ def test_missing_template_file_at_origin_fails_open(repo):
     assert "absent at origin/main" in proc.stderr
 
 
-def test_unknown_template_fails_open(repo):
-    home, _, _ = repo
+def test_legacy_template_key_is_still_honoured(repo):
+    """Bindings written before the stance ladder carry SB_WORKFLOW_TEMPLATE;
+    verify-setup.sh still reads it as a fallback and so must this, or an
+    unmigrated canary silently recomposes from `base`."""
+    home, _, up = repo
+    (up / "workflow" / "WORKFLOW.codex-canary.md").write_text(
+        BASE_TEMPLATE.replace("prompt body v1", "codex canary body"))
+    git(up, "add", "-A")
+    git(up, "commit", "-qm", "add canary template")
+    git(up, "push", "-q", "origin", "main")
     env_file = home / "projects" / "demo" / "project.env"
-    env_file.write_text(env_file.read_text() + "SB_WORKFLOW_TEMPLATE=nope\n")
+    env_file.write_text(env_file.read_text() + "SB_WORKFLOW_TEMPLATE=codex-canary\n")
     proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
     assert proc.returncode == 0, proc.stderr
-    assert "unknown SB_WORKFLOW_TEMPLATE 'nope'" in proc.stderr
+    assert "codex canary body" in composed(home).read_text()
 
 
 def test_transient_fetch_failure_after_success_preserves_content_and_mtime(repo):
@@ -449,26 +575,29 @@ def test_self_base_branch_override_is_honoured(repo):
 
 # --- tracked-tree invariants -------------------------------------------------
 
-def test_every_tracked_project_env_carries_max_agents():
-    """The recompose reads SB_MAX_AGENTS from the LOCAL binding; a project
-    missing it silently takes the skip path forever."""
-    envs = sorted((REPO_ROOT / "projects").glob("*/project.env"))
-    assert envs, "no tracked projects found"
-    for env_file in envs:
-        assert "SB_MAX_AGENTS=" in env_file.read_text(), f"{env_file} lacks SB_MAX_AGENTS"
+# The literal sed program in freshness-preflight.sh, transcribed. Both it and
+# verify-setup.sh anchor on a two-space indent and a bare integer; a tracked
+# workflow it cannot match takes the skip path forever, silently.
+MAX_AGENTS_LINE = re.compile(r"^  max_concurrent_agents: ([0-9]+)$", re.M)
 
 
-def test_switchboard_self_binding_matches_its_tracked_workflow():
-    """Seeds the accepted verify-setup.sh:114 blind spot at zero divergence.
-    switchboard-self is the only project with no binding test, the only value
-    != 1, and the only one exercising the template-key default."""
-    env_file = REPO_ROOT / "projects" / "switchboard-self" / "project.env"
-    wf = REPO_ROOT / "projects" / "switchboard-self" / "WORKFLOW.md"
-    bound = next(line.split("=", 1)[1].strip()
-                 for line in env_file.read_text().splitlines()
-                 if line.startswith("SB_MAX_AGENTS="))
-    derived = next(line.split(":", 1)[1].strip()
-                   for line in wf.read_text().splitlines()
-                   if line.strip().startswith("max_concurrent_agents:"))
-    assert bound == derived, (
-        f"SB_MAX_AGENTS={bound} diverges from WORKFLOW.md's {derived}")
+def test_every_tracked_project_workflow_yields_a_max_agent_count():
+    """max_concurrent_agents is read out of the tracked WORKFLOW.md, so the
+    tracked files are the fixture. A hand-edit that reflows this line — a
+    different indent, a quoted value, a trailing comment — reads as absent and
+    the project stops recomposing with only a stderr warning to say so."""
+    workflows = sorted((REPO_ROOT / "projects").glob("*/WORKFLOW.md"))
+    assert workflows, "no tracked projects found"
+    for wf in workflows:
+        assert MAX_AGENTS_LINE.search(wf.read_text()), (
+            f"{wf} has no line the preflight's sed can read a count from")
+
+
+def test_preflight_and_verify_setup_read_max_agents_identically():
+    """Two routines compose the same file from the same inputs; the CI drift
+    check only means something while they agree on where the count comes from.
+    This asserts the shared sed program has not drifted in one of them."""
+    expected = r"s/^  max_concurrent_agents: \([0-9][0-9]*\)$/\1/p"
+    for script in ("freshness-preflight.sh", "verify-setup.sh"):
+        text = (REPO_ROOT / "scripts" / script).read_text()
+        assert expected in text, f"{script} no longer reads the count this way"

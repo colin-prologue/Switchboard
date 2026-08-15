@@ -38,13 +38,14 @@ def sb_home(tmp_path: Path) -> Path:
     shutil.copy(PREFLIGHT, home / "scripts" / "freshness-preflight.sh")
     project = home / "projects" / "demo"
     project.mkdir(parents=True)
-    # SB_MAX_AGENTS / SB_PROJECT_SLUG mirror production bindings; without the
-    # former every recompose here would silently take the absent-key skip path.
     (project / "project.env").write_text(
         f'SB_PROJECT_SLUG=demo\nSB_GITHUB_REPO=acme/widgets\nSB_BASE_BRANCH=main\n'
-        f'SB_MAX_AGENTS=2\n'
         f'SB_WORKSPACE_ROOT={tmp_path / "ws"}\n')
-    (project / "WORKFLOW.md").write_text("---\n---\nprompt")
+    # The preflight reads max_concurrent_agents out of this tracked file (the
+    # stance ladder does not persist it to the binding); without the line every
+    # recompose here would silently take the skip path.
+    (project / "WORKFLOW.md").write_text(
+        "---\npool:\n  max_concurrent_agents: 2\n---\nprompt")
     dump = tmp_path / "dump.sh"
     dump.write_text("#!/bin/bash\nprintenv > \"$DUMP_OUT\"\n")
     dump.chmod(0o755)
@@ -124,7 +125,8 @@ def test_launch_execs_against_the_composed_workflow(sb_home, tmp_path):
                          github_token="ghp_dogfood")
     assert proc.returncode == 0, proc.stderr
     composed = sb_home / ".run" / "demo" / "composed-WORKFLOW.md"
-    assert composed.read_text() == "---\n---\nprompt"
+    assert composed.read_text() == (
+        "---\npool:\n  max_concurrent_agents: 2\n---\nprompt")
 
 
 def _git(cwd, *args):

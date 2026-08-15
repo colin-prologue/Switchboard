@@ -195,23 +195,44 @@ FETCHED=1
 p_repo="$(sed -n 's/^SB_GITHUB_REPO=//p' "$ENV_FILE" | head -1)"
 p_wsroot="$(sed -n 's/^SB_WORKSPACE_ROOT=//p' "$ENV_FILE" | head -1)"
 p_conv="$(sed -n 's/^SB_CONVENTION_ROOT=//p' "$ENV_FILE" | head -1)"
-p_agents="$(sed -n 's/^SB_MAX_AGENTS=//p' "$ENV_FILE" | head -1)"
-p_template="$(sed -n 's/^SB_WORKFLOW_TEMPLATE=//p' "$ENV_FILE" | head -1)"
+p_base="$(sed -n 's/^SB_BASE_BRANCH=//p' "$ENV_FILE" | head -1)"
+
+# Stance-era values are shell-QUOTED in project.env (they may contain spaces
+# and run-project.sh sources the file), so a raw sed read would keep the quotes
+# and compose a workflow that differs from register-project.sh's and
+# verify-setup.sh's. Read them the way both of those do — source in a subshell
+# — so the quoting round-trips.
+p_vcmd="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${SB_VERIFY_CMD:-}")"
+p_vtools="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${SB_VERIFY_TOOLS:-}")"
+p_rbot="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${SB_REVIEW_BOT:-}")"
+p_rbot_yaml=""; [ -n "$p_rbot" ] && p_rbot_yaml="\"$p_rbot\""
+
+# SB_WORKFLOW_STANCE supersedes the legacy SB_WORKFLOW_TEMPLATE; read both, in
+# that order, exactly as verify-setup.sh does. A project registered before the
+# stance ladder keeps working, and — because neither key nor any other value is
+# newly required — this routine adopts origin for projects registered BEFORE
+# #32 landed, with no re-registration. That is the ticket's own point: a
+# freshness mechanism that only works after you re-run the thing you were
+# trying to stop re-running is not a freshness mechanism.
+p_template="$(sed -n 's/^SB_WORKFLOW_STANCE=//p' "$ENV_FILE" | head -1)"
+[ -n "$p_template" ] || p_template="$(sed -n 's/^SB_WORKFLOW_TEMPLATE=//p' "$ENV_FILE" | head -1)"
 
 # The template is read from ORIGIN, but the values bound into it are read from
-# the LOCAL tracked project.env — the same asymmetry verify-setup.sh:103-106
-# already has. An origin-side binding change is therefore not adopted without a
-# pull; stated, accepted, and shared with that check.
+# the LOCAL tracked project.env — the same asymmetry verify-setup.sh already
+# has. An origin-side binding change is therefore not adopted without a pull;
+# stated, accepted, and shared with that check.
 #
-# Absent SB_WORKFLOW_TEMPLATE defaults to 'base' (mirroring verify-setup.sh:107)
-# so this routine and the CI drift check agree. Absent SB_MAX_AGENTS is a
-# different animal: there is no safe default, and emitting a literal
-# {{MAX_AGENTS}} would hand the loader a corrupt workflow. Skip the whole
-# recompose instead.
+# Absent stance defaults to 'base', mirroring verify-setup.sh so this routine
+# and the CI drift check agree. max_concurrent_agents is NOT a project.env key:
+# it is read back out of the tracked composed workflow, again mirroring
+# verify-setup.sh. There is no safe default for it — emitting a literal
+# {{MAX_AGENTS}} would hand the loader a corrupt workflow — so an unreadable
+# value skips the whole recompose instead.
 p_template="${p_template:-base}"
+p_agents="$(sed -n 's/^  max_concurrent_agents: \([0-9][0-9]*\)$/\1/p' "$TRACKED_WF" 2>/dev/null | head -1)"
 
 [ -n "$p_agents" ] \
-  || fail_open "SB_MAX_AGENTS missing from $ENV_FILE — skipping recompose (fail-open)"
+  || fail_open "cannot read max_concurrent_agents from $TRACKED_WF — skipping recompose (fail-open)"
 [ -n "$p_repo" ] \
   || fail_open "SB_GITHUB_REPO missing from $ENV_FILE — skipping recompose (fail-open)"
 [ -n "$p_wsroot" ] \
@@ -229,11 +250,25 @@ case "$p_wsroot" in
 esac
 # p_conv is legitimately empty for root projects — never a completeness failure.
 
+# Stance/template resolution, mirroring verify-setup.sh's ladder: the three
+# legacy names map to fixed paths, anything else is a stance recipe with a
+# project-local override winning over the shared ladder.
+#
+# Existence is probed at ORIGIN, not in the working tree. verify-setup.sh tests
+# the local tree because it is checking the local tree; this routine composes
+# from origin, so a local-only override would resolve to a path `git show`
+# cannot read and fail open one step later with a misleading "template absent"
+# — while an override that exists at origin but not yet locally is exactly the
+# case this ticket exists to adopt.
 case "$p_template" in
   base)          TEMPLATE="workflow/WORKFLOW.base.md";;
   codex-canary)  TEMPLATE="workflow/WORKFLOW.codex-canary.md";;
   mixed-canary)  TEMPLATE="workflow/WORKFLOW.mixed-canary.md";;
-  *) fail_open "unknown SB_WORKFLOW_TEMPLATE '$p_template' in $ENV_FILE — skipping recompose (fail-open)";;
+  *)
+    TEMPLATE="projects/$SLUG/WORKFLOW.$p_template.md"
+    git -C "$SB_HOME" cat-file -e "origin/$SELF_REF:$TEMPLATE" 2>/dev/null \
+      || TEMPLATE="workflow/stances/WORKFLOW.$p_template.md"
+    ;;
 esac
 
 # --- 3. recompose from origin ------------------------------------------------
@@ -251,7 +286,12 @@ if ! composed="$(printf '%s\n' "$raw" | sed \
   -e "s|{{REPO}}|$(sed_escape "$p_repo")|g" \
   -e "s|{{WORKSPACE_ROOT}}|$(sed_escape "$p_wsroot")|g" \
   -e "s|{{MAX_AGENTS}}|$(sed_escape "$p_agents")|g" \
-  -e "s|{{CONVENTION_ROOT}}|$(sed_escape "$p_conv")|g")" || [ -z "$composed" ]; then
+  -e "s|{{CONVENTION_ROOT}}|$(sed_escape "$p_conv")|g" \
+  -e "s|{{BASE_BRANCH}}|$(sed_escape "$p_base")|g" \
+  -e "s|{{VERIFY_CMD}}|$(sed_escape "$p_vcmd")|g" \
+  -e "s|{{VERIFY_TOOLS}}|$(sed_escape "$p_vtools")|g" \
+  -e "s|{{REVIEW_BOT}}|$(sed_escape "$p_rbot")|g" \
+  -e "s|{{REVIEW_BOT_YAML}}|$(sed_escape "$p_rbot_yaml")|g")" || [ -z "$composed" ]; then
   fail_open "substitution failed composing $TEMPLATE — skipping recompose (fail-open)"
 fi
 
