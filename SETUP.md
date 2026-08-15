@@ -79,6 +79,20 @@ token (Stage 5's fallback). You lose real Gate-C approvals until you switch.
    identity), the last two set the workspace git identity
    (`<id>+<app-slug>[bot]@users.noreply.github.com`).
 
+   One optional key belongs here too (issue #32):
+
+   ```bash
+   SB_SELF_BASE_BRANCH=main   # optional; default `main`
+   ```
+
+   It names the branch the **runtime freshness preflight** recomposes each
+   project's workflow from, and measures loaded-code staleness against. It is
+   deliberately checkout-scoped rather than per-project: one checkout serves
+   every registered project, so putting it in a `project.env` would re-create
+   the managed-repo category error. Note the self-referential caveat — per this
+   feature's own thesis, editing `app.env` does not reach an already-running
+   process; the new value takes effect on the next restart.
+
 **Verify:** the App page shows the three permissions; the `.pem` and `app.env`
 are `chmod 600`; launching (Stage 5) logs `App identity: <app-slug>[bot]`.
 
