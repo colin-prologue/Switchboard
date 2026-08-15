@@ -232,35 +232,34 @@ to verify a fresh install.
 
 ---
 
-## Experimental Codex-only canary
+## Codex provider support (adapter present, no canary running)
 
-The normal process remains Claude-only. Stage 5 adds an explicit Codex canary
-mode for isolated test projects. Mixed routing is separately opt-in and remains
-limited to the Stage 6 synthetic canary; it does not change the normal process.
-The Codex canary workflow must use only the strict provider envelope:
-
-```yaml
-providers:
-  codex:
-    kind: codex-cli
-    # command and timeout fields are optional; safe subscription defaults apply.
-```
-
-Confirm the host has a persisted ChatGPT login, then opt in at process start:
+The normal process is Claude-only. A Codex CLI adapter, a mixed-provider routing
+selector, and a provider circuit breaker are all present and covered by
+`test_codex_runner.py`, `test_runner_selector.py`, and `test_provider_circuit.py`.
+Opt in at process start:
 
 ```bash
 codex login status
 uv run --project orchestrator python -m orchestrator \
-  --workflow projects/<isolated-canary>/WORKFLOW.md --provider codex
+  --workflow projects/<isolated-project>/WORKFLOW.md --provider codex
 ```
 
-Without `--provider codex`, startup still validates and selects Claude. Codex
-mode rejects legacy execution blocks and mixed `providers` maps. Use it only
-against a separate canary repository. The checked-in mixed-canary binding starts
-at `claude: 100, codex: 0`; do not launch it until the isolated mixed-canary
-rollout has been reviewed and its operator evidence procedure is in place. Its
-[preflight](projects/mixed-canary/README.md) provisions the required durable
-provider labels before any issue can be claimed.
+Codex mode rejects legacy execution blocks and mixed `providers` maps; without
+`--provider codex`, startup validates and selects Claude. Use it only against a
+separate repository.
+
+**The `codex-canary` and `mixed-canary` project bindings were retired on
+2026-08-15.** They were rollout scaffolding for prepping the mixed environment,
+dormant since mid-July, and still being hand-maintained through every change to
+the binding format. The capability they were staging is in the adapter and its
+tests; what retired was the choreography, not the feature. Their decision
+records (`AgDR-016`, `AgDR-019` through `AgDR-026`) remain as history.
+
+One residual worth knowing: `orchestrator/src/orchestrator/codex_runner.py` has
+**no PreToolUse surface**, so the merge guard (`AgDR-036`/`AgDR-043`) does not
+apply to Codex sessions at all. That is issue **#135**, and it is the thing to
+close before routing any real work to Codex.
 
 ---
 

@@ -5,12 +5,24 @@
 # by whichever component can observe what a given section describes:
 #
 #   - `edges`            — full (from -> to) rule set, incl. actor and phase
-#                          annotations. Consumed by #52's `labeled`-event Action,
-#                          which sees BOTH endpoints in the event payload. The
-#                          orchestrator CANNOT read this section usefully: it
-#                          polls *current* state and has no `from` (cross-restart
-#                          edge reconstruction is the durability trap AgDR-008
-#                          escaped), so it never reads `edges`.
+#                          annotations. Consumed by `status_board.py` (issue #22),
+#                          which derives the honored-drag set and its marker side
+#                          effects from these rows; a board drag supplies BOTH
+#                          endpoints, which is what makes them readable there.
+#                          The SCHEDULER still cannot read this section: it polls
+#                          *current* state and has no `from` (cross-restart edge
+#                          reconstruction is the durability trap AgDR-008
+#                          escaped).
+#
+#                          Originally written for #52's `labeled`-event Action.
+#                          That scope was withdrawn on 2026-08-15 — per-project
+#                          stances (AgDR-039) mean there is no longer one legal
+#                          state machine for a shared table to describe, and #52
+#                          was renarrowed to stance-independent checks only.
+#                          KNOWN GAP: `status_board.load_active_states` reads
+#                          `WORKFLOW.base.md` unconditionally, so the honored-drag
+#                          set is derived from base's states whatever project's
+#                          board is being synced.
 #   - `requires_marker`  — per-state provenance markers the dispatch guard demands
 #                          before it will claim an issue in that state. This is the
 #                          ONLY section the orchestrator reads (it can observe the

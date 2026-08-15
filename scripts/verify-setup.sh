@@ -20,14 +20,10 @@ echo
 echo "Kit files:"
 KIT_OK=1
 for f in spec/SPEC.md spec/SPEC.core.md spec/PROVENANCE.md \
-         workflow/WORKFLOW.base.md workflow/WORKFLOW.codex-canary.md workflow/WORKFLOW.mixed-canary.md methodology/METHODOLOGY.md \
+         workflow/WORKFLOW.base.md methodology/METHODOLOGY.md \
          hooks/after_create.sh hooks/before_run.sh hooks/after_run.sh \
          scripts/register-project.sh scripts/run-project.sh scripts/list-projects.sh \
-         scripts/new-ticket.sh scripts/provision-mixed-canary-labels.sh \
-         scripts/run-mixed-canary-checkpoint.sh \
-         scripts/codex-circuit-canary.sh \
-         scripts/stage7-circuit-after-run.sh \
-         scripts/run-stage7-circuit-canary.sh scripts/verify-setup.sh \
+         scripts/new-ticket.sh scripts/verify-setup.sh \
          deploy/switchboard@.service; do
   if [ -f "$f" ]; then :; else fail "missing $f"; KIT_OK=0; fi
 done
@@ -119,8 +115,6 @@ for env in projects/*/project.env; do
     p_template="${p_template:-base}"
     case "$p_template" in
       base) template="workflow/WORKFLOW.base.md";;
-      codex-canary) template="workflow/WORKFLOW.codex-canary.md";;
-      mixed-canary) template="workflow/WORKFLOW.mixed-canary.md";;
       *)
         # Stance recipe: project-local override wins over the shared ladder.
         if [ -f "projects/$slug/WORKFLOW.$p_template.md" ]; then

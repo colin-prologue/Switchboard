@@ -494,20 +494,25 @@ def test_missing_template_file_at_origin_fails_open(repo):
 
 
 def test_legacy_template_key_is_still_honoured(repo):
-    """Bindings written before the stance ladder carry SB_WORKFLOW_TEMPLATE;
-    verify-setup.sh still reads it as a fallback and so must this, or an
-    unmigrated canary silently recomposes from `base`."""
+    """Bindings written before the stance ladder carry SB_WORKFLOW_TEMPLATE
+    rather than SB_WORKFLOW_STANCE; verify-setup.sh still reads it as a
+    fallback and so must this, or an unmigrated project silently recomposes
+    from `base` instead of the recipe it declared.
+
+    The value is a STANCE name, not `base`: base is also the default, so a
+    test using it would pass with the fallback deleted."""
     home, _, up = repo
-    (up / "workflow" / "WORKFLOW.codex-canary.md").write_text(
-        BASE_TEMPLATE.replace("prompt body v1", "codex canary body"))
+    (up / "workflow" / "stances").mkdir(parents=True, exist_ok=True)
+    (up / "workflow" / "stances" / "WORKFLOW.legacy.md").write_text(
+        BASE_TEMPLATE.replace("prompt body v1", "legacy stance body"))
     git(up, "add", "-A")
-    git(up, "commit", "-qm", "add canary template")
+    git(up, "commit", "-qm", "add legacy stance")
     git(up, "push", "-q", "origin", "main")
     env_file = home / "projects" / "demo" / "project.env"
-    env_file.write_text(env_file.read_text() + "SB_WORKFLOW_TEMPLATE=codex-canary\n")
+    env_file.write_text(env_file.read_text() + "SB_WORKFLOW_TEMPLATE=legacy\n")
     proc = run_preflight(home, SB_LAUNCH_SHA=git(home, "rev-parse", "HEAD"))
     assert proc.returncode == 0, proc.stderr
-    assert "codex canary body" in composed(home).read_text()
+    assert "legacy stance body" in composed(home).read_text()
 
 
 def test_transient_fetch_failure_after_success_preserves_content_and_mtime(repo):

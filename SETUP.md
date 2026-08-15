@@ -231,7 +231,7 @@ verifier promotes it to `status:todo` on PASS; add `--entry todo` to skip the
 gate) — and watch it get picked up → a PR opened → the issue moved to
 `status:human-review`. That round trip is the whole loop proven end to end.
 
-For many projects, manage one process per project with the systemd template in
+For many projects, manage one process per project with the supervision template in
 `deploy/switchboard@.service` (Linux) or the launchd template below (macOS).
 
 ---

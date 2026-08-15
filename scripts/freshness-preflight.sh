@@ -251,8 +251,11 @@ esac
 # p_conv is legitimately empty for root projects — never a completeness failure.
 
 # Stance/template resolution, mirroring verify-setup.sh's ladder: the three
-# legacy names map to fixed paths, anything else is a stance recipe with a
-# project-local override winning over the shared ladder.
+# `base` maps to a fixed path, anything else is a stance recipe with a
+# project-local override winning over the shared ladder. (The canary template
+# names were removed with the canary retirement; a binding still naming one now
+# resolves to a stances/ path that origin does not carry and fails open, which
+# is the correct treatment of a retired template.)
 #
 # Existence is probed at ORIGIN, not in the working tree. verify-setup.sh tests
 # the local tree because it is checking the local tree; this routine composes
@@ -262,8 +265,6 @@ esac
 # case this ticket exists to adopt.
 case "$p_template" in
   base)          TEMPLATE="workflow/WORKFLOW.base.md";;
-  codex-canary)  TEMPLATE="workflow/WORKFLOW.codex-canary.md";;
-  mixed-canary)  TEMPLATE="workflow/WORKFLOW.mixed-canary.md";;
   *)
     TEMPLATE="projects/$SLUG/WORKFLOW.$p_template.md"
     git -C "$SB_HOME" cat-file -e "origin/$SELF_REF:$TEMPLATE" 2>/dev/null \
