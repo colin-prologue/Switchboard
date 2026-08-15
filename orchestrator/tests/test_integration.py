@@ -905,9 +905,32 @@ async def test_verify_spend_leaves_implementer_budget_intact(tmp_path, monkeypat
     assert tracker.comments == []            # never parked, never refused
     assert "node-1" not in orch.parked
 
+
     runner.release.set()
     tracker.candidates = []                  # quiesce the continuation retry
     await wait_for(lambda: not orch.running)
+
+def test_agent_qa_review_state_is_a_verify_role() -> None:
+    """`status:review` is verification, so it must not spend the implement budget.
+
+    The prototype stance (AgDR-039) added an agent QA state without registering
+    it as a verification state, so a QA dispatch logged session_role=implement
+    and shared the implementer's counter. On a ticket that took four
+    implementation passes, QA would have inherited one session — the exact
+    failure AgDR-033 introduced per-role budgets to prevent, reappearing through
+    a state the runtime did not know was verification.
+
+    VERIFY_STATES is the union across stances: `triage` never occurs at
+    prototype, `review` never occurs at base, so listing both is free.
+    """
+    assert scheduler_mod.session_role("review") == VERIFY_ROLE
+    assert scheduler_mod.session_role("Review") == VERIFY_ROLE      # normalized
+    assert scheduler_mod.session_role("triage") == VERIFY_ROLE      # base, unchanged
+    assert scheduler_mod.session_role("todo") == IMPLEMENT_ROLE
+    assert scheduler_mod.session_role("in progress") == IMPLEMENT_ROLE
+    # The human gate is NOT a verify role: nothing dispatches it, so a dispatch
+    # in that state would be a bug rather than a verification session.
+    assert scheduler_mod.session_role("human review") == IMPLEMENT_ROLE
 
 
 async def test_verify_budget_exhaustion_park_comment_names_the_budget(

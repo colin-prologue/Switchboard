@@ -86,7 +86,17 @@ PARK_LABEL = "status:parked"
 # #15, #57). The cap VALUE is unchanged — each role gets the full budget.
 VERIFY_ROLE = "verify"
 IMPLEMENT_ROLE = "implement"
-VERIFY_STATES = frozenset({"triage"})
+# States dispatched as VERIFICATION rather than implementation. The union across
+# every stance, not one stance's set: a state absent from a stance's
+# `active_states` simply never reaches here, so listing both costs nothing and
+# means a stance cannot silently acquire a verification state that spends the
+# implementation budget.
+#   triage — the adversarial ticket verifier (AgDR-006), used by `base`
+#   review — the agent QA reviewer (AgDR-039), used by `prototype`
+# Per AgDR-033 the two roles are capped independently, so a ticket that took
+# four implementation passes must still get a full verification budget — which
+# is exactly what a shared counter would deny it.
+VERIFY_STATES = frozenset({"triage", "review"})
 
 
 def session_role(state: str) -> str:
