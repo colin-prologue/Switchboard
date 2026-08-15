@@ -1211,6 +1211,58 @@ async def test_incomplete_turn_resumes_same_session_with_continuation_prompt(
     assert "worker failed" not in err
 
 
+@pytest.mark.asyncio
+async def test_handoff_rejection_detail_reaches_the_next_turns_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd
+) -> None:
+    """A rejected handoff must be told to the WORKER, not just the log.
+
+    The worker is the only party that can rewrite the evidence file. If the
+    rejection reaches the orchestrator log and the resumed session re-reads an
+    unchanged continuation prompt, it rewrites the same malformed file every
+    turn until a cap ends the session — the loop is unwinnable however good the
+    diagnostic is. Observed live on civ-life#4: ~15 rejected handoffs and a full
+    budget ceiling. This pins that the detail is carried into the next prompt.
+    """
+    tmpl = WORKFLOW_TMPL.replace("max_turns: 1", "max_turns: 2")
+
+    # Evidence is validated ONLY after a terminal-success turn, and a rejection
+    # deliberately lets the session continue so the worker can repair. So every
+    # turn succeeds here: turn 1 succeeds -> evidence rejected -> turn 2 must
+    # carry the reason.
+    def factory(n, resume):
+        return TurnResult(status="succeeded", session_id=f"s-{n}", cost_usd=0.01)
+
+    runner = ScriptedRunner(factory)
+    orch, tracker, _, ws_root = _build_harness(tmp_path, monkeypatch, tmpl, runner=runner)
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}
+
+    # Malformed evidence in the workspace the worker will use: `issue` as a bare
+    # int, the exact shape that occurred in the field.
+    run_dir = ws_root / "1" / ".run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "handoff-evidence.json").write_text(
+        '{"issue": 1, "pr_number": 5, "head_sha": "abc123"}', encoding="utf-8"
+    )
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(lambda: not orch.running and not orch.retry_attempts
+                   and "node-1" not in orch.claimed)
+
+    assert len(runner.turns) >= 2, "expected a continuation turn after the rejection"
+    second_prompt = runner.turns[1][2]
+    # The worker must be told it was rejected, and told WHAT to fix.
+    assert "REJECTED" in second_prompt
+    assert "malformed_evidence" in second_prompt
+    assert "STRING" in second_prompt, (
+        "the expected type must reach the worker, not just the log:\n" + second_prompt
+    )
+    # And told not to redo the implementation.
+    assert "not the code" in second_prompt
+
+
 async def test_incomplete_leaves_turn_succeeded_false_and_cancellable(
     tmp_path, monkeypatch
 ):

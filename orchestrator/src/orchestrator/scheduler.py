@@ -32,7 +32,7 @@ from .agent_runner import AgentRunner
 from .fold import FoldSignal, detect_fold_signals
 from .fold_apply import apply_fold_signal
 from .log import log
-from .handoff import snapshot_evidence, validate_handoff
+from .handoff import HandoffRejection, snapshot_evidence, validate_handoff
 from .prompt import render_prompt
 from .review_response import (
     CAP_MARKER,
@@ -1069,12 +1069,32 @@ class Orchestrator:
         cumulative_cost = 0.0
         turn_number = 1
         dispatch_state = issue.state.lower()
+        # Carries a handoff rejection from the turn that produced it into the
+        # NEXT turn's prompt. Without this the diagnostic reaches only the
+        # orchestrator log, the resumed worker re-reads the unchanged
+        # continuation prompt, and it rewrites the same malformed file until a
+        # cap ends the session — the loop is unwinnable no matter how good the
+        # message is, because the only party who can act on it never sees it.
+        pending_rejection: HandoffRejection | None = None
         try:
             while True:
                 if turn_number == 1:
                     prompt = render_prompt(defn.prompt_template, issue, attempt)
                 else:
                     prompt = CONTINUATION_PROMPT  # §7.1: don't resend the task prompt
+                if pending_rejection is not None:
+                    prompt = (
+                        f"{prompt}\n\n"
+                        f"IMPORTANT — your handoff evidence file was REJECTED and "
+                        f"no transition happened, so this issue is not handed off "
+                        f"yet.\n"
+                        f"Reason: {pending_rejection.reason}\n"
+                        f"Detail: {pending_rejection.detail}\n"
+                        f"Rewrite `.run/handoff-evidence.json` to fix exactly that, "
+                        f"then stop. Do not redo the implementation work — the "
+                        f"rejection is about the evidence file, not the code."
+                    )
+                    pending_rejection = None
                 entry = self.running.get(issue.id)
                 if entry:
                     # Preparing another turn is active work again, including
@@ -1159,6 +1179,8 @@ class Orchestrator:
                             issue_id=issue.id,
                             issue_identifier=issue.identifier,
                             reason=rejection.reason, detail=rejection.detail)
+                        # Hand it to the only party that can fix it.
+                        pending_rejection = rejection
 
                 try:  # §16.5: re-check tracker state between turns
                     refreshed = await tracker.fetch_issue_states_by_ids([issue.id])
