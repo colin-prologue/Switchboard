@@ -40,6 +40,7 @@ from orchestrator.graph_review import (
     reconcile,
     render_ledger,
     run_analysis,
+    same_repo_refs,
 )
 from orchestrator.tracker import GitHubTracker
 from orchestrator.types import TrackerConfig
@@ -177,6 +178,128 @@ def test_promotable_not_raised_when_a_blocker_still_open():
         merged_prs=[],
     )
     assert detect_promotable(board) == []
+
+
+# --- issue #106: references are scoped by repository -------------------------
+#
+# Switchboard PRs #103-#105 cite issues in the canary repo; a 2026-07-27 dry-run
+# read those numbers as Switchboard issues and proposed re-checking #12/#15/#16.
+
+REPO = "colin-prologue/Switchboard"
+FOREIGN = "colin-prologue/switchboard-mixed-canary"
+
+
+def _canary_board(pr_body, *, repo=REPO, issue_body="Assumption: the API is stable.",
+                  closes=()) -> Board:
+    """One open issue #12 stating an assumption + one merged PR citing it."""
+    return Board(
+        issues=[bi(12, body=issue_body)],
+        merged_prs=[MergedPR(number=103, title="canary run", body=pr_body,
+                             merge_sha="0123456789ab", merged_at=DT(7),
+                             closes=list(closes))],
+        repo=repo,
+    )
+
+
+def test_cross_repo_qualified_reference_is_not_a_stale_assumption():
+    board = _canary_board(f"Exercised {FOREIGN}#12 end to end.")
+    assert detect_stale_assumptions(board) == []
+
+
+def test_bare_reference_still_proposes():
+    # Fail-first guard for the case above: without it the negative test could
+    # pass vacuously (a proposal only fires on supersede or a stated assumption).
+    board = _canary_board("Exercised #12 end to end.")
+    assert [p.key for p in detect_stale_assumptions(board)] == ["stale-assumption:12"]
+
+
+def test_cross_repo_issue_url_is_not_a_stale_assumption():
+    board = _canary_board(f"Exercised https://github.com/{FOREIGN}/issues/12 today.")
+    assert detect_stale_assumptions(board) == []
+
+
+@pytest.mark.parametrize(
+    "pr_body",
+    [
+        f"Exercised {REPO}#12 end to end.",
+        f"Exercised https://github.com/{REPO}/issues/12 today.",
+        "Exercised COLIN-PROLOGUE/switchboard#12 end to end.",  # case-variant slug
+    ],
+)
+def test_qualified_same_repo_reference_is_recognized(pr_body):
+    board = _canary_board(pr_body)
+    assert [p.key for p in detect_stale_assumptions(board)] == ["stale-assumption:12"]
+
+
+def test_same_repo_closing_metadata_still_proposes():
+    board = _canary_board("No prose reference at all.", closes=[12])
+    assert [p.key for p in detect_stale_assumptions(board)] == ["stale-assumption:12"]
+
+
+def test_board_without_a_slug_drops_qualified_refs_but_keeps_bare_ones():
+    # Every direct Board(...) construction takes this path: nothing qualified is
+    # provably same-repo, so only bare shorthand maps.
+    assert detect_stale_assumptions(
+        _canary_board(f"cites {FOREIGN}#12", repo=None)) == []
+    assert detect_stale_assumptions(
+        _canary_board(f"cites {REPO}#12", repo=None)) == []
+    assert [p.key for p in detect_stale_assumptions(_canary_board("cites #12", repo=None))] \
+        == ["stale-assumption:12"]
+
+
+@pytest.mark.parametrize(
+    "pr_body,expected",
+    [
+        ("supersedes #12", ["stale-assumption:12"]),
+        (f"supersedes {REPO}#12", ["stale-assumption:12"]),
+        (f"supersedes {FOREIGN}#12", []),
+        (f"supersedes https://github.com/{FOREIGN}/issues/12", []),
+    ],
+)
+def test_supersede_prose_is_repository_scoped(pr_body, expected):
+    # Issue body states no assumption, so only the supersede path can fire.
+    board = _canary_board(pr_body, issue_body="Plain body, nothing stated.")
+    assert [p.key for p in detect_stale_assumptions(board)] == expected
+
+
+def test_mixed_reference_forms_in_one_pr_body():
+    board = Board(
+        issues=[bi(n, body="Assumption: still true.") for n in (12, 13, 14, 15)],
+        merged_prs=[MergedPR(
+            number=103, title="canary run",
+            body=f"bare #12, same-repo {REPO}#13, foreign {FOREIGN}#14, "
+                 f"foreign url https://github.com/{FOREIGN}/issues/15",
+            merge_sha="0123456789ab", merged_at=DT(7), closes=[])],
+        repo=REPO,
+    )
+    assert sorted(p.key for p in detect_stale_assumptions(board)) == [
+        "stale-assumption:12", "stale-assumption:13",
+    ]
+
+
+def test_same_repo_refs_normalizes_every_form():
+    text = (f"bare #1, qualified {REPO}#2, url https://github.com/{REPO}/issues/3, "
+            f"foreign {FOREIGN}#4, foreign url https://github.com/{FOREIGN}/issues/5")
+    assert same_repo_refs(text, REPO) == {1, 2, 3}
+    assert same_repo_refs(text, None) == {1}
+    assert same_repo_refs(None, REPO) == set()
+
+
+def test_merge_cross_reference_is_repository_scoped():
+    def board_with(ref):
+        return Board(
+            issues=[
+                bi(31, title="graph review analyzer proposals", body=f"dup of {ref}"),
+                bi(35, title="graph review analyzer proposals ledger", body="no refs"),
+            ],
+            merged_prs=[],
+            repo=REPO,
+        )
+
+    assert detect_merges(board_with(f"{FOREIGN}#35")) == []
+    assert detect_merges(board_with(f"https://github.com/{FOREIGN}/issues/35")) == []
+    assert [p.key for p in detect_merges(board_with("#35"))] == ["merge:31,35"]
+    assert [p.key for p in detect_merges(board_with(f"{REPO}#35"))] == ["merge:31,35"]
 
 
 # --- AC-2: proposal record shape --------------------------------------------
@@ -322,6 +445,33 @@ def test_board_query_reads_blockedby_not_tracked_issues():
     assert "blockedBy" in _BOARD_QUERY
     assert "trackedIssues" not in _BOARD_QUERY
     assert "trackedInIssues" not in _BOARD_QUERY
+
+
+# --- issue #106: closing references are scoped at the I/O boundary -----------
+
+
+def test_board_query_selects_the_repository_of_closing_references():
+    assert "closingIssuesReferences" in _BOARD_QUERY
+    assert "nameWithOwner" in _BOARD_QUERY
+
+
+@pytest.mark.asyncio
+async def test_fetch_board_drops_foreign_closing_references_and_records_the_slug():
+    pr_node = {
+        "number": 103, "title": "canary run", "body": "", "mergedAt": None,
+        "mergeCommit": {"oid": "0123456789ab"},
+        "closingIssuesReferences": {"nodes": [
+            {"number": 12, "repository": {"nameWithOwner": "ACME/Widgets"}},  # case-variant
+            {"number": 77, "repository": {"nameWithOwner": "acme/other-repo"}},
+        ]},
+    }
+    rec = Recorder(_board_response([_issue_node(12)], [pr_node]))
+    io, tracker = _io(rec)
+    board = await io.fetch_board()
+    assert board.repo == "acme/widgets"        # the slug, not the node id
+    assert board.repo_id == "R_1"              # unchanged, still the node id
+    assert board.merged_prs[0].closes == [12]  # #77 is another repository's
+    await tracker.aclose()
 
 
 # --- AC-1: idempotent single ledger ------------------------------------------

@@ -55,11 +55,22 @@ REFUTED_CATEGORIES = frozenset({"merge", "split", "resequence"})
 # Hard-dependency prose. Soft "see also #N" is deliberately NOT matched.
 _DEP_RE = re.compile(r"(?:blocked by|depends? on|requires?)\s+#(\d+)", re.IGNORECASE)
 _SUPERSEDE_RE = re.compile(
-    r"(?:supersedes?|replaces?|obsoletes?|invalidates?)\s+#(\d+)", re.IGNORECASE
+    r"(?:supersedes?|replaces?|obsoletes?|invalidates?)\s+(?P<ref>\S+)", re.IGNORECASE
 )
 _ASSUMPTION_RE = re.compile(r"\bassum(?:e|es|ption|ptions)\b", re.IGNORECASE)
-_ISSUE_REF_RE = re.compile(r"#(\d+)")
 _CHECKBOX_RE = re.compile(r"^\s*[-*]\s+\[[ xX]\]", re.MULTILINE)
+
+# Issue references keep their repository identity (issue #106). `#N` is GitHub
+# same-repo shorthand; `owner/name#N` and issue/PR URLs name a repository
+# explicitly and may well be foreign. The optional `slug` group is what stops a
+# qualified reference from also matching as a bare one: the scan reaches the
+# owner first and consumes the whole reference.
+_SLUG = r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+"
+_ISSUE_REF_RE = re.compile(rf"(?P<slug>{_SLUG})?#(?P<num>\d+)")
+_ISSUE_URL_RE = re.compile(
+    rf"https?://(?:www\.)?github\.com/(?P<slug>{_SLUG})/(?:issues|pull)/(?P<num>\d+)",
+    re.IGNORECASE,
+)
 
 _STOPWORDS = frozenset(
     "a an the and or of to for in on with add fix update support via issue "
@@ -115,6 +126,10 @@ class Board:
     issues: list[BoardIssue]  # OPEN issues under review (ledger excluded)
     merged_prs: list[MergedPR]
     repo_id: str | None = None
+    # `owner/name` slug of the repository under review — the only thing a
+    # qualified `owner/name#N` reference can be compared against. NOT repo_id,
+    # which is a GraphQL node id and is never comparable to a slug.
+    repo: str | None = None
     # >100 open issues: analysis stays capped to the first page (Phase 1), but
     # ledger DISCOVERY must not be — run_analysis pages on from end_cursor.
     issues_truncated: bool = False
@@ -153,6 +168,45 @@ def _pair_key(category: str, a: int, b: int) -> str:
 
 def _single_key(category: str, n: int) -> str:
     return f"{category}:{n}"
+
+
+def _same_slug(a: str | None, b: str | None) -> bool:
+    """GitHub repository slugs compare case-insensitively."""
+    return bool(a and b and a.strip().lower() == b.strip().lower())
+
+
+def same_repo_refs(text: str | None, repo: str | None) -> set[int]:
+    """Issue numbers in `text` that refer to the repository `repo` names.
+
+    The single repository-aware normalization path: every reference reader
+    (stale assumptions, merge cross-references, supersede prose) goes through
+    it, so cross-repository evidence can never be read as a local issue number.
+
+    - a bare `#N` keeps GitHub's same-repo shorthand and always maps;
+    - a qualified `owner/name#N` or an issue/PR URL maps only when its slug
+      provably matches `repo` (case-insensitively).
+
+    When `repo` is None — the board did not record its slug — nothing qualified
+    is provable, so every qualified reference is treated as foreign.
+    """
+    body = text or ""
+    out: set[int] = set()
+    for m in _ISSUE_URL_RE.finditer(body):
+        if _same_slug(m.group("slug"), repo):
+            out.add(int(m.group("num")))
+    for m in _ISSUE_REF_RE.finditer(body):
+        slug = m.group("slug")
+        if slug is None or _same_slug(slug, repo):
+            out.add(int(m.group("num")))
+    return out
+
+
+def _superseded_refs(text: str | None, repo: str | None) -> set[int]:
+    """Issue numbers a supersede verb points at, scoped to `repo`."""
+    out: set[int] = set()
+    for m in _SUPERSEDE_RE.finditer(text or ""):
+        out |= same_repo_refs(m.group("ref"), repo)
+    return out
 
 
 def _snippet(text: str, around: int, width: int = 60) -> str:
@@ -259,12 +313,12 @@ def detect_merges(board: Board) -> list[Proposal]:
     for i in range(len(issues)):
         a = issues[i]
         a_tokens = _title_tokens(a.title)
-        a_refs = {int(x) for x in _ISSUE_REF_RE.findall(a.body or "")}
+        a_refs = same_repo_refs(a.body, board.repo)
         for j in range(i + 1, len(issues)):
             b = issues[j]
-            cross_ref = b.number in a_refs or a.number in {
-                int(x) for x in _ISSUE_REF_RE.findall(b.body or "")
-            }
+            cross_ref = b.number in a_refs or a.number in same_repo_refs(
+                b.body, board.repo
+            )
             if not cross_ref:
                 continue
             b_tokens = _title_tokens(b.title)
@@ -315,8 +369,10 @@ def detect_stale_assumptions(board: Board) -> list[Proposal]:
     out: dict[str, Proposal] = {}
     for pr in board.merged_prs:
         pr_text = f"{pr.title}\n{pr.body or ''}"
-        superseded = {int(x) for x in _SUPERSEDE_RE.findall(pr_text)}
-        referenced = set(pr.closes) | {int(x) for x in _ISSUE_REF_RE.findall(pr_text)}
+        superseded = _superseded_refs(pr_text, board.repo)
+        # `pr.closes` is already repository-scoped at the I/O boundary
+        # (`_normalize_pr`); prose references are scoped here.
+        referenced = set(pr.closes) | same_repo_refs(pr_text, board.repo)
         sha = pr.merge_sha or "unknown"
         for num in referenced:
             issue = by_num.get(num)
@@ -558,7 +614,9 @@ query($owner: String!, $name: String!, $prCount: Int!) {
         body
         mergedAt
         mergeCommit { oid }
-        closingIssuesReferences(first: 20) { nodes { number } }
+        closingIssuesReferences(first: 20) {
+          nodes { number repository { nameWithOwner } }
+        }
       }
     }
   }
@@ -608,6 +666,7 @@ class GraphReviewGitHub:
 
     def __init__(self, tracker: GitHubTracker, repo: str, pr_count: int = 30) -> None:
         self._tracker = tracker
+        self._repo = repo  # the raw `owner/name` slug; the board carries it
         self._owner, _, self._name = repo.partition("/")
         self._pr_count = pr_count
 
@@ -627,6 +686,7 @@ class GraphReviewGitHub:
         issues = [self._normalize_issue(n) for n in (issues_conn.get("nodes") or [])]
         prs = [self._normalize_pr(n) for n in ((repo.get("pullRequests") or {}).get("nodes") or [])]
         return Board(issues=issues, merged_prs=prs, repo_id=repo.get("id"),
+                     repo=self._repo,
                      issues_truncated=truncated, end_cursor=page_info.get("endCursor"))
 
     async def scan_for_ledger(self, after: str | None) -> BoardIssue | None:
@@ -691,13 +751,19 @@ class GraphReviewGitHub:
             url=raw.get("url"),
         )
 
-    @staticmethod
-    def _normalize_pr(raw: dict[str, Any]) -> MergedPR:
-        closes = [
-            n["number"]
-            for n in ((raw.get("closingIssuesReferences") or {}).get("nodes") or [])
-            if n.get("number") is not None
-        ]
+    def _normalize_pr(self, raw: dict[str, Any]) -> MergedPR:
+        # A merged PR may close issues in another repository; those numbers are
+        # meaningless on this board (issue #106). A node that names a foreign
+        # repository is dropped. A node with no repository selection at all
+        # cannot be proven foreign, so it is kept.
+        closes: list[int] = []
+        for n in ((raw.get("closingIssuesReferences") or {}).get("nodes") or []):
+            if n.get("number") is None:
+                continue
+            slug = (n.get("repository") or {}).get("nameWithOwner")
+            if slug is not None and not _same_slug(slug, self._repo):
+                continue
+            closes.append(n["number"])
         return MergedPR(
             number=raw["number"],
             title=raw.get("title") or "",
