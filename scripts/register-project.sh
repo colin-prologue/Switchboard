@@ -25,6 +25,14 @@
 #                          command, as a quoted list, e.g. '"Bash(godot:*)"'. Without
 #                          this the verify command is denied at runtime and the
 #                          session strands.
+# --review-bot <login>     Enable CROSS-MODEL review by naming the external review
+#                          bot whose PR reviews this project already receives, e.g.
+#                          chatgpt-codex-connector. Opt-in and empty by default:
+#                          AgDR-037 requires going live to be a deliberate operator
+#                          act, never a merge side effect, so adopting a stance does
+#                          NOT enable it. When set, the QA role must cite that bot's
+#                          review of the reviewed sha and fails closed if none
+#                          exists; when unset, QA runs same-model and says so.
 # --convention-root <dir>  Root a project's .switchboard/ and .decisions/ under <dir>
 #                          instead of the repo root. Used for dogfooding so this repo
 #                          can manage itself without polluting the general-purpose root.
@@ -35,7 +43,7 @@ set -euo pipefail
 SB_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SLUG="" REPO="" BASE="main" MAX_AGENTS="4" CONVENTION_ROOT="" IS_SELF=0
-STANCE="prototype" VERIFY_CMD="" VERIFY_TOOLS=""
+STANCE="prototype" VERIFY_CMD="" VERIFY_TOOLS="" REVIEW_BOT=""
 WORKSPACE_BASE="${SB_WORKSPACE_BASE:-$HOME/Developer/switchboard-workspaces}"
 
 while [ $# -gt 0 ]; do
@@ -46,6 +54,7 @@ while [ $# -gt 0 ]; do
     --stance)          STANCE="$2"; shift 2;;
     --verify-cmd)      VERIFY_CMD="$2"; shift 2;;
     --verify-tools)    VERIFY_TOOLS="$2"; shift 2;;
+    --review-bot)      REVIEW_BOT="$2"; shift 2;;
     --max-agents)      MAX_AGENTS="$2"; shift 2;;
     --workspace-base)  WORKSPACE_BASE="$2"; shift 2;;
     --convention-root) CONVENTION_ROOT="$2"; shift 2;;
@@ -127,13 +136,19 @@ SB_WORKSPACE_ROOT=$WORKSPACE_ROOT
 SB_CONVENTION_ROOT=$CONVENTION_PREFIX
 SB_VERIFY_CMD=$(shq "$VERIFY_CMD")
 SB_VERIFY_TOOLS=$(shq "$VERIFY_TOOLS")
+SB_REVIEW_BOT=$(shq "$REVIEW_BOT")
 # GITHUB_TOKEN is expected from the environment (GitHub App installation token).
 EOF
 
 # --- 2. composed WORKFLOW.md (stance template + substitutions) --------------
 # A newline cannot survive a single-line sed replacement; everything else is
 # handled by escaping rather than rejection.
-case "$VERIFY_CMD$VERIFY_TOOLS" in
+# YAML list form for review_response.bot_logins: empty stays [], a set login
+# becomes ["login"]. Composed rather than hand-edited so the opt-in is one flag.
+REVIEW_BOT_YAML=""
+[ -n "$REVIEW_BOT" ] && REVIEW_BOT_YAML="\"$REVIEW_BOT\""
+
+case "$VERIFY_CMD$VERIFY_TOOLS$REVIEW_BOT" in
   *$'\n'*) echo "ERROR --verify-cmd/--verify-tools cannot contain a newline" >&2; exit 2;;
 esac
 sed \
@@ -144,6 +159,8 @@ sed \
   -e "s|{{BASE_BRANCH}}|$(sed_repl_escape "$BASE")|g" \
   -e "s|{{VERIFY_CMD}}|$(sed_repl_escape "$VERIFY_CMD")|g" \
   -e "s|{{VERIFY_TOOLS}}|$(sed_repl_escape "$VERIFY_TOOLS")|g" \
+  -e "s|{{REVIEW_BOT}}|$(sed_repl_escape "$REVIEW_BOT")|g" \
+  -e "s|{{REVIEW_BOT_YAML}}|$(sed_repl_escape "$REVIEW_BOT_YAML")|g" \
   "$TEMPLATE" > "$PROJ_DIR/WORKFLOW.md"
 
 # --- 3. gate-state labels on the repo ---------------------------------------
@@ -191,6 +208,7 @@ cat <<EOF
 registered '$SLUG' -> $REPO
   stance:     $STANCE  ($TEMPLATE)
   verify:     ${VERIFY_CMD:-<none set — preflight will be skipped with a note>}
+  review bot: ${REVIEW_BOT:-<none — QA runs same-model and discloses it>}
   binding:    $PROJ_DIR/project.env
   workflow:   $PROJ_DIR/WORKFLOW.md
   workspaces: $WORKSPACE_ROOT

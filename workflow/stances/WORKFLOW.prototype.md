@@ -62,30 +62,39 @@ agent:
 fold:
   operator_logins: []
 
+# Cross-model review, opt-in per project via `register-project.sh --review-bot`.
+# Empty unless the operator passed that flag: AgDR-037 requires going live to be
+# a deliberate operator act, so ADOPTING THIS STANCE DOES NOT ENABLE IT.
+#
+# When set, this drives the existing review-response sub-poll: unresolved review
+# threads from that bot re-dispatch the implementer (bounded at 2 rounds by the
+# durable per-PR marker), and the QA role below must cite the bot's review of
+# the sha it reviewed — failing closed if none exists.
 review_response:
-  bot_logins: []
+  bot_logins: [{{REVIEW_BOT_YAML}}]
 
-# CROSS-MODEL REVIEW — designed, not yet wired (follow-up ticket).
+# CROSS-MODEL REVIEW — how it is wired here.
 #
-# Intent: the `status:review` session runs on the OPPOSITE provider from the one
-# that wrote the diff, so code is never reviewed by the model that produced it.
-# A model reviewing its own output shares its own blind spots.
+# Goal: findings on a diff should come from a model other than the one that
+# wrote it, because a model reviewing its own output shares its own blind spots.
 #
-# Not enabled here yet for three concrete reasons, each resolvable:
-#   1. Mixed-provider mode requires the strict `providers:` envelope, which
-#      REJECTS the legacy top-level `claude:` block this stance still uses
-#      (workflow.py `mixed()`), so the two cannot coexist — it is a template
-#      rewrite, not a flag.
-#   2. The Codex path needs a persisted ChatGPT login on the orchestrator host
-#      (`codex login status`), which is a host prerequisite, not config.
-#   3. README pins the mixed-canary rollout behind an operator-evidence review
-#      that has not happened.
+# This is achieved by CONSUMING an external reviewer rather than by routing
+# Switchboard's own sessions across providers. Provider routing was the obvious
+# approach and was rejected: it needs the strict `providers:` envelope (which
+# rejects the legacy top-level `claude:` block below), a host-side login, and
+# the mixed-canary rollout review — and, decisively, it would still leave the QA
+# session SELF-REPORTING that a cross-check happened. Consuming an external
+# review produces an ARTIFACT instead: a real review, at a real sha, that the
+# verdict can be checked against.
 #
-# Until then this stance is single-provider and QA runs on the same model as
-# implementation — which is weaker, and is the main known gap in this stance.
-# When it lands, the fallback rule is: if the opposite provider's circuit is
-# open, degrade to same-model review and SAY SO in the verdict. A cross-check
-# that did not happen must never look like one that did.
+# So the division of labour is:
+#   - the external bot generates cross-model FINDINGS on the diff;
+#   - the review-response sub-poll re-dispatches the implementer while any of
+#     its threads are unresolved (bounded at 2 rounds);
+#   - this QA session makes the SHIP decision, and must cite the bot's review.
+#
+# Honest limitation: the ship DECISION is still same-model. What is cross-model
+# is finding-generation, which is where the blind-spot value lives.
 
 claude:
   # SINGLE-quoted YAML scalar (the base template uses a double-quoted one with
@@ -123,16 +132,51 @@ This ticket carries `status:review`. An engineer session has already opened a
 PR. You are an independent reviewer: a fresh session with no memory of writing
 this code, reading it as someone encountering it for the first time.
 
-**You are running on the same model that wrote this diff.** Cross-model review
-is the intent for this role and is not yet wired (see the header of this file),
-so the independence you have is *session* independence, not *model*
-independence — and that is the weaker kind. A model reviewing output from its
-own family shares its blind spots. Compensate deliberately: prefer findings you
-can demonstrate by running something over findings that rest on judgement,
-because judgement is exactly where the shared blind spots live.
+**You are running on the same model that wrote this diff.** Your own
+independence is *session* independence, not *model* independence — the weaker
+kind, because a model reviewing output from its own family shares its blind
+spots. Compensate deliberately: prefer findings you can demonstrate by running
+something over findings that rest on judgement, since judgement is exactly where
+the shared blind spots live.
 
-Never describe your review as cross-model or as independent verification by a
-different model. It is neither.
+The cross-model half comes from elsewhere.
+
+### Cross-model review
+
+**Review bot for this project:** `{{REVIEW_BOT}}`
+
+**If that value is empty**, no cross-model review is configured. Proceed with
+your own review, and disclose it — see the verdict block below. Never describe
+your review as cross-model or as independent verification by a different model.
+
+**If a login is named**, that bot reviews every PR in this repo, and its
+findings are the cross-model half of Gate C. You must:
+
+1. **Fetch its review of the exact sha you are reviewing.**
+
+   ```
+   gh pr view <pr> --repo {{REPO}} --json reviews,headRefOid
+   ```
+
+2. **Confirm it reviewed THIS head sha**, not an earlier push. A review of a
+   superseded commit tells you nothing about the diff in front of you.
+
+3. **Confirm every thread it opened is resolved.** The review-response loop
+   re-dispatches the implementer while any remain unresolved, so an unresolved
+   thread means the work is not finished — that is a FIX, not something for you
+   to adjudicate.
+
+4. **Cite it in your verdict**, with the sha and the outcome.
+
+**Fail closed.** If no review by that bot exists for the current head sha —
+absent, stale, or still pending — do **not** SHIP. Take ESCALATE and say the
+cross-model check is missing. Waiting is not your job and neither is proceeding
+without it: the whole point of naming a bot is that its absence should stop a
+merge rather than pass silently.
+
+You are not re-litigating its findings. Where you disagree with a resolved
+finding, note the disagreement in your verdict and let it merge; a disagreement
+worth blocking on is an ESCALATE.
 
 Read the diff, run the project, and route to exactly one verdict.
 
@@ -186,8 +230,9 @@ round.
 ### Verdicts
 
 - **SHIP** — it runs, it matches intent, the `## In brief` block passes both
-  rules, and nothing is on the escalation list. All four, not three. Merge the
-  PR and close the issue.
+  rules, nothing is on the escalation list, and — if a review bot is configured
+  — its review of the current head sha exists with every thread resolved. Merge
+  the PR and close the issue.
 
   ```
   gh pr merge <pr> --repo {{REPO}} --squash --delete-branch
@@ -241,15 +286,21 @@ could be better" is not a finding; "if the seed isn't threaded through, replays
 diverge on load" is. This block is the part a human actually reads, so it
 carries the judgment, not the summary.
 
-End the block with this line, verbatim, on every verdict:
+End the block with a provenance line on **every** verdict — one of exactly
+these two, matching what actually happened:
 
+```
+Cross-model review: {{REVIEW_BOT}} reviewed <sha>, <n> finding(s), all resolved.
+```
 ```
 Reviewed by a same-model session; no cross-model check was performed.
 ```
 
-It is unconditional at this stance because cross-model routing is not wired, so
-there is no case in which it would be untrue. A merge carried out on the
-strength of a review must never imply provenance the review did not have.
+Use the second whenever the review bot value above is empty. Use the first only
+when you actually fetched a review of the current head sha — never as a
+formality, because it is checkable against the PR and a false one is worse than
+an absent one. A merge carried out on the strength of a review must never imply
+provenance the review did not have.
 
 {% else %}
 ## Engineering mode — implement the ticket
