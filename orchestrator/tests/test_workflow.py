@@ -201,6 +201,65 @@ def test_tracker_handoff_label_override_targets_an_active_qa_state(tmp_path: Pat
     assert t.handoff_label.removeprefix("status:").replace("-", " ") in t.active_states
 
 
+def test_tracker_handoff_label_rejects_a_non_dispatchable_target(tmp_path: Path):
+    """A non-default handoff target absent from active_states must not load.
+
+    The transition itself would succeed, so the failure is silent: every
+    completed ticket lands on a label the eligibility filter excludes and parks
+    forever with neither QA nor a human handoff. Fail at load instead.
+    """
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["todo", "in progress"],
+                "handoff_label": "status:review",
+            }
+        },
+        prompt_template="",
+    )
+    with pytest.raises(WorkflowError) as exc:
+        Config(defn, tmp_path).tracker()
+    assert exc.value.code == "invalid_handoff_label"
+    assert "active_states" in str(exc.value)
+
+
+def test_tracker_handoff_label_rejects_a_non_status_label(tmp_path: Path):
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["todo", "review"],
+                "handoff_label": "review",
+            }
+        },
+        prompt_template="",
+    )
+    with pytest.raises(WorkflowError) as exc:
+        Config(defn, tmp_path).tracker()
+    assert exc.value.code == "invalid_handoff_label"
+
+
+def test_tracker_default_handoff_label_is_exempt_from_the_active_check(tmp_path: Path):
+    """The default is a HUMAN gate — gated stances keep it out of active_states
+    deliberately, so validating it would break every pre-stance binding."""
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["triage", "todo", "in progress"],
+            }
+        },
+        prompt_template="",
+    )
+    t = Config(defn, tmp_path).tracker()
+    assert t.handoff_label == "status:human-review"
+    assert "human review" not in t.active_states
+
+
 def test_tracker_handoff_label_blank_falls_back_to_default(tmp_path: Path):
     """An empty string is a composition accident, not an intent to unset."""
     defn = WorkflowDefinition(

@@ -243,6 +243,28 @@ class Config:
             else "status:human-review"
         )
 
+        # A non-default handoff target MUST be a state this workflow dispatches.
+        # Otherwise every successfully completed ticket is moved to a label the
+        # eligibility filter excludes, and parks permanently with no QA and no
+        # human handoff — silently, because the transition itself succeeded.
+        # The DEFAULT is exempt by design: status:human-review is a human gate,
+        # and gated stances deliberately keep it out of active_states.
+        if handoff_label != "status:human-review":
+            if not handoff_label.startswith("status:"):
+                raise WorkflowError(
+                    "invalid_handoff_label",
+                    f"handoff_label {handoff_label!r} must be a status:* label",
+                )
+            handoff_state = handoff_label[len("status:"):].replace("-", " ").strip().lower()
+            if handoff_state not in active_states:
+                raise WorkflowError(
+                    "invalid_handoff_label",
+                    f"handoff_label {handoff_label!r} resolves to state "
+                    f"{handoff_state!r}, which is absent from active_states "
+                    f"{active_states!r}; completed tickets would park there "
+                    f"permanently. Add it to active_states or use the default.",
+                )
+
         return TrackerConfig(
             kind=kind,
             repo=repo,

@@ -59,6 +59,20 @@ done
 [[ "$REPO" == */* ]] || { echo "ERROR --repo must be owner/name" >&2; exit 2; }
 command -v gh >/dev/null || { echo "ERROR gh CLI not found" >&2; exit 1; }
 
+# --- quoting helpers ---------------------------------------------------------
+# project.env is SOURCED by run-project.sh under `set -e`. An unquoted value
+# containing a space is parsed as `VAR=word command args`, so a verify command
+# like `pytest -q` makes bash try to run `-q`, exit 127, and abort the launch
+# before the orchestrator starts. Every persisted value is single-quoted, with
+# embedded single quotes escaped the POSIX way ('\'').
+shq() { printf "'%s'" "$(printf '%s' "${1-}" | sed "s/'/'\\\\''/g")"; }
+
+# `sed` treats `&` in a REPLACEMENT as "the whole match" and `\` as an escape,
+# so an unescaped verify command like `npm test && npm run build` silently
+# expands each `&` back into the placeholder and corrupts the composed workflow.
+# Escape the replacement metacharacters plus the `|` delimiter.
+sed_repl_escape() { printf '%s' "${1-}" | sed -e 's/[\\&|]/\\&/g'; }
+
 PROJ_DIR="$SB_HOME/projects/$SLUG"
 WORKSPACE_ROOT="$WORKSPACE_BASE/$SLUG"
 mkdir -p "$PROJ_DIR" "$WORKSPACE_ROOT"
@@ -111,25 +125,25 @@ SB_GITHUB_REPO=$REPO
 SB_BASE_BRANCH=$BASE
 SB_WORKSPACE_ROOT=$WORKSPACE_ROOT
 SB_CONVENTION_ROOT=$CONVENTION_PREFIX
-SB_VERIFY_CMD=$VERIFY_CMD
-SB_VERIFY_TOOLS=$VERIFY_TOOLS
+SB_VERIFY_CMD=$(shq "$VERIFY_CMD")
+SB_VERIFY_TOOLS=$(shq "$VERIFY_TOOLS")
 # GITHUB_TOKEN is expected from the environment (GitHub App installation token).
 EOF
 
 # --- 2. composed WORKFLOW.md (stance template + substitutions) --------------
-# '|' is the sed delimiter, so a '|' inside a verify command would break the
-# expression; reject it rather than emit a corrupt workflow.
+# A newline cannot survive a single-line sed replacement; everything else is
+# handled by escaping rather than rejection.
 case "$VERIFY_CMD$VERIFY_TOOLS" in
-  *"|"*) echo "ERROR --verify-cmd/--verify-tools cannot contain '|'" >&2; exit 2;;
+  *$'\n'*) echo "ERROR --verify-cmd/--verify-tools cannot contain a newline" >&2; exit 2;;
 esac
 sed \
-  -e "s|{{REPO}}|$REPO|g" \
-  -e "s|{{WORKSPACE_ROOT}}|$WORKSPACE_ROOT|g" \
-  -e "s|{{MAX_AGENTS}}|$MAX_AGENTS|g" \
-  -e "s|{{CONVENTION_ROOT}}|$CONVENTION_PREFIX|g" \
-  -e "s|{{BASE_BRANCH}}|$BASE|g" \
-  -e "s|{{VERIFY_CMD}}|$VERIFY_CMD|g" \
-  -e "s|{{VERIFY_TOOLS}}|$VERIFY_TOOLS|g" \
+  -e "s|{{REPO}}|$(sed_repl_escape "$REPO")|g" \
+  -e "s|{{WORKSPACE_ROOT}}|$(sed_repl_escape "$WORKSPACE_ROOT")|g" \
+  -e "s|{{MAX_AGENTS}}|$(sed_repl_escape "$MAX_AGENTS")|g" \
+  -e "s|{{CONVENTION_ROOT}}|$(sed_repl_escape "$CONVENTION_PREFIX")|g" \
+  -e "s|{{BASE_BRANCH}}|$(sed_repl_escape "$BASE")|g" \
+  -e "s|{{VERIFY_CMD}}|$(sed_repl_escape "$VERIFY_CMD")|g" \
+  -e "s|{{VERIFY_TOOLS}}|$(sed_repl_escape "$VERIFY_TOOLS")|g" \
   "$TEMPLATE" > "$PROJ_DIR/WORKFLOW.md"
 
 # --- 3. gate-state labels on the repo ---------------------------------------

@@ -120,10 +120,19 @@ over landing something provably complete.
 ## QA mode — review a diff you did not write (do NOT implement)
 
 This ticket carries `status:review`. An engineer session has already opened a
-PR. You are an independent reviewer running on a **different model than the one
-that wrote this code** — that is the point of this role. A model reviewing its
-own output shares its own blind spots; you do not share them. Look for what the
-author could not see, not for what a linter would catch.
+PR. You are an independent reviewer: a fresh session with no memory of writing
+this code, reading it as someone encountering it for the first time.
+
+**You are running on the same model that wrote this diff.** Cross-model review
+is the intent for this role and is not yet wired (see the header of this file),
+so the independence you have is *session* independence, not *model*
+independence — and that is the weaker kind. A model reviewing output from its
+own family shares its blind spots. Compensate deliberately: prefer findings you
+can demonstrate by running something over findings that rest on judgement,
+because judgement is exactly where the shared blind spots live.
+
+Never describe your review as cross-model or as independent verification by a
+different model. It is neither.
 
 Read the diff, run the project, and route to exactly one verdict.
 
@@ -210,9 +219,15 @@ could be better" is not a finding; "if the seed isn't threaded through, replays
 diverge on load" is. This block is the part a human actually reads, so it
 carries the judgment, not the summary.
 
-If you degraded to same-model review because the opposite provider was
-unavailable, say so on its own line under the block. A cross-check that did not
-happen must never look like one that did.
+End the block with this line, verbatim, on every verdict:
+
+```
+Reviewed by a same-model session; no cross-model check was performed.
+```
+
+It is unconditional at this stance because cross-model routing is not wired, so
+there is no case in which it would be untrue. A merge carried out on the
+strength of a review must never imply provenance the review did not have.
 
 {% else %}
 ## Engineering mode — implement the ticket
