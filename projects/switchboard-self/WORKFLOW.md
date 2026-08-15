@@ -471,7 +471,9 @@ once the verdict is routed.
    only open PR for your branch, and its head must match your `head_sha`) and
    performs the single `status:human-review` transition itself. Invalid or
    stale evidence is rejected with a diagnostic and no transition. Stop after
-   writing the file. A human merges.
+   writing the file. A human merges — this stance parks at the human gate.
+   (Other stances hand off to an agent reviewer instead; see the stance ladder
+   in `methodology/METHODOLOGY.md`.)
 {% endif %}
 
 <!-- PHASE 4: before choosing any architecture, query the decision-corpus MCP for
