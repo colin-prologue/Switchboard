@@ -1,4 +1,4 @@
-# AgDR-039 — The board's write direction arbitrates by field-value timestamp, and ships unprobed
+# AgDR-044 — The board's write direction arbitrates by field-value timestamp, and ships unprobed
 
 - **Status:** proposed (ratify or overturn at Gate C)
 - **Date:** 2026-08-13
