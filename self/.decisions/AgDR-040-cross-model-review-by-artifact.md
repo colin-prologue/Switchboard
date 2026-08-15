@@ -51,6 +51,56 @@ rule, prefer the mechanism that leaves an artifact over the one that produces a
 stronger guarantee on paper.** An attested claim you can check beats an
 unattested claim you cannot, even when the unattested one is nominally stronger.
 
+## Correction (2026-08-15, same day): the blocker is narrower than assumed
+
+This record was written believing the external reviewer might simply not engage
+with agent-authored PRs. Codex declined `@codex review` twice from
+`switchboard-agent[bot]` on civ-life#5, and that was read as the mechanism being
+unavailable — the premise the whole decision rests on.
+
+That reading was wrong. Later the same day, Switchboard PR #150 — opened under
+the operator's account, containing agent-written code — was reviewed by Codex
+**automatically, with no nudge**, and the review found a genuine P1 the author
+had missed while writing tests, a decision record, and a "weakest point" section
+about the surrounding area.
+
+The first draft of this correction concluded that the constraint is the
+*trigger identity* — bot account refused, operator account reviewed. **That
+conclusion did not survive twenty minutes.** PR #151, same repo, same operator
+account, opened immediately after, drew a third distinct response: *"To use
+Codex here, create an environment for this repo."*
+
+So the honest state is three observations and no theory:
+
+| PR | Opened by | Response |
+|---|---|---|
+| civ-life#5 | `switchboard-agent[bot]` | "create a Codex account and connect to github" |
+| Switchboard#150 | operator | full review, found a P1 |
+| Switchboard#151 | operator | "create an environment for this repo" |
+
+**What is established:** cross-model review generates findings a same-model
+session does not. #150's P1 was a real privilege-escalation path in a change
+whose author had written tests, a decision record, *and* a weakest-point
+section about the surrounding area, and missed it. That is the premise this
+whole decision rests on, and it is confirmed.
+
+**What is not established:** when the reviewer engages. Authorship is not the
+whole story, because #150 and #151 share an author and diverged. Quota, a
+per-repo environment prerequisite, or something else unobserved could produce
+this pattern; the messages are not diagnostic and nothing here distinguishes
+them.
+
+**What follows for the loop:** the QA fail-closed rule is more load-bearing
+than it looked, not less. If engagement is this unpredictable, ESCALATE-on-
+absent-review is not a rare path — and the failure mode named below ("if
+escalation-on-absence becomes routine") is the live risk rather than the
+hypothetical one. Watch that ratio before adding a `--review-bot` to any
+further project.
+
+Recording the retraction rather than quietly restating it, because the first
+draft made exactly the error this project keeps finding: a conclusion asserted
+more confidently than one observation can carry.
+
 ## Honest limitations
 
 - **The ship DECISION is still same-model.** What became cross-model is

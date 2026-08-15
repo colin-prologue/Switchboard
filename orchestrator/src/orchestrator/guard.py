@@ -13,9 +13,13 @@ Scope (documented), two independent rules:
 
 1. Containment: file-mutation tools (Write/Edit/MultiEdit/NotebookEdit) are
    denied when their target path resolves outside the workspace.
-2. Merge guard (issue #133, AgDR-036): Bash calls whose command matches one of
-   an ENUMERATED set of Gate-C-violating verb shapes (`gh pr merge`,
-   `gh pr review … --approve`, `gh pr close`, force-pushes) are denied. This is
+2. Merge guard (issue #133, AgDR-036; amended by AgDR-043): Bash calls whose
+   command matches one of an ENUMERATED set of Gate-C-violating verb shapes
+   (`gh pr merge`, `gh pr review … --approve`, `gh pr close`, force-pushes) are
+   denied. `gh pr merge` is the one CONDITIONAL shape: a project whose stance
+   dispatches an agent to the review state may merge, but only inside its own
+   repository, and only when runner.py passes that repository in. The other
+   three are denied under every stance. This is
    a pinned enumeration, NOT general Bash static analysis and NOT a security
    boundary: denial semantics are soft (AgDR-004's addendum — denials are fed
    back to the agent, which may route around them), and `gh api -X PUT
