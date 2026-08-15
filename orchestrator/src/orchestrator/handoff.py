@@ -126,12 +126,35 @@ def read_evidence(workspace: Path) -> HandoffEvidence | HandoffRejection | None:
     issue = data.get("issue")
     pr_number = data.get("pr_number")
     head_sha = data.get("head_sha")
+    # Diagnostics name the EXPECTED type and the RECEIVED one. A worker whose
+    # handoff is rejected is re-dispatched, reads this, and writes the file
+    # again — so a message that does not say what was wrong makes the retry
+    # loop unwinnable: every session repeats the same mistake until the budget
+    # or the session cap ends it. `issue` being a string while `pr_number` is an
+    # int is exactly the kind of asymmetry a bare "missing/invalid" cannot
+    # convey. Observed live on civ-life#4: ~15 rejected handoffs, one full
+    # budget ceiling, from `"issue": 4` instead of `"issue": "4"`.
+    def _got(value: object) -> str:
+        return "absent" if value is None else f"{type(value).__name__} {value!r}"
+
     if not isinstance(issue, str) or not issue.strip():
-        return HandoffRejection("malformed_evidence", "missing/invalid 'issue'")
+        return HandoffRejection(
+            "malformed_evidence",
+            f"'issue' must be a non-empty JSON STRING (e.g. \"4\", quoted — "
+            f"not the bare number 4); got {_got(issue)}",
+        )
     if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
-        return HandoffRejection("malformed_evidence", "missing/invalid 'pr_number'")
+        return HandoffRejection(
+            "malformed_evidence",
+            f"'pr_number' must be a positive JSON INTEGER (e.g. 5, unquoted); "
+            f"got {_got(pr_number)}",
+        )
     if not isinstance(head_sha, str) or not head_sha.strip():
-        return HandoffRejection("malformed_evidence", "missing/invalid 'head_sha'")
+        return HandoffRejection(
+            "malformed_evidence",
+            f"'head_sha' must be a non-empty JSON STRING (git rev-parse HEAD); "
+            f"got {_got(head_sha)}",
+        )
     return HandoffEvidence(
         issue=issue.strip(), pr_number=pr_number, head_sha=head_sha.strip()
     )

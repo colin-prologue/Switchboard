@@ -8,27 +8,43 @@ orchestrator code.
 
 ## States (status labels)
 
-| Label                  | Active? | Meaning                                                        |
-|------------------------|---------|----------------------------------------------------------------|
-| `status:drafting`      | no      | Gate A pending — intent + spec being authored/approved         |
-| `status:triage`        | **yes** | Adversarial ticket verification — dispatched to a verifier session |
-| `status:todo`          | **yes** | Approved, unblocked, dispatchable                              |
-| `status:in-progress`   | **yes** | An agent is working it                                          |
-| `status:decision`      | no      | Waiting on the operator — triage asked a Gate-A question (issue #55) |
-| `status:plan-review`   | no      | Gate B handoff — agent produced a plan/ADR awaiting approval    |
-| `status:human-review`  | no      | Gate C handoff — implementation done, awaiting human merge      |
-| `status:blocked`       | no      | Parked (fallback when native dependencies aren't available)     |
-| *(issue closed)*       | —       | Terminal                                                       |
+"Active" means **dispatched by the scheduler**; everything else parks. Which
+states are active is the **stance's** choice (see Proportionality), so the column
+below is per stance rather than absolute. `base` is the pre-stance pipeline,
+still the default for projects registered before the ladder.
+
+| Label                  | `base` | `prototype` | Meaning                                                        |
+|------------------------|--------|-------------|----------------------------------------------------------------|
+| `status:drafting`      | no     | *unused*    | Gate A pending — intent + spec being authored/approved         |
+| `status:triage`        | **yes**| *unused*    | Adversarial ticket verification — dispatched to a verifier session |
+| `status:todo`          | **yes**| **yes**     | Approved, unblocked, dispatchable                              |
+| `status:in-progress`   | **yes**| **yes**     | An agent is working it                                          |
+| `status:review`        | —      | **yes**     | Gate C handoff to an **agent** reviewer — PR open, awaiting QA  |
+| `status:decision`      | no     | *unused*    | Waiting on the operator — triage asked a Gate-A question (issue #55) |
+| `status:plan-review`   | no     | *unused*    | Gate B handoff — agent produced a plan/ADR awaiting approval    |
+| `status:human-review`  | no     | no          | Gate C handoff to a **human** — awaiting human merge            |
+| `status:blocked`       | no     | no          | Parked (fallback when native dependencies aren't available)     |
+| *(issue closed)*       | —      | —           | Terminal                                                       |
+
+*unused* means the stance's prompt never routes to that state and its machinery
+is unreferenced — **not removed**. Re-stancing restores it.
+
+Both Gate C states can coexist on one board: `prototype` hands off to
+`status:review`, and its QA role escalates to `status:human-review` for anything
+on its escalation list. `status:human-review` is inactive at every stance by
+design — it is the human gate, and a gate is a state nobody dispatches.
 
 Dependencies use GitHub's native **blocked-by**; Symphony won't dispatch a
 `status:todo` issue while any blocker is unresolved.
 
-### Who writes which status label (four writers)
+### Who writes which status label (five writers)
 
 One status label per issue is the workflow contract, and each label has exactly
-one owner. Worker agents write **no** status labels at all (issue #61 /
+one owner. **Implementing** agents write no status labels at all (issue #61 /
 AgDR-028): a worker's final action is the handoff evidence file, and the
-orchestrator performs the verified transition.
+orchestrator performs the verified transition. A **reviewing** agent is a
+different role and does write them — the same way the triage verifier always
+has.
 
 | Label(s)                                        | Written by | When |
 |-------------------------------------------------|------------|------|
@@ -36,7 +52,8 @@ orchestrator performs the verified transition.
 | `status:triage` → `status:todo` \| `status:drafting`      | the **triage verifier agent** | on its PASS / NEEDS WORK / SPLIT verdict |
 | `status:triage` → `status:decision`             | the **triage verifier agent** | on its NEEDS DECISION verdict (issue #55) — the ticket is blocked on an unmade human decision |
 | `status:decision` → `status:drafting`           | **humans** | the operator picked an option; the answer is folded into the body at drafting (manual until #51) |
-| `status:human-review`                           | the **orchestrator** | after provider-turn success + validated handoff evidence (issue #61 / AgDR-028; workers only write `.run/handoff-evidence.json`) |
+| the stance's `handoff_label` — `status:human-review` by default, `status:review` at `prototype` | the **orchestrator** | after provider-turn success + validated handoff evidence (issue #61 / AgDR-028; workers only write `.run/handoff-evidence.json`). The *target* is config (AgDR-039); the validation before writing it is unchanged |
+| `status:review` → `status:todo` \| `status:human-review` | the **QA agent** | on its FIX verdict (back for another pass) or ESCALATE (something on the escalation list, or a finding surviving two rounds). On SHIP it merges and writes no label — the merge closes the issue |
 | `status:todo` → `status:in-progress`, its revert, and `status:parked` | the **orchestrator** | claim taken / claim died / session cap |
 
 `status:in-progress` is **board visibility only, not a lock** — a label cannot
@@ -65,11 +82,46 @@ means a human/agent already moved the issue, so the orchestrator leaves it alone
 - **Gate B — plan/architecture approved.** For architecture-touching work, the
   agent produces an implementation plan + ADR, parks at `status:plan-review`, and
   a human approves before child tickets are filed.
-- **Gate C — final review.** Every implementation hands off at
-  `status:human-review`. A human merges. Agents never self-merge. Merge review
-  includes ratifying (or overturning) any AgDRs the PR added under
-  `<convention_root>.decisions/` — a PR that changed spec/methodology
-  semantics without one is incomplete.
+- **Gate C — final review.** Every implementation hands off for review before it
+  merges. **Nothing merges unreviewed** — that is the guarantee, and it holds at
+  every stance.
+
+  **Who performs the review is the stance's business.** A gated stance hands off
+  to `status:human-review`, which no stance dispatches, so the work parks until a
+  human merges. An autonomous stance hands off to a QA state it *does* dispatch
+  (e.g. `status:review`), and a reviewer session merges within a bounded
+  escalation list, routing anything on that list to a human instead.
+
+  The handoff target is the stance's `tracker.handoff_label`, and the loader
+  refuses a non-default target absent from `active_states` — otherwise completed
+  work would park somewhere nothing dispatches and never be seen again.
+
+  Two review duties, and they do **not** both transfer to an agent reviewer,
+  because they are different kinds of act:
+
+  - **The `## In brief` block is checked at every stance, by whoever reviews.**
+    A PR body with no block, or whose **What could be wrong** names a quality
+    rather than a consequence, is incomplete and bounces. This is compliance
+    against two fixed rules (see "Writing for the reader" below) — cheap, and
+    checkable without deciding anything about the project's direction.
+
+  - **Ratifying (or overturning) an AgDR is a human act, and stays one.** A PR
+    that changed spec/methodology semantics without a decision record is
+    incomplete — but *accepting* that record is a judgement about where the
+    project is going, which the operator owns. A peer agent cannot ratify on
+    the operator's behalf, so at a stance whose Gate C is an agent reviewer,
+    AgDRs are written and merged, then reviewed by the operator out of band.
+    A stance that wants them gate-blocked must route to `status:human-review`.
+
+  Do not read the first bullet as the weaker one: it is the block the operator
+  actually reads, so enforcing it is what keeps a merged board legible.
+
+  > **Why this is a reframing rather than a loosening.** Earlier revisions said
+  > "a human merges; agents never self-merge." What Gate C protects is that
+  > nothing reaches the base branch unreviewed — not that a particular species
+  > clicks the button. Stating it as an absolute would have forced an exception
+  > per stance, and three provisos hanging off one sentence is how a guarantee
+  > stops being read. See `AgDR-039`.
 
 ## Triage — adversarial ticket verification (active state)
 
@@ -145,7 +197,44 @@ tollbooth:
 
 ## Proportionality (the risk knob)
 
-The path a ticket takes through states *is* the risk control:
+Two scales, one argument: **match the path to the risk.** A ticket's path through
+the states is the per-ticket knob; a project's **stance** is the same knob one
+level up.
+
+### Per project — the stance
+
+A project declares how much of this methodology is live, via
+`SB_WORKFLOW_STANCE` in its `project.env`. The stance selects a workflow recipe
+(`workflow/stances/WORKFLOW.<stance>.md`, or a project-local override beside the
+binding), and the recipe's `active_states` decides which states below are
+dispatched and which park.
+
+**A gate is not code — it is a state absent from `active_states`.** The scheduler
+walks past it and the ticket sits. That is the whole mechanism, and it is why
+adding or removing a gate costs no orchestrator changes.
+
+| Stance | For | Shape |
+|--------|-----|-------|
+| `prototype` | You do not know what you are building yet. A bad merge costs one `git revert` on a repo nobody depends on. | No triage, no Gate A/B, no fold loop. Three inline preflight checks instead of the triage rubric. A QA session reviews and merges; only the escalation list reaches a human. |
+| `harden` | You have found it and are consolidating. | *Not yet written.* Verification returns; contracts get pinned. |
+| `sustain` | Something outside the project depends on it. | *Not yet written.* The human gate returns where blast radius warrants. |
+
+Only `prototype` ships today. `harden` and `sustain` are deliberately unwritten
+until a real project has run under `prototype` long enough to say what tightening
+should mean — inventing them now would be guessing.
+
+Machinery a stance omits is **unreferenced, not deleted**. Re-stancing is a
+template swap plus a recompose; the orchestrator hot-reloads on the composed
+workflow's mtime, so it takes effect without a restart. A project may also move
+*down* the ladder for an exploratory push — stance is a property of the work in
+front of you, not a rank the project earns.
+
+Rationale and refutation: `self/.decisions/AgDR-039-per-project-stance-ladder.md`.
+
+### Per ticket — the entry state
+
+Within whatever stance is live, the path a ticket takes through states *is* the
+risk control:
 
 - **Routine / low-risk** (a bug, a small change): file it directly at
   `status:todo` with a one-line task-intent. No product-intent tier, no Gate A/B.
@@ -162,6 +251,8 @@ the entry state. Match the path to the risk.
 
 For gated work, the issue body should contain:
 
+- an `## In brief` block (see "Writing for the reader" below) as the first
+  section,
 - a one-paragraph **intent** (what + why),
 - **acceptance criteria** written as checks (pass/fail, eval-shaped),
 - **non-goals** (hard scope boundaries),
@@ -171,6 +262,72 @@ For gated work, the issue body should contain:
 Acceptance criteria are the agent's definition of done; non-goals are boundaries
 it must not cross. (Product-intent files, the verification contract, and the
 elicitation front door arrive in later roadmap phases.)
+
+## Writing for the reader — the `## In brief` block
+
+Everything else in this methodology optimizes for an implementing agent: exact
+citations, enumerated consumers, `file:line` at a named sha. That precision is
+load-bearing and stays. It is also unreadable to a human catching up — the
+operator between context switches, or somebody helping review the board.
+
+So every agent-written ticket body, PR body, and judgment-carrying triage
+verdict opens with a fixed, grep-able block carrying **insight, not
+information**:
+
+```
+## In brief
+
+**What this does:** <one sentence>
+
+**What could be wrong:** <one decision or assumption, and what breaks if it is
+false>
+```
+
+**"Judgment-carrying" excludes exactly two of the five verdict routes.** NEEDS
+WORK, NEEDS DECISION, and SPLIT each reach a conclusion a reader can argue with,
+so each carries the block. A PASS verdict is one line saying the ticket passed,
+and an unchanged-body fast-path referral re-routes per a prior verdict having
+run no rubric and produced no new findings by construction. Neither holds
+judgment for a reader to scrutinize, so on those two a block would be ceremony
+wrapped around nothing — and the surest way to teach readers to skip it.
+
+Two rules make the fields hard to pad, and they are the whole mechanism:
+
+1. **"What this does" bans identifiers** — no issue numbers, no file paths, no
+   AgDR/ADR/OBS identifiers, no `status:*` label names, no function, class, or
+   field names. An author who cannot clear this bar has not understood its own
+   change well enough to summarize it. This is what buys the twenty-second
+   glance.
+
+2. **"What could be wrong" requires a conditional and a consequence** — the
+   *if X, then Y* shape. Naming a quality ("coverage could be broader", "this
+   could be more robust") fails; naming a trigger and its damage passes. This is
+   the scrutiny surface: it tells a reviewer what to argue with before merging.
+
+**Placement.** The block is the first section, with exactly two exceptions, each
+for its own reason. On a PR body, the `Closes #N` line comes first: the
+orchestrator resolves the issue link through GitHub's closing references, which
+match a closing keyword anywhere in the body — so the line's **presence** is
+machine-enforced by the handoff check, but its **position** is convention only,
+kept first so it stays visible and never gets edited away. On a triage verdict,
+**two** lines precede the block and the block is third, because both of those
+lines are contracts rather than courtesies: the `## Triage verdict` heading,
+which the workflow prompt pins as the comment's first line so verdicts stay
+grep-able, and the `body-sha1:` line directly under it, which the next triage
+session parses to tell a revised body from an unchanged one. A human-facing
+layer never displaces a machine-read one. Everything the author would otherwise
+write goes below the block, unchanged. The block adds a layer; it removes
+nothing.
+
+**Enforcement is asymmetric on purpose.** PR bodies are gated at Gate C — a
+missing or hedged block bounces the PR, the same as a missing AgDR. Ticket
+bodies and triage verdicts get the block from their templates but are never
+bounced for it: a triage round costs a full dispatched session, and a bounce for
+prose does not reduce implementation risk.
+
+The orchestrator's own generated comments (park notices, dispatch refusals) need
+no block — they already lead with a plain sentence and a concrete next action,
+and are the model this section generalizes.
 
 ## Drafting-quality checklist — the recurring failure classes
 

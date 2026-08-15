@@ -167,6 +167,108 @@ def test_tracker_defaults(tmp_path: Path):
     assert t.terminal_states == ["closed"]
 
 
+def test_tracker_handoff_label_defaults_to_human_review(tmp_path: Path):
+    """Absent config, the terminal handoff still lands on the Gate C label.
+
+    The default is what keeps every pre-stance binding behaving identically:
+    only a stance that explicitly opts into an agent QA state changes it.
+    """
+    defn = WorkflowDefinition(config={"tracker": {"kind": "github", "repo": "acme/widgets"}}, prompt_template="")
+    cfg = Config(defn, tmp_path)
+    assert cfg.tracker().handoff_label == "status:human-review"
+
+
+def test_tracker_handoff_label_override_targets_an_active_qa_state(tmp_path: Path):
+    """An autonomous stance points the handoff at a state it also dispatches.
+
+    If `handoff_label` named a state absent from `active_states`, a validated
+    handoff would park the issue forever — so the two are set together, and
+    this pins that pairing.
+    """
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["todo", "in progress", "review"],
+                "handoff_label": "status:review",
+            }
+        },
+        prompt_template="",
+    )
+    t = Config(defn, tmp_path).tracker()
+    assert t.handoff_label == "status:review"
+    assert t.handoff_label.removeprefix("status:").replace("-", " ") in t.active_states
+
+
+def test_tracker_handoff_label_rejects_a_non_dispatchable_target(tmp_path: Path):
+    """A non-default handoff target absent from active_states must not load.
+
+    The transition itself would succeed, so the failure is silent: every
+    completed ticket lands on a label the eligibility filter excludes and parks
+    forever with neither QA nor a human handoff. Fail at load instead.
+    """
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["todo", "in progress"],
+                "handoff_label": "status:review",
+            }
+        },
+        prompt_template="",
+    )
+    with pytest.raises(WorkflowError) as exc:
+        Config(defn, tmp_path).tracker()
+    assert exc.value.code == "invalid_handoff_label"
+    assert "active_states" in str(exc.value)
+
+
+def test_tracker_handoff_label_rejects_a_non_status_label(tmp_path: Path):
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["todo", "review"],
+                "handoff_label": "review",
+            }
+        },
+        prompt_template="",
+    )
+    with pytest.raises(WorkflowError) as exc:
+        Config(defn, tmp_path).tracker()
+    assert exc.value.code == "invalid_handoff_label"
+
+
+def test_tracker_default_handoff_label_is_exempt_from_the_active_check(tmp_path: Path):
+    """The default is a HUMAN gate — gated stances keep it out of active_states
+    deliberately, so validating it would break every pre-stance binding."""
+    defn = WorkflowDefinition(
+        config={
+            "tracker": {
+                "kind": "github",
+                "repo": "acme/widgets",
+                "active_states": ["triage", "todo", "in progress"],
+            }
+        },
+        prompt_template="",
+    )
+    t = Config(defn, tmp_path).tracker()
+    assert t.handoff_label == "status:human-review"
+    assert "human review" not in t.active_states
+
+
+def test_tracker_handoff_label_blank_falls_back_to_default(tmp_path: Path):
+    """An empty string is a composition accident, not an intent to unset."""
+    defn = WorkflowDefinition(
+        config={"tracker": {"kind": "github", "repo": "acme/widgets", "handoff_label": "   "}},
+        prompt_template="",
+    )
+    assert Config(defn, tmp_path).tracker().handoff_label == "status:human-review"
+
+
 def test_tracker_api_key_dollar_var_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
     defn = WorkflowDefinition(config={"tracker": {"kind": "github", "repo": "acme/widgets"}}, prompt_template="")
@@ -995,6 +1097,79 @@ def test_base_and_composed_workflow_are_in_sync():
         "workflow/WORKFLOW.base.md and projects/switchboard-self/WORKFLOW.md have "
         "drifted. Edit BOTH (register-project.sh is outside the worker allowlist)."
     )
+
+
+def test_workflow_prompt_pins_in_brief_block():
+    """The plain-language block must reach the agent through the prompt itself.
+
+    Pinned in BOTH files: the base template and the composed mirror. The
+    sync test above proves they match; this test proves the content is
+    actually there, so a well-intentioned "simplification" of either file
+    cannot silently drop the requirement while staying in sync.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    for rel in ("workflow/WORKFLOW.base.md", "projects/switchboard-self/WORKFLOW.md"):
+        text = (repo_root / rel).read_text(encoding="utf-8")
+        assert "## In brief" in text, f"{rel}: block heading absent"
+        assert "**What this does:**" in text, f"{rel}: first field absent"
+        assert "**What could be wrong:**" in text, f"{rel}: second field absent"
+        # The PR-handoff step must keep Closes #N ahead of the block. The
+        # orchestrator resolves the issue link through GitHub's closing
+        # references, which match anywhere in the body — presence is what the
+        # handoff check enforces; staying first is convention only, so the
+        # line stays visible and doesn't get edited away.
+        assert "Keep the `Closes #N` line first" in text, f"{rel}: ordering rule absent"
+        # Gate C consequence must be stated where the agent reads it.
+        assert "is incomplete at the merge gate" in text, f"{rel}: gate consequence absent"
+        # The closing reference is instructed, not assumed — handoff.py rejects
+        # a PR that does not close this issue with `pr_linkage_missing`.
+        assert "a literal\n   closing reference, not prose that mentions the issue" in text, (
+            f"{rel}: Closes #N instruction absent"
+        )
+        # Three of the five verdict routes carry the block (NEEDS WORK, NEEDS
+        # DECISION, SPLIT); PASS and the unchanged-body fast-path deliberately
+        # do not. Each of the three is pinned by a string that occurs ONCE in
+        # the file and only inside its own route, so deleting any single
+        # insertion turns this test red — the sync test alone cannot catch a
+        # deletion mirrored across both files.
+        #
+        # On a verdict comment the block is THIRD: the `## Triage verdict`
+        # heading and the machine-parsed `body-sha1:` line keep lines 1-2.
+        # Counted, not just present: one occurrence per block-carrying route,
+        # so losing the rule from any single route is red.
+        assert text.count("the machine-read hash stays second") == 3, (
+            f"{rel}: verdict-block placement rule must appear once per "
+            f"block-carrying route, found {text.count('the machine-read hash stays second')}"
+        )
+        # NEEDS WORK — lives only in that route's insertion, not the step-8
+        # PR-handoff insertion.
+        assert (
+            "the single finding the author has the strongest\n  > case to push back on"
+            in text
+        ), f"{rel}: NEEDS WORK In brief block absent"
+        # NEEDS DECISION — the route main added; its second field asks how the
+        # decision request's own framing could be wrong.
+        assert (
+            "an option you left off, or a two-way choice that is really three" in text
+        ), f"{rel}: NEEDS DECISION In brief block absent"
+        # SPLIT-verdict child issues must also open with the block.
+        assert "each\n  body opens with the `## In brief` block" in text, (
+            f"{rel}: SPLIT child-issue body block instruction absent"
+        )
+        # The SPLIT verdict's own `## Triage verdict` comment must also carry
+        # the block, not just the child bodies — this string lives ONLY inside
+        # that SPLIT-comment insertion (distinct from the NEEDS WORK and NEEDS
+        # DECISION blocks above and the SPLIT child-body clause just checked),
+        # so a regression that drops just this insertion turns this test red.
+        assert "the split decision most likely to be wrong" in text, (
+            f"{rel}: SPLIT triage-verdict comment In brief block absent"
+        )
+        # The two mechanical routes stay block-free on purpose. Without this,
+        # nothing distinguishes "deliberately excluded" from "forgotten", and a
+        # later session would add ceremony back to a one-line PASS.
+        assert "The fast-path comment carries no `## In brief` block" in text, (
+            f"{rel}: PASS/fast-path exclusion rationale absent"
+        )
 
 
 # --- decision-record numbering (self/.decisions) -------------------------------
