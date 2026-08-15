@@ -41,11 +41,27 @@ FILE_PATH_KEYS = ("file_path", "notebook_path", "path")
 
 HANDOFF_HINT = "(Gate C is Colin's — hand off, don't self-merge)"
 
+# Passed by runner.py when the project's stance puts Gate C with an AGENT (the
+# handoff label resolves into active_states, so a QA session is dispatched to
+# review and merge). Its ABSENCE means a human owns Gate C, so a guard invoked
+# without it — an older settings file, a hand-run hook, a caller that forgot —
+# denies. The flag can only ever widen, never narrow: fail-closed by omission.
+GATE_C_AGENT_FLAG = "--gate-c-owner=agent"
+
 # `gh pr <verb>` shapes denied outright, verb -> human name of the shape.
 GH_PR_DENIED_VERBS = {
     "merge": "gh pr merge",
     "close": "gh pr close",
 }
+
+# Of the denied shapes, only this one is a GATE C question. `--approve`,
+# `gh pr close` and force-pushes stay denied for every stance: approval is the
+# reviewer's act and self-approval defeats it whoever holds the gate, closing a
+# PR is abandonment rather than review, and a force-push destroys history — none
+# of the three become safe because a project chose an agent reviewer. Relaxing
+# exactly one verb keeps this a Gate-C switch rather than a general
+# trust-the-agent switch.
+GATE_C_VERB = "merge"
 
 
 def _decode_ansi_c(body: str) -> str:
@@ -419,8 +435,12 @@ _GIT_GLOBAL_VALUE_FLAGS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace"
                            "--exec-path", "--config-env", "--attr-source")
 
 
-def _denied_shape(command: str) -> str | None:
+def _denied_shape(command: str, agent_owns_gate_c: bool = False) -> str | None:
     """Name the denied shape this command matches, or None.
+
+    `agent_owns_gate_c` relaxes exactly one verb (`gh pr merge`) for projects
+    whose stance dispatches an agent to the review state. It defaults to False
+    so every existing caller keeps the pre-#133 behaviour unchanged.
 
     Matching is by VERB POSITION, not token presence: the rules are anchored at
     `tokens[0]`, so free-text arguments (a PR body that says "a human will
@@ -446,7 +466,9 @@ def _denied_shape(command: str) -> str | None:
             rest = _skip_flags(rest[1:], _GH_VALUE_FLAGS)
             if rest:
                 verb, args = rest[0], rest[1:]
-                if verb in GH_PR_DENIED_VERBS:
+                if verb in GH_PR_DENIED_VERBS and not (
+                    verb == GATE_C_VERB and agent_owns_gate_c
+                ):
                     return GH_PR_DENIED_VERBS[verb]
                 if verb == "review":
                     i = 0
@@ -601,12 +623,18 @@ def main() -> int:
         return 0  # malformed hook input: do not brick the session
 
     tool_input = payload.get("tool_input") or {}
+    # argv, not env: `runner._build_env` returns None to mean "inherit the
+    # parent env as-is", so threading a variable through it would mean giving
+    # up that signal for every turn. The hook COMMAND is already ours to
+    # compose, it is per-session by construction, and it is visible in the
+    # settings file a reviewer can read.
+    agent_owns_gate_c = GATE_C_AGENT_FLAG in sys.argv[1:]
 
     # Merge guard FIRST: it is workspace-INDEPENDENT and must not ride behind
     # the early return below, or a payload without CLAUDE_PROJECT_DIR/cwd would
     # silently allow `gh pr merge`.
     if payload.get("tool_name") == "Bash":
-        shape = _denied_shape(tool_input.get("command") or "")
+        shape = _denied_shape(tool_input.get("command") or "", agent_owns_gate_c)
         if shape:
             sys.stderr.write(
                 f"switchboard-guard: denied: {shape} {HANDOFF_HINT}"

@@ -31,7 +31,7 @@ class ClaudeOnlyRunnerSelector:
 
     def select(self, cfg: Config, issue: Issue) -> AgentRunner:
         del issue
-        return ClaudeRunner(cfg.claude())
+        return ClaudeRunner(cfg.claude(), cfg.tracker().agent_owns_gate_c())
 
 
 class CodexOnlyRunnerSelector:
@@ -53,7 +53,7 @@ class MixedRunnerSelector:
         mixed = cfg.mixed()
         provider_id = self.select_provider(mixed.weights, issue)
         if provider_id == "claude":
-            return ClaudeRunner(mixed.claude)
+            return ClaudeRunner(mixed.claude, cfg.tracker().agent_owns_gate_c())
         return CodexRunner(mixed.codex)
 
     @staticmethod
