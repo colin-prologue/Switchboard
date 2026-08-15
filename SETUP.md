@@ -186,10 +186,17 @@ This writes `projects/switchboard-self/`, composes its `WORKFLOW.md`, scaffolds
 `self/.switchboard/` + `self/.decisions/`, and creates the `status:*` labels on the
 repo's issue board.
 
+> **`--stance` defaults to `prototype`, and that is the wrong stance for this
+> project.** The default exists so a throwaway project starts fast; Switchboard
+> is the repo that governs every other project's merge rights, so it is the one
+> place the loose end of the ladder does not belong. Pass `--stance base`
+> explicitly here. See the stance table below before registering anything.
+
 **Verify:** `scripts/list-projects.sh` shows `switchboard-self`; the repo's Labels
-page shows the **seven** `status:*` labels (drafting, triage, todo, in-progress,
-plan-review, human-review, blocked). `verify-setup.sh` reports the project
-registered and its composed `WORKFLOW.md` matching the current base.
+page shows the **ten** `status:*` labels (drafting, triage, todo, in-progress,
+plan-review, decision, human-review, review, blocked, parked) plus the
+`gate:triage-passed` provenance marker. `verify-setup.sh` reports the project
+registered and its composed `WORKFLOW.md` matching its stance's template.
 
 ---
 
@@ -331,12 +338,47 @@ session counts are issue #15.
 ## Stage 6 — Onboard real projects  [SCRIPT, repeat]
 
 ```bash
-scripts/register-project.sh --slug acme-api --repo acme/api --base main
+scripts/register-project.sh --slug acme-api --repo acme/api --base main \
+  --stance prototype \
+  --verify-cmd './test.sh' \
+  --verify-tools '"Bash(./test.sh:*)"'
 scripts/run-project.sh acme-api
 ```
 
 Real projects never receive the kit — they're registered. Only `.switchboard/` /
 `.decisions/` conventions and the `status:*` labels land in their repos.
+
+### Choose the stance deliberately — it decides who merges
+
+`--stance` is the project's discipline dial. It is **not** cosmetic: it selects
+the workflow recipe, which states get dispatched, and — since `AgDR-043` — whether
+an agent is permitted to merge that project's own PRs.
+
+| Stance | Use when | What it does |
+|---|---|---|
+| `prototype` *(default)* | You do not know what you are building yet, and a bad merge costs one `git revert` on a repo nobody depends on | No triage, no plan gate. A QA session reviews and merges; only its escalation list reaches you |
+| `harden` | *Not yet written* | — |
+| `sustain` | *Not yet written* | — |
+| `base` | Something outside the project depends on it | The pre-stance pipeline: triage, plan review, and a human Gate C at `status:human-review` |
+
+**The default is `prototype`.** Registering without `--stance` gives that
+project's agents the right to merge their own work. That is usually what you want
+for a new prototype and never what you want for infrastructure — so decide rather
+than inherit.
+
+### `--verify-tools` is not optional in practice
+
+`--verify-cmd` tells the worker how to check its work; `--verify-tools` grants
+permission to actually run it. Without the grant the command is denied at the
+tool layer and the session strands — the failure looks like the agent refusing to
+test rather than like a missing permission.
+
+**Include every command a session needs to run**, not just the test suite. A
+project that captures screenshots, builds an artifact, or shells out to a
+formatter needs each of those allowed. Adding one later means re-running
+`register-project.sh` with the **full** flag set: omitted flags fall back to
+defaults rather than being preserved, so a partial re-run silently drops your
+verify command and review bot.
 
 ---
 
