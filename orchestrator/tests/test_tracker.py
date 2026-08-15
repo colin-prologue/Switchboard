@@ -1151,3 +1151,44 @@ async def test_issue_comments_missing_issue_raises_tracker_error():
     with pytest.raises(TrackerError) as exc_info:
         await tracker.fetch_issue_comments(999)
     assert exc_info.value.code == "github_unknown_payload"
+
+
+def test_dual_status_resolves_sorted_first_and_logs_the_ambiguity(monkeypatch):
+    """The `parked` + `triage` pair the 2026-08-09 incident produced (#130).
+
+    `parked` sorts first, so a dual-labelled issue reads as parked and its
+    re-park looks sticky. The resolution is deterministic but semantically
+    arbitrary, which is exactly why the diagnostic has to fire.
+
+    `_normalize_issue` is a @staticmethod: no tracker instance, no creds, no
+    HTTP mock. `log` writes straight to stderr (log.py), never through the
+    `logging` module, so it is captured by patching the name.
+    """
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "orchestrator.tracker.log", lambda msg, **ctx: calls.append((msg, ctx))
+    )
+
+    issue = GitHubTracker._normalize_issue(
+        issue_node(labels=["status:triage", "status:parked"])
+    )
+
+    assert issue.state == "parked"
+    assert len(calls) == 1
+    msg, ctx = calls[0]
+    assert msg == "issue carries multiple status:* labels; using sorted-first"
+    assert ctx["labels"] == "status:parked,status:triage"
+    assert ctx["issue_number"] == 1
+
+
+def test_single_status_label_logs_no_ambiguity_diagnostic(monkeypatch):
+    """Discriminator: the diagnostic is for the multi-label case only."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "orchestrator.tracker.log", lambda msg, **ctx: calls.append(msg)
+    )
+
+    issue = GitHubTracker._normalize_issue(issue_node(labels=["status:triage"]))
+
+    assert issue.state == "triage"
+    assert calls == []
