@@ -51,6 +51,35 @@ rule, prefer the mechanism that leaves an artifact over the one that produces a
 stronger guarantee on paper.** An attested claim you can check beats an
 unattested claim you cannot, even when the unattested one is nominally stronger.
 
+## Correction (2026-08-15, same day): the blocker is narrower than assumed
+
+This record was written believing the external reviewer might simply not engage
+with agent-authored PRs. Codex declined `@codex review` twice from
+`switchboard-agent[bot]` on civ-life#5, and that was read as the mechanism being
+unavailable — the premise the whole decision rests on.
+
+That reading was wrong. Later the same day, Switchboard PR #150 — opened under
+the operator's account, containing agent-written code — was reviewed by Codex
+**automatically, with no nudge**, and the review found a genuine P1 the author
+had missed while writing tests, a decision record, and a "weakest point" section
+about the surrounding area.
+
+So the constraint is not "Codex will not review agent work". It is that Codex
+does not accept a *trigger comment* from the bot account. Three consequences:
+
+1. **The premise holds.** Cross-model review generates findings a same-model
+   session does not, on exactly the kind of change where it matters most.
+2. **The failure mode is authorship, not content.** A PR opened by the App gets
+   no automatic review; one opened under an operator account does. Whether
+   Switchboard can open PRs under an identity Codex responds to is now the
+   open question, and it is a configuration question rather than a wall.
+3. **The QA fail-closed rule stays right, and gets cheaper.** Escalating when
+   no review exists is the correct direction, and the ESCALATE-to-SHIP ratio
+   named below is still the metric to watch.
+
+Do not read this correction as the limitation being resolved — it is not, for
+bot-opened PRs, which is every PR Switchboard currently opens.
+
 ## Honest limitations
 
 - **The ship DECISION is still same-model.** What became cross-model is

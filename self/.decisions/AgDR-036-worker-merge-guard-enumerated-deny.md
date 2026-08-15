@@ -18,6 +18,26 @@ permit `gh pr merge`, `gh pr review --approve`, `gh pr close` and force-pushes;
 Bash call at all. The only thing standing between a worker and its own merge
 button was the instruction not to press it.
 
+## Amended by AgDR-043 (2026-08-15)
+
+`gh pr merge` is no longer denied unconditionally. It is denied unless the
+project's stance dispatches an agent to the handoff state, and then only for
+merges targeting that project's own repository.
+
+The composition this record missed: it was written while every project ran a
+human Gate C, and the `prototype` stance (`AgDR-039`) shipped the same week with
+a QA session that merges its own reviewed PRs. Merging this guard silently
+revoked that, for every project at once, because the guard is orchestrator code
+shared out of one installed runtime.
+
+`gh pr review --approve`, `gh pr close`, and the force-push shapes below are
+unchanged — denied under every stance. So is the `gh api …/pulls/{n}/merge`
+residual named in this record: it is not a `gh pr merge` shape and reaches the
+same endpoint with the same token.
+
+Read the enumeration below as still accurate about *what* is denied, and
+`AgDR-043` as the authority on *when* the merge verb is.
+
 ## Decision
 
 1. **`Bash` joins the existing matcher** — `Bash|Write|Edit|MultiEdit|NotebookEdit`
