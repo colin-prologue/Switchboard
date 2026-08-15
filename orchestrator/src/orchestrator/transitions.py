@@ -25,14 +25,25 @@ from .types import WorkflowError
 TRANSITIONS_PATH = Path(__file__).resolve().parents[3] / "workflow" / "transitions.yml"
 
 
-def load_requires_marker(path: Path = TRANSITIONS_PATH) -> dict[str, list[str]]:
-    """Load the `requires_marker` section: state (normalized) -> required markers.
+def load_edges(path: Path = TRANSITIONS_PATH) -> list[dict]:
+    """Load the `edges` section verbatim: the full (from -> to) rule set.
 
-    Returns a mapping whose keys are normalized states (lower-case, spaces not
-    dashes — matching tracker.py state derivation) and whose values are the list
-    of provenance labels an issue in that state must carry to be dispatchable.
-    Absent/empty section -> empty mapping (no state gated).
+    Issue #22's status-board sync is the FIRST consumer of this section (the
+    header's "#52's labeled-event Action" does not exist at HEAD). Rows are
+    returned as authored — `from`/`to` keep the dashed spelling the file uses;
+    callers normalize before comparing against tracker state strings, which use
+    spaces. Non-map rows are dropped rather than crashing the Action.
     """
+    raw = _load_table(path)
+    section = raw.get("edges") or []
+    if not isinstance(section, list):
+        raise WorkflowError(
+            "transitions_parse_error", "edges must be a list of (from, to) maps"
+        )
+    return [e for e in section if isinstance(e, dict) and "from" in e and "to" in e]
+
+
+def _load_table(path: Path) -> dict:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -45,6 +56,18 @@ def load_requires_marker(path: Path = TRANSITIONS_PATH) -> dict[str, list[str]]:
             "transitions_parse_error",
             f"transitions.yml decoded to {type(raw).__name__}, expected a map",
         )
+    return raw
+
+
+def load_requires_marker(path: Path = TRANSITIONS_PATH) -> dict[str, list[str]]:
+    """Load the `requires_marker` section: state (normalized) -> required markers.
+
+    Returns a mapping whose keys are normalized states (lower-case, spaces not
+    dashes — matching tracker.py state derivation) and whose values are the list
+    of provenance labels an issue in that state must carry to be dispatchable.
+    Absent/empty section -> empty mapping (no state gated).
+    """
+    raw = _load_table(path)
 
     section = raw.get("requires_marker") or {}
     if not isinstance(section, dict):

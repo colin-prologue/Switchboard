@@ -12,6 +12,14 @@ from .types import Issue
 from .workflow import Config
 
 
+def _gate_c_repo(cfg: Config) -> str:
+    """The repo whose merge gate this project's stance hands to an agent, or ""
+    when a human owns it. Both values come from the same tracker block, so the
+    guard can never be told a repo the scheduler is not working."""
+    tracker = cfg.tracker()
+    return tracker.repo if tracker.agent_owns_gate_c() else ""
+
+
 class AgentRunnerSelector(Protocol):
     """Select one execution adapter for a dispatchable issue."""
 
@@ -31,7 +39,7 @@ class ClaudeOnlyRunnerSelector:
 
     def select(self, cfg: Config, issue: Issue) -> AgentRunner:
         del issue
-        return ClaudeRunner(cfg.claude())
+        return ClaudeRunner(cfg.claude(), _gate_c_repo(cfg))
 
 
 class CodexOnlyRunnerSelector:
@@ -53,7 +61,7 @@ class MixedRunnerSelector:
         mixed = cfg.mixed()
         provider_id = self.select_provider(mixed.weights, issue)
         if provider_id == "claude":
-            return ClaudeRunner(mixed.claude)
+            return ClaudeRunner(mixed.claude, _gate_c_repo(cfg))
         return CodexRunner(mixed.codex)
 
     @staticmethod
