@@ -157,6 +157,27 @@ Read the diff, run the project, and route to exactly one verdict.
    prototype is cheap to change later, and reviewing it as though it were
    permanent is how a prototype stops being one.
 
+4. **Does the PR body carry a usable `## In brief` block?** This is the only
+   part of the PR the operator is likely to read, so a merge that degrades it
+   costs more than a merge that degrades code. Two rules, both mechanical:
+
+   - **"What this does" contains no identifiers** — no file paths, issue
+     numbers, decision-record ids, `status:*` labels, or function, class, or
+     field names. An author who cannot clear that bar has not understood their
+     own change well enough to hand it over.
+   - **"What could be wrong" names a trigger and its damage** — the *if X, then
+     Y* shape. "Coverage could be better" fails; "if the seed isn't threaded
+     through, replays diverge on load" passes.
+
+   A missing block, or one failing either rule, is a **FIX** — quote the
+   offending field and say which rule it missed. Do not rewrite it for the
+   author; the point is that the author can produce it.
+
+   You are **not** checking decision records. If this PR should have carried one
+   and didn't, say so in your verdict as a note — but ratifying a decision
+   record is the operator's judgement about project direction, not yours, and it
+   is not grounds to withhold SHIP at this stance.
+
 **Every finding must name the command or the line that demonstrates it.** A
 finding you cannot show is an opinion — drop it. You have two rounds; if a
 finding survives round two unfixed, take it to ESCALATE rather than a third
@@ -164,8 +185,9 @@ round.
 
 ### Verdicts
 
-- **SHIP** — it runs, it matches intent, nothing on the escalation list. Merge
-  the PR and close the issue.
+- **SHIP** — it runs, it matches intent, the `## In brief` block passes both
+  rules, and nothing is on the escalation list. All four, not three. Merge the
+  PR and close the issue.
 
   ```
   gh pr merge <pr> --repo {{REPO}} --squash --delete-branch

@@ -96,12 +96,25 @@ means a human/agent already moved the issue, so the orchestrator leaves it alone
   refuses a non-default target absent from `active_states` — otherwise completed
   work would park somewhere nothing dispatches and never be seen again.
 
-  Merge review — by whoever performs it — includes ratifying (or overturning)
-  any AgDRs the PR added under `<convention_root>.decisions/`; a PR that changed
-  spec/methodology semantics without one is incomplete. It also checks the
-  `## In brief` block (see "Writing for the reader" below): a PR body with no
-  block, or whose **What could be wrong** names a quality rather than a
-  consequence, is incomplete the same way and bounces the same way.
+  Two review duties, and they do **not** both transfer to an agent reviewer,
+  because they are different kinds of act:
+
+  - **The `## In brief` block is checked at every stance, by whoever reviews.**
+    A PR body with no block, or whose **What could be wrong** names a quality
+    rather than a consequence, is incomplete and bounces. This is compliance
+    against two fixed rules (see "Writing for the reader" below) — cheap, and
+    checkable without deciding anything about the project's direction.
+
+  - **Ratifying (or overturning) an AgDR is a human act, and stays one.** A PR
+    that changed spec/methodology semantics without a decision record is
+    incomplete — but *accepting* that record is a judgement about where the
+    project is going, which the operator owns. A peer agent cannot ratify on
+    the operator's behalf, so at a stance whose Gate C is an agent reviewer,
+    AgDRs are written and merged, then reviewed by the operator out of band.
+    A stance that wants them gate-blocked must route to `status:human-review`.
+
+  Do not read the first bullet as the weaker one: it is the block the operator
+  actually reads, so enforcing it is what keeps a merged board legible.
 
   > **Why this is a reframing rather than a loosening.** Earlier revisions said
   > "a human merges; agents never self-merge." What Gate C protects is that
