@@ -41,11 +41,80 @@ FILE_PATH_KEYS = ("file_path", "notebook_path", "path")
 
 HANDOFF_HINT = "(Gate C is Colin's — hand off, don't self-merge)"
 
+# Passed by runner.py when the project's stance puts Gate C with an AGENT (the
+# handoff label resolves into active_states, so a QA session is dispatched to
+# review and merge). Its ABSENCE means a human owns Gate C, so a guard invoked
+# without it — an older settings file, a hand-run hook, a caller that forgot —
+# denies. The flag can only ever widen, never narrow: fail-closed by omission.
+#
+# It carries the project's REPO rather than a bare boolean, because the identity
+# of the merge right is (agent, this repo) and never (agent). One flag, so
+# "an agent owns the gate" cannot exist without a repository bounding it
+# (codex review P1, PR #150).
+GATE_C_AGENT_FLAG = "--gate-c-agent-repo="
+
 # `gh pr <verb>` shapes denied outright, verb -> human name of the shape.
 GH_PR_DENIED_VERBS = {
     "merge": "gh pr merge",
     "close": "gh pr close",
 }
+
+# Of the denied shapes, only this one is a GATE C question. `--approve`,
+# `gh pr close` and force-pushes stay denied for every stance: approval is the
+# reviewer's act and self-approval defeats it whoever holds the gate, closing a
+# PR is abandonment rather than review, and a force-push destroys history — none
+# of the three become safe because a project chose an agent reviewer. Relaxing
+# exactly one verb keeps this a Gate-C switch rather than a general
+# trust-the-agent switch.
+GATE_C_VERB = "merge"
+
+# `gh pr merge` accepts a PR URL in place of a number, and that URL names its
+# own repository — a second way past `-R` to reach another project's PRs.
+_PR_URL_RE = re.compile(r"^https?://[^/]+/([^/\s]+/[^/\s]+)/pull/\d+", re.I)
+
+
+def _explicit_repo_targets(tokens: list[str]) -> list[str]:
+    """Every repository the command names EXPLICITLY, lowercased.
+
+    Empty means the command named none, so `gh` resolves the repo from the cwd
+    — which for a worker is the per-issue clone of its own project. That is the
+    only case where "this project's stance permits merging" answers the
+    question actually being asked.
+    """
+    found: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        bare = token.split("=", 1)[0]
+        if "=" in token and bare in _GH_VALUE_FLAGS:
+            found.append(token.split("=", 1)[1])
+        elif token.startswith("-R") and len(token) > 2:
+            found.append(token[2:])
+        elif bare in _GH_VALUE_FLAGS and i + 1 < len(tokens):
+            found.append(tokens[i + 1])
+            i += 1
+        else:
+            match = _PR_URL_RE.match(token)
+            if match:
+                found.append(match.group(1))
+        i += 1
+    return [value.strip().lower() for value in found if value.strip()]
+
+
+def _merge_stays_inside_this_project(tokens: list[str], gate_c_repo: str) -> bool:
+    """Whether relaxing `merge` for this command stays within the project whose
+    stance granted the right.
+
+    A project-wide boolean was the shape of the P1 on PR #150: an agent-owned
+    project's App token also reaches every other repo that installation covers,
+    so `gh pr merge -R human-gated/repo 12` would have crossed from a stance
+    that permits agent merges into one that does not. The grant is per-repo, so
+    the check has to be too.
+    """
+    if not gate_c_repo:
+        return False  # nothing to bound the grant: fail closed
+    target = gate_c_repo.strip().lower()
+    return all(named == target for named in _explicit_repo_targets(tokens))
 
 
 def _decode_ansi_c(body: str) -> str:
@@ -419,8 +488,13 @@ _GIT_GLOBAL_VALUE_FLAGS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace"
                            "--exec-path", "--config-env", "--attr-source")
 
 
-def _denied_shape(command: str) -> str | None:
+def _denied_shape(command: str, gate_c_repo: str = "") -> str | None:
     """Name the denied shape this command matches, or None.
+
+    `gate_c_repo` relaxes exactly one verb (`gh pr merge`), for projects whose
+    stance dispatches an agent to the review state, and only for merges that
+    stay inside that repository. Empty (the default) keeps every existing
+    caller on the pre-#133 behaviour.
 
     Matching is by VERB POSITION, not token presence: the rules are anchored at
     `tokens[0]`, so free-text arguments (a PR body that says "a human will
@@ -446,7 +520,10 @@ def _denied_shape(command: str) -> str | None:
             rest = _skip_flags(rest[1:], _GH_VALUE_FLAGS)
             if rest:
                 verb, args = rest[0], rest[1:]
-                if verb in GH_PR_DENIED_VERBS:
+                if verb in GH_PR_DENIED_VERBS and not (
+                    verb == GATE_C_VERB
+                    and _merge_stays_inside_this_project(tokens, gate_c_repo)
+                ):
                     return GH_PR_DENIED_VERBS[verb]
                 if verb == "review":
                     i = 0
@@ -601,12 +678,21 @@ def main() -> int:
         return 0  # malformed hook input: do not brick the session
 
     tool_input = payload.get("tool_input") or {}
+    # argv, not env: `runner._build_env` returns None to mean "inherit the
+    # parent env as-is", so threading a variable through it would mean giving
+    # up that signal for every turn. The hook COMMAND is already ours to
+    # compose, it is per-session by construction, and it is visible in the
+    # settings file a reviewer can read.
+    gate_c_repo = ""
+    for arg in sys.argv[1:]:
+        if arg.startswith(GATE_C_AGENT_FLAG):
+            gate_c_repo = arg[len(GATE_C_AGENT_FLAG):]
 
     # Merge guard FIRST: it is workspace-INDEPENDENT and must not ride behind
     # the early return below, or a payload without CLAUDE_PROJECT_DIR/cwd would
     # silently allow `gh pr merge`.
     if payload.get("tool_name") == "Bash":
-        shape = _denied_shape(tool_input.get("command") or "")
+        shape = _denied_shape(tool_input.get("command") or "", gate_c_repo)
         if shape:
             sys.stderr.write(
                 f"switchboard-guard: denied: {shape} {HANDOFF_HINT}"

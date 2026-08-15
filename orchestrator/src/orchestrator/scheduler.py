@@ -1026,9 +1026,11 @@ class Orchestrator:
         # owned parking gate (durable): the PARK_LABEL written to the tracker at
         # park time is the source of truth, so a process restart still sees the
         # issue as parked (unlike the in-memory set, which is empty on restart).
-        # Removing the label — a deliberate human action, e.g. moving the card
-        # off *Parked* on the board — is the sole unpark signal and resets the
-        # session counter. A stray comment/edit no longer re-arms a capped agent,
+        # Removing the label — a deliberate human action on the LABEL itself —
+        # is the sole unpark signal and resets the session counter. Dragging the
+        # card off *Parked* is explicitly NOT that action: issue #22's board
+        # sync snaps every drag out of parked back, precisely so an unpark stays
+        # deliberate. A stray comment/edit no longer re-arms a capped agent,
         # which also makes the OBS-022 self-unpark loop structurally impossible.
         if PARK_LABEL in issue.labels:
             self.parked.add(issue.id)

@@ -130,6 +130,30 @@ class TrackerConfig:
     # state that IS dispatched. Default preserves pre-stance behaviour.
     handoff_label: str = "status:human-review"
 
+    def agent_owns_gate_c(self) -> bool:
+        """True when a handed-off ticket lands in a state this orchestrator
+        DISPATCHES — i.e. an agent, not a human, performs the merge review.
+
+        Derived rather than declared, and derived from the same two fields the
+        dispatcher itself uses. A gate in this system is defined by nothing
+        dispatching it (`handoff_label` resolving outside `active_states`), so
+        asking "does the handoff target get dispatched" is the same question as
+        "who owns Gate C" — a separate `allow_agent_merge` flag could disagree
+        with the dispatcher, and then the merge guard and the scheduler would
+        hold different beliefs about the same project.
+
+        `workflow.py` already refuses to load a non-default `handoff_label`
+        that resolves outside `active_states`, so in a loaded config this is
+        equivalent to "the stance opted out of the human gate" — but comparing
+        against the data beats comparing against the default string, which
+        would answer wrongly if a project ever put `human review` in
+        `active_states` deliberately.
+        """
+        if not self.handoff_label.startswith("status:"):
+            return False
+        state = self.handoff_label[len("status:"):].replace("-", " ").strip().lower()
+        return state in self.active_states
+
 
 @dataclass
 class HooksConfig:

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator import guard
 from orchestrator.runner import GUARD_MATCHER, GUARD_PATH, _write_guard_settings
 
 DENIAL_PREFIX = "switchboard-guard: denied:"
@@ -521,3 +522,227 @@ def test_brace_expansion_cannot_spell_denied_verbs(command, tmp_path):
 def test_comments_and_quoted_braces_are_not_flags(command, tmp_path):
     r = _run_bash(command, tmp_path)
     assert r.returncode == 0
+
+
+# --- Gate C ownership is a per-project stance property -----------------------
+#
+# The guard shipped denying `gh pr merge` unconditionally, which silently
+# revoked the merge right from every project whose stance dispatches an agent
+# to the review state — civ-life's prototype QA had merged two PRs on its own
+# the same day. These tests pin the relaxation in BOTH directions and, more
+# importantly, pin how NARROW it is.
+
+OWN_REPO = "colin-prologue/civ-life"
+
+
+def _run_bash_gate_c_agent(command: str, workspace: Path,
+                           repo: str = OWN_REPO) -> subprocess.CompletedProcess:
+    """The guard as runner.py invokes it for an agent-owned Gate C."""
+    return subprocess.run(
+        [sys.executable, "-I", str(GUARD_PATH),
+         f"{guard.GATE_C_AGENT_FLAG}{repo}"],
+        input=json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": command}}),
+        capture_output=True, text=True,
+        env={"CLAUDE_PROJECT_DIR": str(workspace), "PATH": "/usr/bin:/bin"},
+    )
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr merge 12",
+    "gh pr merge 12 --squash --delete-branch",
+    "gh pr merge --squash -R colin-prologue/civ-life 12",   # own repo, explicit
+    "gh pr merge --repo=colin-prologue/civ-life 12",         # attached form
+    "gh pr merge -Rcolin-prologue/civ-life 12",              # short attached
+    "gh pr merge https://github.com/colin-prologue/civ-life/pull/12",
+    "gh $'pr' merge 12",          # the obfuscated forms relax too, or the
+    "gh pr m{e..e}rge 12",        # relaxation would be trivially inconsistent
+])
+def test_merge_is_allowed_when_an_agent_owns_gate_c(command, tmp_path):
+    proc = _run_bash_gate_c_agent(command, tmp_path)
+    assert proc.returncode == 0, f"{command!r} denied: {proc.stderr}"
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr merge 12",
+    "gh pr merge --squash -R colin-prologue/Switchboard 12",
+])
+def test_merge_is_still_denied_when_the_flag_is_absent(command, tmp_path):
+    """Omission denies. An older settings file, a hand-run hook, or a caller
+    that forgets to thread the flag must not widen the guard."""
+    proc = _run_bash(command, tmp_path)
+    assert proc.returncode == 2
+    assert DENIAL_PREFIX in proc.stderr
+
+
+@pytest.mark.parametrize("command", [
+    # approval is the REVIEWER's act; self-approval defeats it whoever holds
+    # the gate
+    "gh pr review 12 --approve",
+    "gh pr review --approve 12",
+    # closing is abandonment, not review
+    "gh pr close 12",
+    # history destruction is not a Gate C question at all
+    "git push --force",
+    "git push -f origin switchboard/issue-10",
+    "git push --force-with-lease",
+])
+def test_only_merge_relaxes__approve_close_and_force_push_never_do(command, tmp_path):
+    """The switch is Gate C, not trust-the-agent. If this test ever goes green
+    for a new shape, the flag has quietly become a general permission."""
+    proc = _run_bash_gate_c_agent(command, tmp_path)
+    assert proc.returncode == 2, f"{command!r} was allowed by the Gate C flag"
+    assert DENIAL_PREFIX in proc.stderr
+
+
+def test_settings_file_carries_the_flag_only_when_told(tmp_path):
+    """The wiring, not just the parser: whatever runner.py writes into the
+    settings file is what Claude Code actually invokes."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    human = json.loads(_write_guard_settings(ws).read_text())
+    human_cmd = human["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert guard.GATE_C_AGENT_FLAG not in human_cmd
+
+    agent = json.loads(_write_guard_settings(ws, OWN_REPO).read_text())
+    agent_cmd = agent["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert f"{guard.GATE_C_AGENT_FLAG}{OWN_REPO}" in agent_cmd
+    assert str(GUARD_PATH) in agent_cmd
+
+
+def test_default_write_is_the_human_gate(tmp_path):
+    """`_write_guard_settings(ws)` with no second argument must not widen."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    cmd = json.loads(_write_guard_settings(ws).read_text(
+        ))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert "--gate-c-owner" not in cmd
+
+
+# --- the predicate itself ----------------------------------------------------
+
+def test_agent_owns_gate_c_is_derived_from_dispatch_not_from_a_flag():
+    from orchestrator.types import TrackerConfig
+
+    def cfg(handoff: str, active: list[str]) -> TrackerConfig:
+        return TrackerConfig(
+            kind="github", repo="o/r", endpoint="", api_key="",
+            required_labels=[], active_states=active, terminal_states=["done"],
+            handoff_label=handoff)
+
+    # prototype shape: review IS dispatched, so an agent performs the review
+    assert cfg("status:review", ["todo", "in progress", "review"]).agent_owns_gate_c()
+    # base shape: human-review is dispatched by nobody
+    assert not cfg("status:human-review", ["triage", "todo", "in progress"]).agent_owns_gate_c()
+    # label/state spelling: the hyphen-to-space normalisation must match the
+    # dispatcher's, or a project reads as gated while its tickets get dispatched
+    assert cfg("status:agent-review", ["todo", "agent review"]).agent_owns_gate_c()
+    # a malformed label is not a licence
+    assert not cfg("review", ["review"]).agent_owns_gate_c()
+
+
+def test_the_shipped_stances_resolve_the_way_their_docs_claim():
+    """The whole point is that civ-life keeps merging and Switchboard does not.
+    Assert against the REAL templates rather than hand-built configs, so a
+    stance edit that flips a project's Gate C owner fails here."""
+    import re
+    from orchestrator.workflow import Config, load_workflow
+
+    repo_root = Path(__file__).resolve().parents[2]
+
+    def tracker_for(template: Path):
+        text = template.read_text(encoding="utf-8")
+        # the scaffold placeholders are bound at registration; any value works
+        text = re.sub(r"\{\{[A-Z_]+\}\}", "1", text)
+        path = template.parent / f".probe-{template.name}"
+        try:
+            path.write_text(text, encoding="utf-8")
+            return Config(load_workflow(path), path.parent).tracker()
+        finally:
+            path.unlink(missing_ok=True)
+
+    prototype = tracker_for(repo_root / "workflow" / "stances" / "WORKFLOW.prototype.md")
+    base = tracker_for(repo_root / "workflow" / "WORKFLOW.base.md")
+
+    assert prototype.agent_owns_gate_c(), (
+        "the prototype stance dispatches a QA session to status:review; if this "
+        "is False its QA can no longer merge and the stance is decorative")
+    assert not base.agent_owns_gate_c(), (
+        "base hands off to status:human-review, which nothing dispatches; if "
+        "this is True the merge guard just stopped protecting Switchboard")
+
+
+# --- the grant is (agent, THIS repo), never (agent) ---------------------------
+#
+# codex review P1, PR #150. An agent-owned project's App installation token also
+# reaches every other repo that installation covers, so a project-wide boolean
+# let one autonomous project merge straight through a human-gated project's
+# Gate C. `gh pr merge` names another repo two ways — `-R/--repo`, and a PR URL
+# in place of the number — and both had to be closed.
+
+@pytest.mark.parametrize("command", [
+    "gh pr merge -R colin-prologue/Switchboard 12",
+    "gh pr merge --repo colin-prologue/Switchboard 12",
+    "gh pr merge --repo=colin-prologue/Switchboard 12",
+    "gh pr merge -Rcolin-prologue/Switchboard 12",
+    "gh -R colin-prologue/Switchboard pr merge 12",       # flag before `pr`
+    "gh pr -R colin-prologue/Switchboard merge 12",       # flag between
+    "gh pr merge 12 -R colin-prologue/Switchboard",       # flag after the arg
+    "gh pr merge https://github.com/colin-prologue/Switchboard/pull/12",
+    "gh pr merge HTTPS://GitHub.com/colin-prologue/Switchboard/pull/12",
+])
+def test_merge_into_another_repo_is_denied_even_on_an_agent_owned_gate(
+    command, tmp_path
+):
+    """civ-life's stance grants civ-life's merge right. It does not grant
+    Switchboard's, whatever the shared token can reach."""
+    proc = _run_bash_gate_c_agent(command, tmp_path, repo=OWN_REPO)
+    assert proc.returncode == 2, f"{command!r} escaped its project"
+    assert DENIAL_PREFIX in proc.stderr
+
+
+def test_an_agent_flag_with_no_repo_does_not_relax(tmp_path):
+    """Nothing bounds the grant, so there is nothing to check it against."""
+    proc = _run_bash_gate_c_agent("gh pr merge 12", tmp_path, repo="")
+    assert proc.returncode == 2
+    assert DENIAL_PREFIX in proc.stderr
+
+
+@pytest.mark.parametrize("configured,named", [
+    ("colin-prologue/civ-life", "Colin-Prologue/Civ-Life"),
+    ("Colin-Prologue/Civ-Life", "colin-prologue/civ-life"),
+])
+def test_repo_comparison_is_case_insensitive(configured, named, tmp_path):
+    """GitHub owner/name are case-insensitive; a case-sensitive compare would
+    deny a project its own merges and read as the guard being broken."""
+    proc = _run_bash_gate_c_agent(
+        f"gh pr merge -R {named} 12", tmp_path, repo=configured)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_selector_hands_the_guard_the_repo_the_scheduler_works():
+    """The two must come from the same tracker block, or the guard could be
+    told a repo this project is not actually working."""
+    from orchestrator.runner_selector import _gate_c_repo
+
+    class _Cfg:
+        def __init__(self, tracker):
+            self._t = tracker
+
+        def tracker(self):
+            return self._t
+
+    from orchestrator.types import TrackerConfig
+
+    agent = TrackerConfig(
+        kind="github", repo="colin-prologue/civ-life", endpoint="", api_key="",
+        required_labels=[], active_states=["todo", "in progress", "review"],
+        terminal_states=["closed"], handoff_label="status:review")
+    human = TrackerConfig(
+        kind="github", repo="colin-prologue/Switchboard", endpoint="", api_key="",
+        required_labels=[], active_states=["triage", "todo", "in progress"],
+        terminal_states=["closed"], handoff_label="status:human-review")
+
+    assert _gate_c_repo(_Cfg(agent)) == "colin-prologue/civ-life"
+    assert _gate_c_repo(_Cfg(human)) == ""
