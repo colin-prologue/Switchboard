@@ -51,10 +51,30 @@ chose an agent reviewer. This keeps the flag a *Gate C switch* rather than a
 *trust-the-agent switch* — a distinction that erodes silently if the next
 denied shape is relaxed "for consistency".
 
+**The grant is `(agent, this repo)`, never `(agent)`.** The flag carries the
+project's repository, and a merge naming any *other* repository is denied even
+on an agent-owned gate — whether it names it with `-R/--repo` or with a PR URL
+in place of the number.
+
+This was a P1 on the PR, and the original design was wrong in a way worth
+recording. A project-wide boolean looks sufficient right up until you notice
+the credential is not project-wide: workers authenticate with a GitHub App
+installation token that reaches *every* repo the installation covers. So
+civ-life's stance — correctly configured, doing exactly what it was told —
+would have granted its sessions the ability to merge straight through
+Switchboard's human gate. No misconfiguration required.
+
+The general form: **when a permission is granted by one scope and exercised
+with a credential from a wider scope, the grant must name its own boundary.**
+Deriving "who owns Gate C" from the stance was right; forgetting that the
+answer is only meaningful *for one repository* was not.
+
 **Omission denies.** `_write_guard_settings` defaults to the human gate,
-`ClaudeRunner` defaults to `False`, and a guard invoked with no flag denies. An
-older settings file, a hand-run hook, or a construction site nobody updated
-fails closed. The flag can only widen, never narrow.
+`ClaudeRunner` defaults to `""`, a guard invoked with no flag denies, and an
+agent flag carrying no repo denies too — nothing bounds that grant, so there is
+nothing to check it against. An older settings file, a hand-run hook, or a
+construction site nobody updated fails closed. The flag can only widen, never
+narrow.
 
 ## Why argv and not an environment variable
 
@@ -73,11 +93,14 @@ all — that is **#135**, unchanged by this.
 
 ## Weakest point (accepted)
 
-**The relaxation is per-project, but the trust question is per-repo.** A
-prototype-stance project pointed at a repo something else depends on gets agent
-merges with no additional check; the stance ladder assumes the operator sets the
-stance honestly. Branch protection remains the mechanical backstop, as
-`AgDR-036` already said of the `gh api …/merge` residual.
+**A prototype-stance project pointed at a repo something else depends on still
+gets agent merges.** The repo check confines the grant to the project's *own*
+repository; it cannot tell whether that repository deserved an agent gate. The
+stance ladder assumes the operator sets the stance honestly, and branch
+protection remains the mechanical backstop — as `AgDR-036` already said of the
+`gh api …/merge` residual, which this change does not touch either: the API
+form reaches the same endpoint with the same token and is not a `gh pr merge`
+shape.
 
 **And the guard is still soft.** Denials are fed back to the agent, which may
 route around them. This changes who is permitted, not how strongly.

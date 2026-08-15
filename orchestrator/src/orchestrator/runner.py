@@ -55,20 +55,20 @@ GUARD_PATH = Path(__file__).with_name("guard.py")
 GUARD_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit"
 
 
-def _write_guard_settings(workspace: Path, agent_owns_gate_c: bool = False) -> Path:
+def _write_guard_settings(workspace: Path, gate_c_repo: str = "") -> Path:
     """Materialize the PreToolUse containment-guard settings (SPEC.md §1
     "sandbox/safety invariants -> PreToolUse hooks vetoing tool calls outside
     the per-issue workspace"). The file lives NEXT TO the workspace — never
     inside it — so the clone stays clean and the agent cannot commit it.
 
-    `agent_owns_gate_c` is passed to the hook as an ARGUMENT rather than an
-    env var: `_build_env` returns None to mean "inherit the parent env as-is",
-    so threading a variable through it would cost that signal on every turn.
-    Omitting the flag denies, so a caller that forgets fails closed.
+    `gate_c_repo` is passed to the hook as an ARGUMENT rather than an env var:
+    `_build_env` returns None to mean "inherit the parent env as-is", so
+    threading a variable through it would cost that signal on every turn.
+    Empty (the default) denies, so a caller that forgets fails closed.
     """
     guard_cmd = f"python3 -I {shlex.quote(str(GUARD_PATH))}"
-    if agent_owns_gate_c:
-        guard_cmd += f" {guard.GATE_C_AGENT_FLAG}"
+    if gate_c_repo:
+        guard_cmd += " " + shlex.quote(f"{guard.GATE_C_AGENT_FLAG}{gate_c_repo}")
     settings = {
         "hooks": {
             "PreToolUse": [
@@ -164,12 +164,14 @@ class ClaudeRunner:
 
     provider_id = "claude"
 
-    def __init__(self, cfg: ClaudeConfig, agent_owns_gate_c: bool = False) -> None:
+    def __init__(self, cfg: ClaudeConfig, gate_c_repo: str = "") -> None:
         self.cfg = cfg
-        # Whether this PROJECT's stance dispatches an agent to the review state
-        # (TrackerConfig.agent_owns_gate_c). Defaults False so any construction
-        # site not yet updated keeps the human gate.
-        self.agent_owns_gate_c = agent_owns_gate_c
+        # The repo whose Gate C this project's stance hands to an agent, or ""
+        # for a human gate. Carrying the REPO rather than a boolean is what
+        # keeps the grant from leaking across projects that share an App
+        # installation token (codex review P1, PR #150). Defaults to "" so any
+        # construction site not yet updated keeps the human gate.
+        self.gate_c_repo = gate_c_repo
         self.turn_timeout_ms = cfg.turn_timeout_ms
         self.stall_timeout_ms = cfg.stall_timeout_ms
         self.max_budget_usd = cfg.max_budget_usd
@@ -212,7 +214,7 @@ class ClaudeRunner:
         if not workspace.is_dir():
             raise ValueError(f"workspace does not exist or is not a directory: {workspace}")
 
-        settings_path = _write_guard_settings(workspace, self.agent_owns_gate_c)
+        settings_path = _write_guard_settings(workspace, self.gate_c_repo)
         command = self._build_command(resume_session_id, settings_path)
         env = self._build_env(agent_token)
 
