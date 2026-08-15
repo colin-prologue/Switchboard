@@ -124,6 +124,11 @@ class TrackerConfig:
     required_labels: list[str]
     active_states: list[str]     # normalized lowercase
     terminal_states: list[str]   # normalized lowercase
+    # Status label the orchestrator writes on a validated terminal handoff
+    # (AgDR-028). Config-driven because the target is a stance property: gated
+    # stances hand off to a human gate, autonomous ones hand off to an agent QA
+    # state that IS dispatched. Default preserves pre-stance behaviour.
+    handoff_label: str = "status:human-review"
 
 
 @dataclass
