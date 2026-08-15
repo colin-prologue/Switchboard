@@ -1,4 +1,4 @@
-"""Singleton-orchestrator lock (issue #130 / AgDR-036).
+"""Singleton-orchestrator lock (issue #130 / AgDR-042).
 
 Regression guards for the 2026-08-09 two-orchestrator incident: a pre-restart
 survivor and its replacement ran concurrently because no launcher held a lock,

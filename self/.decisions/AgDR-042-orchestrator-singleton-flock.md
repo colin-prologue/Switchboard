@@ -1,4 +1,4 @@
-# AgDR-036 — One orchestrator per checkout, enforced by a process-held flock
+# AgDR-042 — One orchestrator per checkout, enforced by a process-held flock
 
 - **Status:** proposed (ratify at the merge gate)
 - **Issue:** #130

@@ -1,4 +1,4 @@
-"""One orchestrator process per project checkout (issue #130 / AgDR-036).
+"""One orchestrator process per project checkout (issue #130 / AgDR-042).
 
 On 2026-08-09 two orchestrator processes ran concurrently against
 `switchboard-self`: a pre-#128 survivor that outlived its restart, plus its
