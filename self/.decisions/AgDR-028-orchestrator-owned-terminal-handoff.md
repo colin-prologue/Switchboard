@@ -67,3 +67,20 @@ detect-revert Action is the eventual board-side net — accepted as bounded.
 Evidence: `orchestrator/tests/test_handoff.py` (validation matrix),
 `test_integration.py` issue-#61 block (success swap / Stage 7 race /
 rejection-no-transition), `test_stage7_circuit_canary.py` passthrough test.
+
+---
+
+## The board-side net changed shape (2026-08-15)
+
+This record accepts a residual partly because #52's **detect-revert** Action
+would eventually catch it on the board.
+
+#52's revert was withdrawn. Per-project stances (`AgDR-039`) mean there is no
+single legal state machine for its shared transition table to describe, and the
+ticket was renarrowed to **detect-only, stance-independent** checks.
+
+The coverage is not gone, but it is weaker, and the difference matters here: a
+transient dual-label state is still *detected* (it is one of the three
+stance-independent conditions), but nothing corrects it. Anything in the
+reasoning below that assumed the board would be put back needs re-reading; the
+part that only assumed the divergence would become visible still holds.

@@ -59,6 +59,7 @@ from orchestrator.types import (
     Issue,
     ReviewThread,
     ReviewThreadComment,
+    TrackerConfig,
     TrackerError,
     TurnResult,
 )
@@ -923,8 +924,27 @@ def test_agent_qa_review_state_is_a_verify_role() -> None:
     VERIFY_STATES is the union across stances: `triage` never occurs at
     prototype, `review` never occurs at base, so listing both is free.
     """
-    assert scheduler_mod.session_role("review") == VERIFY_ROLE
-    assert scheduler_mod.session_role("Review") == VERIFY_ROLE      # normalized
+    # `review` is no longer a literal: it is DERIVED from the stance that
+    # dispatches it, so the predicate needs that project's tracker config.
+    proto = TrackerConfig(
+        kind="github", repo="o/r", endpoint="", api_key="", required_labels=[],
+        active_states=["todo", "in progress", "review"],
+        terminal_states=["closed"], handoff_label="status:review")
+    assert scheduler_mod.session_role("review", proto) == VERIFY_ROLE
+    assert scheduler_mod.session_role("Review", proto) == VERIFY_ROLE  # normalized
+    # …and a stance naming its review state ANYTHING is accounted correctly
+    # without editing scheduler.py — the seam AgDR-033 predicted would reopen.
+    odd = TrackerConfig(
+        kind="github", repo="o/r", endpoint="", api_key="", required_labels=[],
+        active_states=["todo", "qa sweep"], terminal_states=["closed"],
+        handoff_label="status:qa-sweep")
+    assert scheduler_mod.session_role("qa sweep", odd) == VERIFY_ROLE
+    # a HUMAN-gated handoff target is not a session role at all
+    base = TrackerConfig(
+        kind="github", repo="o/r", endpoint="", api_key="", required_labels=[],
+        active_states=["triage", "todo", "in progress"],
+        terminal_states=["closed"], handoff_label="status:human-review")
+    assert scheduler_mod.session_role("human review", base) == IMPLEMENT_ROLE
     assert scheduler_mod.session_role("triage") == VERIFY_ROLE      # base, unchanged
     assert scheduler_mod.session_role("todo") == IMPLEMENT_ROLE
     assert scheduler_mod.session_role("in progress") == IMPLEMENT_ROLE

@@ -63,6 +63,7 @@ from .types import (
     FailureClass,
     Issue,
     RetryEntry,
+    TrackerConfig,
     TrackerError,
     WorkflowError,
 )
@@ -103,12 +104,39 @@ IMPLEMENT_ROLE = "implement"
 # Per AgDR-033 the two roles are capped independently, so a ticket that took
 # four implementation passes must still get a full verification budget — which
 # is exactly what a shared counter would deny it.
-VERIFY_STATES = frozenset({"triage", "review"})
+# `triage` is the one verification state that CANNOT be derived: it is an
+# ordinary active state that happens to run an adversarial verifier, and nothing
+# in the config marks it as such. Every other one can be — see `session_role`.
+VERIFY_STATES = frozenset({"triage"})
 
 
-def session_role(state: str) -> str:
-    """The session role a dispatch in `state` runs as (issue #35 / AgDR-033)."""
-    return VERIFY_ROLE if state.lower() in VERIFY_STATES else IMPLEMENT_ROLE
+def session_role(state: str, tracker: TrackerConfig | None = None) -> str:
+    """The session role a dispatch in `state` runs as (issue #35 / AgDR-033).
+
+    AgDR-033 named the hard-coded state set as "the seam that will need
+    reopening if a second verifier-like state ever lands". One landed — the
+    prototype stance's `status:review` — and the first fix simply added it to
+    the literal, which closes the seam again with two members instead of one
+    and leaves the next stance to rediscover the same silent failure: a
+    verification state accounted as implementation shares the implementer
+    budget and exhausts it early.
+
+    So the stance-driven case is now DERIVED. A dispatched handoff target is by
+    definition where review happens — it is the same pair of fields
+    `agent_owns_gate_c` reads, asked a different question. A stance that names
+    its review state anything at all is accounted correctly without editing
+    this file.
+
+    `tracker` is optional so the predicate stays callable without a config; the
+    literal floor above still applies when it is absent.
+    """
+    normalized = state.lower()
+    if normalized in VERIFY_STATES:
+        return VERIFY_ROLE
+    if tracker is not None and tracker.agent_owns_gate_c():
+        if normalized == tracker.handoff_state():
+            return VERIFY_ROLE
+    return IMPLEMENT_ROLE
 
 
 async def _kill_process_group(proc: asyncio.subprocess.Process | None) -> None:
@@ -1088,7 +1116,7 @@ class Orchestrator:
         # passes a ticket spent at `status:triage` do not shrink the implementer
         # budget it gets at `status:todo`.
         cap = cfg.agent().max_sessions_per_issue
-        role = session_role(issue.state)
+        role = session_role(issue.state, cfg.tracker())
         session_key = (issue.id, role)
         spent = self.sessions_per_issue.get(session_key, 0)
         if spent >= cap:

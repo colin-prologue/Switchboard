@@ -102,3 +102,35 @@ the role is derived from *dispatch-time* state, so a session dispatched at
 budget. Freezing the key is what keeps the refund path honest, and the role pin
 ends that session at the next turn boundary anyway, so the mischarge is bounded
 to one session.
+
+---
+
+## Its own weakest point fired (2026-08-15)
+
+This record named the seam:
+
+> The role map is a hard-coded state set (`VERIFY_STATES = {"triage"}`) rather
+> than config, so a project that renames or adds a verification-flavoured active
+> state silently gets implementer accounting for it. […] it is the seam that
+> will need reopening if a second verifier-like state ever lands.
+
+One landed: the `prototype` stance's `status:review` (`AgDR-039`). The
+prediction was exact — the QA session ran as `implement`, shared the
+implementer budget, and exhausted it early, which is the failure this record
+exists to prevent.
+
+**The first fix added `"review"` to the literal.** That closes the seam again
+with two members instead of one, and leaves the next stance to rediscover the
+same silent failure. Recorded because it is the more interesting half: a
+prediction firing does not guarantee the response addresses what was predicted.
+
+**The seam is now derived rather than declared.** A dispatched handoff target is
+by definition where review happens, so `session_role` asks
+`TrackerConfig.handoff_state()` and `agent_owns_gate_c()` — the same two fields
+`AgDR-043` reads, asked a different question. A stance naming its review state
+anything at all is accounted correctly with no edit to `scheduler.py`.
+
+`triage` remains a literal, and irreducibly so: it is an ordinary active state
+that happens to run an adversarial verifier, and nothing in config marks it as
+such. One declared floor plus derivation for the stance-driven case is the
+honest shape — not zero hard-coding.
