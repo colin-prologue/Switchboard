@@ -309,6 +309,13 @@ class _LabelTracker:
     async def fetch_candidate_issues(self) -> list[Issue]:
         return list(self.candidates)
 
+    async def fetch_open_issues(self) -> list[Issue]:
+        # issue #52: the tick fetches unfiltered, then filters locally.
+        return await self.fetch_candidate_issues()
+
+    def select_candidates(self, issues: list[Issue]) -> list[Issue]:
+        return list(issues)
+
     async def add_labels(self, issue_id: str, labels: list[str]) -> None:
         del issue_id
         if self.add_error is not None:

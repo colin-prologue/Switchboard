@@ -53,6 +53,14 @@ class FakeTracker:
     async def fetch_candidate_issues(self):
         return list(self.candidates)
 
+    async def fetch_open_issues(self):
+        # issue #52: the tick fetches unfiltered and filters locally. This fake
+        # is fed only dispatchable issues, so the two answers coincide.
+        return await self.fetch_candidate_issues()
+
+    def select_candidates(self, issues):
+        return list(issues)
+
     async def fetch_issues_by_states(self, state_names):
         return []
 

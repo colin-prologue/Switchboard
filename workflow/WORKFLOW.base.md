@@ -11,6 +11,10 @@ tracker:
   api_key: $GITHUB_TOKEN
   active_states: ["triage", "todo", "in progress"]
   terminal_states: ["closed"]  # issue-closed is the ONLY terminal condition (SPEC.md §2); status:* labels are never terminal
+  # Declared but never dispatched — the gates (issue #52). Nothing keys dispatch
+  # off this list; it exists so the board-state sanity check can tell a ticket
+  # legitimately waiting at a gate from a `status:*` label nobody defined.
+  gate_states: ["drafting", "plan review", "decision", "blocked", "human review"]
 
 polling:
   interval_ms: 30000

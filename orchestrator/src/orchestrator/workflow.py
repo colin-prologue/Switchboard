@@ -232,6 +232,18 @@ class Config:
             else ["closed"]
         )
 
+        # Gate states (issue #52). Declared, never dispatched: this is the
+        # stance saying "a ticket sitting here is legitimate, it is just waiting
+        # for somebody". Only the board-state sanity check reads it — dispatch
+        # eligibility is `active_states` and nothing else — so a project that
+        # omits the key simply has a narrower defined vocabulary.
+        gate_states_raw = raw.get("gate_states")
+        gate_states = (
+            _normalize_state_list(gate_states_raw)
+            if isinstance(gate_states_raw, list)
+            else []
+        )
+
         # Terminal-handoff target (AgDR-028). A stance that keeps a human gate
         # leaves this at the default; an autonomous stance points it at its own
         # QA state (e.g. "status:review"), which its active_states also lists so
@@ -274,6 +286,7 @@ class Config:
             active_states=active_states,
             terminal_states=terminal_states,
             handoff_label=handoff_label,
+            gate_states=gate_states,
         )
 
     # -- polling ---------------------------------------------------------------

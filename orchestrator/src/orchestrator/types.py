@@ -129,6 +129,28 @@ class TrackerConfig:
     # stances hand off to a human gate, autonomous ones hand off to an agent QA
     # state that IS dispatched. Default preserves pre-stance behaviour.
     handoff_label: str = "status:human-review"
+    # States this stance DEFINES but deliberately never dispatches — the gates
+    # (issue #52). A gate in this system is not code, it is a state absent from
+    # `active_states`, so nothing else in the config records that `drafting` is
+    # a legitimate place for a ticket to sit. The board-state sanity check needs
+    # exactly that distinction: without it, every `base` ticket parked at Gate A
+    # reads as a label nobody defined. Nothing dispatches off this list.
+    gate_states: list[str] = field(default_factory=list)
+
+    def defined_states(self) -> set[str]:
+        """Every workflow state this project's config defines, in any role.
+
+        The union the board-state check judges an observed `status:*` label
+        against (issue #52): dispatched states, terminal states, the handoff
+        target, and the gates. Durable markers (`status:parked`) are NOT here —
+        they are a marker vocabulary, not a stance's state list, and they live
+        with the code that writes them.
+        """
+        states = set(self.active_states) | set(self.terminal_states) | set(self.gate_states)
+        handoff = self.handoff_state()
+        if handoff:
+            states.add(handoff)
+        return states
 
     def handoff_state(self) -> str:
         """The normalized state `handoff_label` names, or "" when malformed.
