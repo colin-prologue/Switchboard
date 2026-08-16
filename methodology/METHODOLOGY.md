@@ -403,3 +403,81 @@ clone, so treat them as provenance only.)
    allowlist (a bare `pytest`, a `register-project.sh` run, a `cd … &&` chain) is
    unsatisfiable at runtime and strands the session — the July-2 #10/#11
    permission-wall incident, and #14's AC3 as first drafted.
+
+---
+
+## Decisions are standing predictions, not justifications
+
+A decision record here is not a defence of a past choice. It is a **claim about
+the future with the conditions for its own falsification attached** — which is
+why every record carries a `Weakest point` or `What would make this wrong`
+section, and why writing that section honestly is the hardest part of drafting
+one.
+
+That framing has a consequence the practice was missing: **those sections are
+predictions nobody re-reads.** They were written well and then filed.
+
+### Conflict is evidence, not failure
+
+When two parts of the system reach different conclusions about the same thing,
+the useful response is not "which one is broken?" but **"why did two careful
+readings diverge, and which assumption should update?"**
+
+Almost every defect this project has found is a *second-reader* problem: a fact
+recorded correctly in one place, then a second consumer appearing that either
+contradicted it or never learned it existed. The merge guard and the scheduler
+holding different beliefs about Gate C. The board sync deriving states from one
+template after states became per-project. A setup guide that never learned
+stances existed.
+
+Those are not carelessness. They are the signature of work built by sessions
+with perfect local context and no memory of what else is in flight — so remedies
+that depend on *remembering* will fail the same way. Only artifacts that fail
+loudly survive.
+
+The corollary for records: **easy to supersede, hard to silently contradict.**
+Amend in place with a dated header naming the new authority; do not rewrite and
+do not delete. A rewrite destroys the thing that makes the next conflict
+legible — what was believed, and why it changed.
+
+### The sweep
+
+Periodically, read every record's refutation section against what has actually
+happened since. This is cheap — the hard half (writing a falsifiable condition)
+is already done — and it is the highest-yield review available, because it finds
+**assumptions the world has already falsified** rather than code that drifted.
+
+The first sweep (2026-08-15, 45 records) found five fired:
+
+- `AgDR-013` named "an agent retrying a denied command" as the trigger for
+  promoting the cap-hit ticket. It happened twice in one day.
+- `AgDR-017` predicted the dual-read compatibility layer would become permanent
+  absent a removal criterion. No criterion was ever set.
+- `AgDR-033` named the hard-coded verify-state set as "the seam that will need
+  reopening". It reopened — **and the first fix added a second literal to the
+  same list**, which is the part worth internalising: a prediction firing does
+  not guarantee the response addresses what was predicted.
+- `AgDR-040`'s premise about an external reviewer was falsified twice in one
+  evening, once by the very PR correcting it.
+- `AgDR-036`'s load-bearing premise turned out never to have been verified at
+  all, despite the record assigning the check to a named gate.
+
+That last one is the pattern to watch for specifically: **a record that assigns
+verification to a human gate and is then merged without it.** The assignment
+reads as diligence and produces nothing.
+
+### What NOT to do with this
+
+Do not convert prose into tests wholesale. Binding documentation to assertions
+has a cost that scales with how much you have written, and this project writes a
+lot — a system where changing your mind gets more expensive over time is the
+ratchet this methodology exists to avoid.
+
+Bind **invariants** ("these two scripts must compose identically"), never
+**rationale** ("we chose X because Y"). Rationale ages, and freezing it prevents
+the revision this section is arguing for. Prefer a report that surfaces drift
+over a check that blocks on it, and reserve the blocking form for the few claims
+where being wrong is both silent and expensive.
+
+And let bindings expire. When the thing a check protects is retired, the check
+goes with it — normally, without an argument that it was wrong.
