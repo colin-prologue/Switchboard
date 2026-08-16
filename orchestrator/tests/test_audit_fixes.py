@@ -167,6 +167,13 @@ async def test_broken_reload_blocks_dispatch(tmp_path):
             calls["fetch"] += 1
             return []
 
+        async def fetch_open_issues(self):
+            # issue #52: the tick's one candidate fetch is the unfiltered form.
+            return await self.fetch_candidate_issues()
+
+        def select_candidates(self, issues):
+            return list(issues)
+
         async def fetch_issue_states_by_ids(self, ids):
             return []
 
@@ -210,6 +217,13 @@ async def test_conflicting_provider_reload_keeps_last_good_and_blocks_dispatch(
         async def fetch_candidate_issues(self):
             calls["fetch"] += 1
             return []
+
+        async def fetch_open_issues(self):
+            # issue #52: the tick's one candidate fetch is the unfiltered form.
+            return await self.fetch_candidate_issues()
+
+        def select_candidates(self, issues):
+            return list(issues)
 
         async def fetch_issue_states_by_ids(self, ids):
             return []

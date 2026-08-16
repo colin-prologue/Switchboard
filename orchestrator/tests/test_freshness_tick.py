@@ -75,6 +75,13 @@ class FakeTracker:
         self.fetch_calls += 1
         return []
 
+    async def fetch_open_issues(self):
+        # issue #52: the tick's one fetch is now the unfiltered form.
+        return await self.fetch_candidate_issues()
+
+    def select_candidates(self, issues):
+        return list(issues)
+
     async def fetch_issues_by_states(self, state_names):
         return []
 

@@ -290,6 +290,33 @@ mutation($labelableId: ID!, $labelIds: [ID!]!) {
 """
 
 
+STATUS_PREFIX = "status:"
+
+# `status:*` labels that are MARKERS, not a claim about the issue's current
+# workflow state. `status:parked` is durable by design (a park must survive a
+# restart) and legitimately coexists with a live status label, so anything
+# counting "how many labels claim to be the state" must exclude it.
+DURABLE_STATUS_MARKERS = frozenset({"status:parked"})
+
+
+def status_labels(labels: list[str]) -> list[str]:
+    """Every `status:*` label on the issue, sorted (markers included)."""
+    return sorted(l for l in labels if l.startswith(STATUS_PREFIX))
+
+
+def live_status_labels(labels: list[str]) -> list[str]:
+    """The `status:*` labels claiming to BE the issue's current state, sorted.
+
+    Same list as `status_labels` minus the durable markers. The two live
+    together because the difference between them is the whole subtlety: the
+    normalization diagnostic below asks "is the state I derived arbitrary?"
+    (markers count — `parked` + `triage` derives `parked`), while the
+    board-state check asks "do two labels both claim to be the state?"
+    (markers do not count). One vocabulary, two questions.
+    """
+    return sorted(l for l in status_labels(labels) if l not in DURABLE_STATUS_MARKERS)
+
+
 def normalize_status_state(labels: list[str], *, closed: bool) -> str:
     """Derive the workflow state from an issue's labels (SPEC.md §2).
 
@@ -341,19 +368,38 @@ class GitHubTracker:
 
     # --- required operations (core §11.1) ------------------------------------
 
+    async def fetch_open_issues(self) -> list[Issue]:
+        """EVERY open issue in the repo, normalized, unfiltered (issue #52).
+
+        `fetch_candidate_issues` is this query plus the active-state filter, and
+        the filter is exactly what hides the states the board-state check looks
+        for — an undefined `status:*` label normalizes to a state no
+        `active_states` list contains, so a filtered fetch can never see one.
+        Splitting the two lets a caller pay for one query and get both answers;
+        the sanity check adds no API calls (issue #52's cost assumption).
+        """
+        owner, name = self._split_repo()
+        raw_issues = await self._paginate(
+            CANDIDATE_ISSUES_QUERY, {"owner": owner, "name": name, "states": ["OPEN"]}
+        )
+        return [self._normalize_issue(raw) for raw in raw_issues]
+
+    def select_candidates(self, issues: list[Issue]) -> list[Issue]:
+        """The dispatchable subset of already-fetched open issues.
+
+        The active-state filter lives here, in ONE place, so a caller that
+        fetched the unfiltered set does not re-implement eligibility.
+        """
+        active = set(self._cfg.active_states)
+        return [issue for issue in issues if issue.state in active]
+
     async def fetch_candidate_issues(self) -> list[Issue]:
         """Open issues in the repo, filtered to `cfg.active_states` post-normalization.
 
         implements: core §11.1(1) / overridden by: SPEC.md §2 (repo instead of
         project_slug; state from status:* labels instead of first-class state)
         """
-        owner, name = self._split_repo()
-        raw_issues = await self._paginate(
-            CANDIDATE_ISSUES_QUERY, {"owner": owner, "name": name, "states": ["OPEN"]}
-        )
-        issues = [self._normalize_issue(raw) for raw in raw_issues]
-        active = set(self._cfg.active_states)
-        return [issue for issue in issues if issue.state in active]
+        return self.select_candidates(await self.fetch_open_issues())
 
     async def fetch_issues_by_states(self, state_names: list[str]) -> list[Issue]:
         """Startup terminal cleanup lookup.
@@ -1026,14 +1072,19 @@ class GitHubTracker:
         labels = [n["name"].strip().lower() for n in label_nodes]
 
         closed = gh_state == "CLOSED"
-        if not closed and len([l for l in labels if l.startswith("status:")]) > 1:
+        present = status_labels(labels)
+        if not closed and len(present) > 1:
             # One status label per issue is the workflow contract; more than one
             # resolves deterministically (sorted-first) but the winner is
             # semantically arbitrary — surface it. Derivation itself is delegated
             # to the shared normalize_status_state helper.
-            status_labels = sorted(l for l in labels if l.startswith("status:"))
+            #
+            # This is a note about THIS derivation, not a finding: markers count
+            # here (`parked` + `triage` really does derive `parked`), and the
+            # question "is this label set invalid?" belongs to board_sanity,
+            # which owns the judgment, the config, and the comment.
             log("issue carries multiple status:* labels; using sorted-first",
-                issue_number=raw.get("number"), labels=",".join(status_labels))
+                issue_number=raw.get("number"), labels=",".join(present))
         state = normalize_status_state(labels, closed=closed)
 
         blocked_by = [

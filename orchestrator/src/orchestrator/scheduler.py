@@ -30,6 +30,7 @@ from pathlib import Path
 import httpx
 
 from .agent_runner import AgentRunner
+from .board_sanity import report_board_state
 from .fold import FoldSignal, detect_fold_signals
 from .fold_apply import apply_fold_signal
 from .log import log
@@ -349,6 +350,12 @@ class Orchestrator:
         # are cadence and log-once bookkeeping only.
         self._review_last_poll_at: datetime | None = None
         self._review_disabled_logged = False
+
+        # Board-state sanity check (issue #52). In-memory `(issue id, condition)`
+        # memo so an unchanged invalid state costs zero API calls on later
+        # ticks; the cross-restart dedupe is the marker comment on the issue,
+        # re-read only when the memo misses.
+        self._board_sanity_reported: set[tuple[str, str]] = set()
 
         # Runtime-freshness preflight cadence (issue #131). In-memory, per
         # instance, and deliberately UNSET at construction so the first
@@ -713,10 +720,15 @@ class Orchestrator:
 
         tracker, _ = self._components()
         try:
-            issues = await tracker.fetch_candidate_issues()
+            # Unfiltered: the active-state filter is exactly what hides the
+            # labels the board-state check looks for (issue #52). One query
+            # still, and dispatch eligibility is unchanged — `select_candidates`
+            # applies the same filter `fetch_candidate_issues` would have.
+            open_issues = await tracker.fetch_open_issues()
         except TrackerError as exc:
             log("candidate fetch failed; skipping dispatch this tick", error=str(exc))
             return
+        issues = tracker.select_candidates(open_issues)
 
         await self._resume_provider_waiters(issues)
 
@@ -727,6 +739,12 @@ class Orchestrator:
                 break
             if self._should_dispatch(issue):
                 await self._dispatch(issue, attempt=None)
+
+        # AFTER dispatch, deliberately: this check is diagnostic, and nothing it
+        # can do (a slow comment fetch, an unexpected raise) may delay or block
+        # the work the tick exists to start.
+        await report_board_state(
+            open_issues, cfg, tracker, reported=self._board_sanity_reported)
 
         await self._poll_fold_signals(tracker)
         await self._poll_review_responses(tracker)
