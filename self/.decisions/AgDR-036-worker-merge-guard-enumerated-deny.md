@@ -18,6 +18,38 @@ permit `gh pr merge`, `gh pr review --approve`, `gh pr close` and force-pushes;
 Bash call at all. The only thing standing between a worker and its own merge
 button was the instruction not to press it.
 
+## Premise VERIFIED (2026-08-16, issue #158)
+
+This record's weakest point was that its load-bearing vendor premise had never
+been checked: that a PreToolUse exit 2 denies a Bash call **even when
+`--allowedTools "Bash(gh:*)"` grants it under `--permission-mode acceptEdits`**.
+It assigned the check to the merge gate. PR #136 was merged without it, and two
+further decisions were built on top before anyone noticed.
+
+Run against `claude` 2.1.233, four cases, real CLI:
+
+| Gate | Command | Result |
+|---|---|---|
+| human | `gh pr merge --help` (with `Bash(gh:*)` granted) | **DENIED** |
+| human | `gh pr view --help` | allowed |
+| agent, own repo | `gh pr merge --help` | allowed |
+| agent, other repo | `gh pr merge -R <other> 12` | **DENIED** |
+
+Hook evaluation precedes the allowlist. The guard is real, it denies the right
+shapes rather than everything, and `AgDR-043`'s conditional relaxation and its
+repo boundary both behave as designed end-to-end — not only in the unit tests,
+which exercise `guard.py` in isolation and would have passed identically had the
+hook never been consulted.
+
+Two things worth keeping from how this went. The verification was assigned to a
+human gate and simply did not happen; **an assignment reads as diligence and
+produces nothing**. And running it surfaced a defect no unit test had: the
+cross-repo refusal reused the human-gate wording ("Gate C is Colin's") on a
+project whose gate is *not* a human's and whose own merges *are* permitted —
+fixed in the same change.
+
+Nothing here relaxes the second weakest point below: the guard remains **soft**.
+
 ## Amended by AgDR-043 (2026-08-15)
 
 `gh pr merge` is no longer denied unconditionally. It is denied unless the
