@@ -45,6 +45,18 @@ FILE_PATH_KEYS = ("file_path", "notebook_path", "path")
 
 HANDOFF_HINT = "(Gate C is Colin's — hand off, don't self-merge)"
 
+# A cross-repo merge on an AGENT-owned gate is refused for a different reason,
+# and saying "Gate C is Colin's" there sends the reader to the wrong conclusion:
+# this project's gate is not Colin's, and its own merges are permitted. An agent
+# debugging a denial it can actually satisfy — by targeting its own repo — must
+# not be told the gate belongs to someone else. Diagnostics that misdescribe the
+# cause are how the civ-life#4 handoff loop burned a full budget.
+FOREIGN_REPO_HINT = (
+    "(this project's stance permits merging ITS OWN repo only; "
+    "the command names a different one)"
+)
+FOREIGN_REPO_SHAPE = "gh pr merge targeting another project's repo"
+
 # Passed by runner.py when the project's stance puts Gate C with an AGENT (the
 # handoff label resolves into active_states, so a QA session is dispatched to
 # review and merge). Its ABSENCE means a human owns Gate C, so a guard invoked
@@ -528,6 +540,11 @@ def _denied_shape(command: str, gate_c_repo: str = "") -> str | None:
                     verb == GATE_C_VERB
                     and _merge_stays_inside_this_project(tokens, gate_c_repo)
                 ):
+                    # Name the ACTUAL reason: on an agent-owned gate the verb
+                    # itself is permitted and only the target is wrong.
+                    if (verb == GATE_C_VERB and gate_c_repo
+                            and _explicit_repo_targets(tokens)):
+                        return FOREIGN_REPO_SHAPE
                     return GH_PR_DENIED_VERBS[verb]
                 if verb == "review":
                     i = 0
@@ -698,9 +715,9 @@ def main() -> int:
     if payload.get("tool_name") == "Bash":
         shape = _denied_shape(tool_input.get("command") or "", gate_c_repo)
         if shape:
-            sys.stderr.write(
-                f"switchboard-guard: denied: {shape} {HANDOFF_HINT}"
-            )
+            hint = (FOREIGN_REPO_HINT if shape == FOREIGN_REPO_SHAPE
+                    else HANDOFF_HINT)
+            sys.stderr.write(f"switchboard-guard: denied: {shape} {hint}")
             return 2
         # else: fall through — the containment loop below is a no-op on Bash
         # (no file-path keys in its tool_input).
