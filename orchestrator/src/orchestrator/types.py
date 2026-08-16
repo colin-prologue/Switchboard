@@ -130,6 +130,17 @@ class TrackerConfig:
     # state that IS dispatched. Default preserves pre-stance behaviour.
     handoff_label: str = "status:human-review"
 
+    def handoff_state(self) -> str:
+        """The normalized state `handoff_label` names, or "" when malformed.
+
+        One parser, because three callers now need this answer and a second
+        copy of the `status:` strip plus dash-to-space rewrite is exactly the
+        drift AgDR-043 was written about.
+        """
+        if not self.handoff_label.startswith("status:"):
+            return ""
+        return self.handoff_label[len("status:"):].replace("-", " ").strip().lower()
+
     def agent_owns_gate_c(self) -> bool:
         """True when a handed-off ticket lands in a state this orchestrator
         DISPATCHES — i.e. an agent, not a human, performs the merge review.
@@ -149,10 +160,8 @@ class TrackerConfig:
         would answer wrongly if a project ever put `human review` in
         `active_states` deliberately.
         """
-        if not self.handoff_label.startswith("status:"):
-            return False
-        state = self.handoff_label[len("status:"):].replace("-", " ").strip().lower()
-        return state in self.active_states
+        state = self.handoff_state()
+        return bool(state) and state in self.active_states
 
 
 @dataclass
