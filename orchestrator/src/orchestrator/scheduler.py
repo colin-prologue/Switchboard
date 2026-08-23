@@ -1540,6 +1540,19 @@ class Orchestrator:
         irreducible window, since GitHub offers no conditional write.
         """
         async with self._ops_issue_lock:
+            if self._ops_issue_id is not None:
+                # Validate the cache before reusing it (codex review on PR #166,
+                # round 8). `find_or_create_ops_issue` searches OPEN issues, but
+                # the cache does not expire — so an operator who closes the ops
+                # log without restarting would get every later notice posted to
+                # the closed issue, where it may never surface in their open
+                # queue. That also contradicts the promise in the log's own
+                # body: "Closing it is safe; the next notice opens a new one."
+                # One extra read per notice, and notices are per latch
+                # generation, so the cost is negligible.
+                states = await tracker.fetch_issue_states_by_ids([self._ops_issue_id])
+                if not states or states[0].state == "closed":
+                    self._ops_issue_id = None
             if self._ops_issue_id is None:
                 self._ops_issue_id = await tracker.find_or_create_ops_issue()
         if not self._latch_still_open(transition):

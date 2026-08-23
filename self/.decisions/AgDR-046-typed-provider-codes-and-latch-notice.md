@@ -207,6 +207,18 @@ Three findings, all adopted; two changed the decision rather than the code.
   missed. The fallback is narrowed, not replaced: a stream ending with no result
   and no standing provider error is still `port_exit`.
 
+### Eighth round (codex, PR #166)
+
+- **The cached ops issue is validated before reuse.** `find_or_create_ops_issue`
+  searches OPEN issues, but the cache round five added never expired — so an
+  operator who closed the ops log without restarting would get every later
+  notice posted to the closed issue, where it may never surface in their open
+  queue. The log's own body says *"Closing it is safe; the next notice opens a
+  new one"*, so this was the code contradicting a promise made in the artifact
+  it creates — the same defect class as the round-1 hint and the round-4 outage
+  scope, for the third time. Resolution now reads the cached issue's state
+  first, at one extra read per latch generation.
+
 **This is where the TOCTOU narrowing stops.** The comment round trip itself is
 an irreducible window: GitHub offers no conditional write, so a latch that
 recovers while the mutation is in flight will always be able to produce one

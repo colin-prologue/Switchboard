@@ -214,6 +214,12 @@ class FakeTracker:
             issue.description = stored
             issue.updated_at = bump
 
+    def close_ops_issue(self):
+        """Operator closes the ops log without restarting the orchestrator."""
+        if self.ops_issue_id is not None:
+            self.states[self.ops_issue_id].state = "closed"
+            self.ops_issue_id = None
+
     async def find_or_create_ops_issue(self):
         # issue #165: find-or-create, so the counter distinguishes "made one"
         # from "reused the one already there".
@@ -225,8 +231,11 @@ class FakeTracker:
         if self.ops_issue_error is not None:
             raise self.ops_issue_error
         if self.ops_issue_id is None:
-            self.ops_issue_id = "ops-issue-node-id"
             self.ops_issues_created += 1
+            suffix = "" if self.ops_issues_created == 1 else f"-{self.ops_issues_created}"
+            self.ops_issue_id = f"ops-issue-node-id{suffix}"
+            self.states[self.ops_issue_id] = make_issue(900 + self.ops_issues_created)
+            self.states[self.ops_issue_id].id = self.ops_issue_id
         return self.ops_issue_id
 
     async def add_issue_comment(self, issue_id, body):
@@ -4195,3 +4204,33 @@ async def test_recovery_during_ops_issue_resolution_withdraws_the_notice(
 
     assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
     assert not orch._latch_notices
+
+
+async def test_a_closed_ops_issue_is_replaced_not_reused(tmp_path, monkeypatch) -> None:
+    """Codex review on PR #166, round 8. The ops log's own body says "Closing it
+    is safe; the next notice opens a new one" — but the cache never expired, so
+    a later latch in the same process posted to the closed issue, where it may
+    never surface in the operator's open queue."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+    assert tracker.ops_issues_created == 1
+
+    # The operator closes the ops log, then the circuit recovers and re-latches.
+    tracker.close_ops_issue()
+    entry = next(iter(orch.provider_waiting.values()))
+    circuit = orch._provider_circuit("claude")
+    circuit.record_success()
+    transition = circuit._open_latched(FailureClass.PROVIDER_AUTHENTICATION)
+    orch._latch_notices.clear()
+    await orch._notify_latched_circuit(
+        transition, entry, ("claude", circuit.generation))
+
+    assert tracker.ops_issues_created == 2          # a replacement was opened
+    assert tracker.comments[-1][0] == "ops-issue-node-id-2"
