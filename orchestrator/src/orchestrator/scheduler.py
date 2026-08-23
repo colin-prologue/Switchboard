@@ -1514,7 +1514,15 @@ class Orchestrator:
         self._latch_notice_tasks.add(task)
         task.add_done_callback(self._latch_notice_tasks.discard)
 
-    async def _post_latch_notice(self, tracker, body: str) -> None:
+    def _latch_still_open(self, transition: CircuitTransition) -> bool:
+        """Is the circuit still latched in the generation this notice is about?"""
+        circuit = self._provider_circuit(transition.provider_id)
+        return (circuit.state is CircuitState.OPEN_LATCHED
+                and circuit.generation == transition.generation)
+
+    async def _post_latch_notice(
+        self, tracker, body: str, transition: CircuitTransition
+    ) -> bool:
         """Resolve the ops issue at most once per process, then comment.
 
         The lock is the single-flight: two notice tasks latching in the same
@@ -1523,11 +1531,21 @@ class Orchestrator:
         re-resolution — `find_or_create_ops_issue` is not idempotent under a lost
         response either. The residual (a create whose response is lost) stays
         accepted; see AgDR-046.
+
+        The circuit is re-checked AFTER resolution and immediately before the
+        mutation (codex review on PR #166, round 6): resolution can block on the
+        network or on another provider's notice holding the lock, and a worker
+        still in flight can close the latch during that await. This is the last
+        point a check is possible — the comment round trip itself remains an
+        irreducible window, since GitHub offers no conditional write.
         """
         async with self._ops_issue_lock:
             if self._ops_issue_id is None:
                 self._ops_issue_id = await tracker.find_or_create_ops_issue()
+        if not self._latch_still_open(transition):
+            return False
         await tracker.add_issue_comment(self._ops_issue_id, body)
+        return True
 
     async def _notify_latched_circuit(
         self,
@@ -1600,15 +1618,18 @@ class Orchestrator:
                 # while this task is queued or backing off. Posting anyway hands
                 # the operator a stale outage and buys the unnecessary restart
                 # this notice exists to make unnecessary.
-                circuit = self._provider_circuit(transition.provider_id)
-                if (circuit.state is not CircuitState.OPEN_LATCHED
-                        or circuit.generation != transition.generation):
+                # Cheap fast path: skip resolution entirely when the circuit
+                # has already recovered. The authoritative check is the one
+                # inside `_post_latch_notice`, after resolution.
+                if not self._latch_still_open(transition):
                     log("latch notice withdrawn; circuit recovered",
-                        provider_id=transition.provider_id,
-                        circuit_state=circuit.state.value, outcome="skipped")
+                        provider_id=transition.provider_id, outcome="skipped")
                     self._latch_notices.discard(key)
                     return
-                await self._post_latch_notice(tracker, body)
+                if not await self._post_latch_notice(tracker, body, transition):
+                    log("latch notice withdrawn; circuit recovered",
+                        provider_id=transition.provider_id, outcome="skipped")
+                    self._latch_notices.discard(key)
                 return
             except Exception as exc:  # noqa: BLE001 - never fail a turn on this
                 log("latch notice failed", provider_id=transition.provider_id,

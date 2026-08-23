@@ -184,6 +184,24 @@ Three findings, all adopted; two changed the decision rather than the code.
   residual below. Resolution now happens at most once per process, behind a
   lock, and the cached id also removes the retry-side re-resolution.
 
+### Sixth round (codex, PR #166)
+
+- **The circuit re-check moved to the last point one is possible** — after
+  ops-issue resolution, immediately before `add_issue_comment`. Round five put
+  it before resolution, and resolution can block on the network or on another
+  provider's notice holding the single-flight lock, leaving the same window it
+  was meant to close. The pre-resolution check is kept as a cheap fast path that
+  skips resolution entirely when the circuit has already recovered.
+
+**This is where the TOCTOU narrowing stops.** The comment round trip itself is
+an irreducible window: GitHub offers no conditional write, so a latch that
+recovers while the mutation is in flight will always be able to produce one
+stale notice. Six rounds of review moved the check from "not present" to "the
+last instruction before the write"; the seventh has nowhere left to move it. A
+stale notice costs the operator one unnecessary restart, which is the failure
+this whole notice exists to prevent — so the trade is real, and it is bounded at
+one message.
+
 **Accepted residual: a latch notice can post twice, and can leave a second ops
 issue behind.** Neither `addComment` nor `createIssue` is idempotent, and GitHub
 offers no client key for either. A lost response followed by a retry can

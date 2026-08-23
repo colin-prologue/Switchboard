@@ -4160,3 +4160,38 @@ def replace_transition(circuit):
         generation=circuit.generation,
         failure_class=FailureClass.PROVIDER_AUTHENTICATION,
     )
+
+
+async def test_recovery_during_ops_issue_resolution_withdraws_the_notice(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 6. Resolution can block on the network or
+    on another provider's notice holding the lock; a worker still in flight can
+    close the latch during that await. The authoritative check has to sit after
+    resolution, immediately before the mutation."""
+    resolving = asyncio.Event()
+    release = asyncio.Event()
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    real_find = tracker.find_or_create_ops_issue
+
+    async def slow_find():
+        resolving.set()
+        await release.wait()
+        return await real_find()
+
+    tracker.find_or_create_ops_issue = slow_find
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: resolving.is_set())   # past the fast-path check
+    orch._provider_circuit("claude").record_success()
+    release.set()
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+    assert not orch._latch_notices
