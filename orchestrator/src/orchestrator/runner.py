@@ -645,6 +645,32 @@ class ClaudeRunner:
                 failure_class=FailureClass.RUNNER_STARTUP,
             )
 
+        # issue #165 (codex review on PR #166, round 7): a stream that carried a
+        # trusted synthetic provider error and then closed WITHOUT a terminal
+        # result is the most likely shape of an abrupt transport failure — which
+        # is one of the two conditions this ticket exists for. Classifying it
+        # `RUNNER_PROTOCOL` (not a circuit class) would charge the issue's
+        # budget and leave the circuit closed: the production failure, recreated
+        # on the one path that had no terminal record to read.
+        if synthetic_error_code:
+            eof_class = classify_claude_failure(code=synthetic_error_code)
+            if eof_class in CIRCUIT_FAILURE_CLASSES:
+                emit(
+                    "turn_failed",
+                    {
+                        "error": synthetic_error_code,
+                        "synthetic_error_code": synthetic_error_code,
+                        "stderr": _stderr_tail(stderr_chunks),
+                    },
+                    pid,
+                )
+                return TurnResult(
+                    status="failed",
+                    session_id=session_id,
+                    error=synthetic_error_code,
+                    failure_class=eof_class,
+                )
+
         emit("turn_failed", {"error": "port_exit", "stderr": _stderr_tail(stderr_chunks)}, pid)
         return TurnResult(
             status="failed",

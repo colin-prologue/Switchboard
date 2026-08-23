@@ -687,3 +687,40 @@ async def test_synthetic_code_reaches_the_general_failure_branch(
 
     assert result.status == "failed"
     assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION
+
+
+async def test_a_standing_provider_error_survives_a_stream_that_never_finishes(
+    workspace: Path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 7. A stream carrying a trusted synthetic
+    provider error that then closes WITHOUT a terminal result is the likeliest
+    shape of an abrupt transport failure — one of the two conditions this ticket
+    exists for. `RUNNER_PROTOCOL` is not a circuit class, so classifying it that
+    way charges the issue's budget and leaves the circuit closed: the production
+    failure, on the one path with no terminal record to read."""
+    monkeypatch.setenv("FAKE_SCENARIO", "synthetic_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_CODE", "server_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_NO_RESULT", "1")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_class is FailureClass.PROVIDER_UNAVAILABLE
+    assert result.error == "server_error"
+
+
+async def test_an_unclassified_stream_end_is_still_a_protocol_error(
+    workspace: Path, monkeypatch
+) -> None:
+    """The fallback is narrowed, not replaced: a stream that ends with no
+    result and no standing provider error stays `port_exit`/RUNNER_PROTOCOL."""
+    monkeypatch.setenv("FAKE_SCENARIO", "no_result")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_class is FailureClass.RUNNER_PROTOCOL

@@ -193,6 +193,20 @@ Three findings, all adopted; two changed the decision rather than the code.
   was meant to close. The pre-resolution check is kept as a cheap fast path that
   skips resolution entirely when the circuit has already recovered.
 
+### Seventh round (codex, PR #166)
+
+- **A standing provider error now survives a stream that never finishes.** The
+  EOF fallback returned `RUNNER_PROTOCOL`/`port_exit` and ignored the harvested
+  code. `RUNNER_PROTOCOL` is not a circuit class, so the issue's budget was
+  charged and the circuit stayed closed — this ticket's production failure,
+  reproduced on the one path with no terminal record to read. It is also the
+  *likeliest* shape of an abrupt transport failure, which is one of the two
+  conditions the ticket exists for, so the gap sat directly under the headline
+  case. Decision 3 said both terminal shapes are handled because only one is
+  captured; there was a third shape — no terminal record at all — and it was
+  missed. The fallback is narrowed, not replaced: a stream ending with no result
+  and no standing provider error is still `port_exit`.
+
 **This is where the TOCTOU narrowing stops.** The comment round trip itself is
 an irreducible window: GitHub offers no conditional write, so a latch that
 recovers while the mutation is in flight will always be able to produce one

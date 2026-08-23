@@ -191,6 +191,9 @@ def main() -> None:
                 "model": "claude-opus-5",
                 "content": [{"type": "text", "text": "Recovered; work continued."}],
             }})
+        if os.environ.get("FAKE_CLAUDE_SYNTHETIC_NO_RESULT"):
+            # Abrupt transport failure: stdout closes with no terminal record.
+            sys.exit(1)
         emit(result_line(
             os.environ.get("FAKE_CLAUDE_SYNTHETIC_SUBTYPE", "success"),
             session_id="sess-synth",
