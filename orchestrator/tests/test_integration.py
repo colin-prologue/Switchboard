@@ -4044,3 +4044,40 @@ async def test_shutdown_interrupts_the_notice_backoff(tmp_path, monkeypatch) -> 
     # Drained, not cancelled mid-sleep: the task is gone and the key released.
     assert not orch._latch_notice_tasks
     assert not orch._latch_notices
+
+
+async def test_the_notice_scopes_the_outage_to_the_latched_provider(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 4. Circuits are per-provider, so under a
+    mixed selector a latch on one does NOT stop the other — claiming a total
+    outage would prompt a restart that is not needed."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+    body = [b for t, b in tracker.comments if t == "ops-issue-node-id"][0]
+
+    # Single-provider project: the total-outage claim is TRUE here, and the
+    # notice still names which provider latched.
+    assert "stopped dispatching to `claude`" in body
+    assert "nothing will run" in body
+
+    # Mixed selector: the claim must narrow to the latched provider.
+    orch._runner_selector.provider_id = "mixed"
+    orch._latch_notices.clear()
+    circuit = orch._provider_circuit("claude")
+    transition = circuit._open_latched(FailureClass.PROVIDER_AUTHENTICATION)
+    entry = next(iter(orch.provider_waiting.values()))
+    await orch._notify_latched_circuit(
+        transition, entry, ("claude", circuit.generation))
+
+    mixed_body = [b for t, b in tracker.comments if t == "ops-issue-node-id"][-1]
+    assert "no issue assigned to `claude` will run" in mixed_body
+    assert "nothing will run" not in mixed_body

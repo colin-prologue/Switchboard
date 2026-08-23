@@ -160,6 +160,16 @@ Three findings, all adopted; two changed the decision rather than the code.
   The wait now polls at 250ms granularity. Polled rather than event-driven so
   there is no second shutdown signal to keep in sync with `_stopping`.
 
+### Fourth round (codex, PR #166)
+
+- **The notice scopes the outage to the latched provider.** Circuits are
+  per-provider and `MixedRunnerSelector` assigns issues independently, so under
+  a mixed selector a latch on one provider leaves the other working. Claiming
+  "nothing will run" there would prompt a restart that is not needed — the same
+  wrong-operational-instruction defect the class-derived hint fixed one round
+  earlier, in the sentence next to it. The claim is now exact in both modes:
+  total for a single-provider project, scoped to the provider under `mixed`.
+
 **Accepted residual: a latch notice can post twice, and can leave a second ops
 issue behind.** Neither `addComment` nor `createIssue` is idempotent, and GitHub
 offers no client key for either. A lost response followed by a retry can

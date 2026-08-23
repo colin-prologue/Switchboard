@@ -1540,10 +1540,21 @@ class Orchestrator:
                 "the account is out of credits",
         }
         hint = hints.get(failure_class) if failure_class else None
+        # Scoped to the LATCHED provider (codex review on PR #166, round 4):
+        # circuits are per-provider and `MixedRunnerSelector` assigns issues
+        # independently, so in mixed mode work on the healthy provider keeps
+        # running. Claiming a total outage there would prompt a restart that is
+        # not needed — the same wrong-operational-instruction defect the
+        # class-derived hint fixed one round earlier.
+        scope = (
+            f"no issue assigned to `{transition.provider_id}` will run"
+            if self._runner_selector.provider_id == "mixed"
+            else "nothing will run"
+        )
         body = (
-            f"**Switchboard stopped dispatching — `{failure}` on provider "
-            f"`{transition.provider_id}`.**\n\n"
-            f"This class does not clear on its own; nothing will run until you "
+            f"**Switchboard stopped dispatching to `{transition.provider_id}` "
+            f"— `{failure}`.**\n\n"
+            f"This class does not clear on its own; {scope} until you "
             f"fix it and restart the orchestrator. No session budget was spent "
             f"on it — the issue that hit it (`{entry.identifier}`) was refunded "
             f"and is waiting, not parked."
