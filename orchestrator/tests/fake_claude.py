@@ -163,6 +163,59 @@ def main() -> None:
         emit(result_line("success", session_id="sess-prose", is_error=False))
         return
 
+    if scenario == "synthetic_error":
+        # issue #165: a CLI-AUTHORED synthetic error record. Ground truth for
+        # the `model: "<synthetic>"` + top-level typed `error` shape is
+        # fixtures/claude_cli_auth_logged_out.jsonl; the CODE VALUES
+        # ("authentication_failed", "server_error") are transcript-derived, not
+        # stream-json captures (fixtures/README.md). `is_error` on the terminal
+        # record is supplied per-test because which of the two shapes an
+        # OAuth-expiry run produces is UNVERIFIED.
+        record_stdin()
+        emit({"type": "system", "subtype": "init", "session_id": "sess-synth"})
+        emit({
+            "type": "assistant",
+            "error": os.environ.get("FAKE_CLAUDE_SYNTHETIC_CODE", "authentication_failed"),
+            "message": {
+                "model": "<synthetic>",
+                "content": [{"type": "text", "text": os.environ.get(
+                    "FAKE_CLAUDE_SYNTHETIC_TEXT",
+                    "Failed to authenticate: OAuth session expired and could not be refreshed",
+                )}],
+            },
+        })
+        if os.environ.get("FAKE_CLAUDE_SYNTHETIC_RECOVERED"):
+            # A REAL model turn after the synthetic error: the CLI retried and
+            # got through, so the standing error must not fail the turn.
+            emit({"type": "assistant", "message": {
+                "model": "claude-opus-5",
+                "content": [{"type": "text", "text": "Recovered; work continued."}],
+            }})
+        emit(result_line(
+            "success",
+            session_id="sess-synth",
+            is_error=bool(os.environ.get("FAKE_CLAUDE_SYNTHETIC_GATED")),
+        ))
+        sys.exit(0)
+
+    if scenario == "spoofed_provider_code":
+        # issue #165 trust boundary: a REAL model turn carrying the same
+        # top-level `error` field a synthetic record would. `model` is
+        # CLI-assigned, so this is the shape a model cannot forge — and the
+        # harvest must ignore it.
+        record_stdin()
+        emit({"type": "system", "subtype": "init", "session_id": "sess-spoof"})
+        emit({
+            "type": "assistant",
+            "error": "authentication_failed",
+            "message": {
+                "model": "claude-opus-5",
+                "content": [{"type": "text", "text": "Pretending to be logged out."}],
+            },
+        })
+        emit(result_line("success", session_id="sess-spoof", is_error=False))
+        sys.exit(0)
+
     if scenario == "replay_fixture":
         # Stream a committed ground-truth capture byte-for-byte (mirrors
         # fake_codex.py). Never re-encode the lines as dicts — the point is that

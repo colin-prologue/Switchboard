@@ -8,7 +8,19 @@ from collections.abc import Mapping
 from .types import FailureClass
 
 
+# Issue #165: the first three entries are the codes the Claude CLI ACTUALLY
+# emits, on the synthetic assistant record (`model: "<synthetic>"`), harvested
+# by `runner._synthetic_error_code`. The rest are forward-compatible only and
+# have never matched real output: the sole captured `terminal_reason` is
+# `api_error`, which is absent from this map, so before #165 every real Claude
+# classification ran on `_TEXT_PATTERNS` alone. That is why OAuth expiry — whose
+# prose no pattern matches — classified as WORKER_FAILURE and charged the
+# ticket's session budget.
 _CLAUDE_CODES: Mapping[str, FailureClass] = {
+    "authentication_failed": FailureClass.PROVIDER_AUTHENTICATION,
+    # TRANSIENT on purpose. AgDR-032 rejected a blanket `is_error` rule
+    # precisely because latching a 5xx is a worse outage than the bug it fixes.
+    "server_error": FailureClass.PROVIDER_UNAVAILABLE,
     "authentication_expired": FailureClass.PROVIDER_AUTHENTICATION,
     "authentication_required": FailureClass.PROVIDER_AUTHENTICATION,
     "plan_limit_reached": FailureClass.PROVIDER_PLAN_LIMIT,
@@ -48,6 +60,11 @@ _TEXT_PATTERNS: tuple[tuple[FailureClass, tuple[re.Pattern[str], ...]], ...] = (
             # Unauthorized: Missing bearer or basic authentication in header".
             re.compile(r"\b401 unauthorized\b"),
             re.compile(r"\bmissing bearer or basic authentication\b"),
+            # issue #165 (transcript-derived, see fixtures/README.md): the
+            # wording an EXPIRED OAuth session produces, as distinct from the
+            # never-logged-in "Not logged in · Please run /login" capture.
+            re.compile(r"\boauth session expired\b"),
+            re.compile(r"\bfailed to authenticate\b"),
         ),
     ),
     (
@@ -79,6 +96,8 @@ _TEXT_PATTERNS: tuple[tuple[FailureClass, tuple[re.Pattern[str], ...]], ...] = (
         FailureClass.PROVIDER_UNAVAILABLE,
         (
             re.compile(r"\b(?:provider|service) (?:is )?(?:temporarily )?unavailable\b"),
+            # issue #165 (transcript-derived): a mid-stream transport drop.
+            re.compile(r"\bconnection closed mid-response\b"),
         ),
     ),
     # issue #47: Codex `turn.failed` carries only `error.message` (no `code`),

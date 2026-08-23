@@ -149,6 +149,9 @@ class FakeTracker:
         self.body_writes: list[tuple[str, str]] = []
         self.update_body_error: TrackerError | None = None
         self.add_comment_error: TrackerError | None = None
+        self.ops_issue_error: TrackerError | None = None
+        self.ops_issue_id: str | None = None
+        self.ops_issues_created = 0
         # ONE-SHOT divergence injection: perturbs the STORED bytes for exactly
         # one write. The only way a derive-faithful fake can exercise the
         # verify-after-write branch (AC 1) without lying about anything else.
@@ -208,6 +211,17 @@ class FakeTracker:
         for issue in self._issues_with_id(issue_id):
             issue.description = stored
             issue.updated_at = bump
+
+    async def find_or_create_ops_issue(self):
+        # issue #165: find-or-create, so the counter distinguishes "made one"
+        # from "reused the one already there".
+        self.api_calls += 1
+        if self.ops_issue_error is not None:
+            raise self.ops_issue_error
+        if self.ops_issue_id is None:
+            self.ops_issue_id = "ops-issue-node-id"
+            self.ops_issues_created += 1
+        return self.ops_issue_id
 
     async def add_issue_comment(self, issue_id, body):
         self.api_calls += 1
@@ -3782,3 +3796,109 @@ async def test_review_poll_runs_inside_the_tick(tmp_path, monkeypatch, capfd):
 
     await orch._tick()   # inside REVIEW_POLL_INTERVAL_MS: no second round
     assert len(markers()) == 1
+
+
+# --- issue #165: the latched circuit reaches the operator --------------------
+
+
+def _latching_runner(failure_class: FailureClass) -> FakeRunner:
+    runner = FakeRunner()
+    runner.provider_id = "claude"
+
+    async def failing_turn(*args, **kwargs):
+        return TurnResult(
+            status="failed",
+            session_id="sess-165",
+            error="oauth",
+            failure_class=failure_class,
+        )
+
+    runner.run_turn = failing_turn
+    return runner
+
+
+async def test_a_latched_circuit_posts_one_notice_to_the_ops_issue(
+    tmp_path, monkeypatch
+) -> None:
+    """Switchboard is used in WAVES: a latched circuit stops everything and the
+    operator may be days from a terminal. The log line AgDR-026 already emits is
+    not a channel that reaches them; a GitHub comment is."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    notices = [body for target, body in tracker.comments
+               if target == "ops-issue-node-id"]
+    assert len(notices) == 1
+    assert "provider_authentication" in notices[0]
+    assert tracker.ops_issues_created == 1
+    # The notice is not a park: the ticket keeps its budget and its place.
+    assert issue.id not in orch.parked
+
+
+async def test_a_transient_failure_posts_no_notice(tmp_path, monkeypatch) -> None:
+    """The whole point of a wave-friendly channel: a 5xx that the cooldown
+    heals must never reach it, or the operator learns to ignore the channel."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_UNAVAILABLE),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+
+    assert orch.provider_circuits["claude"].state is not CircuitState.OPEN_LATCHED
+    assert tracker.ops_issues_created == 0
+    assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+
+
+async def test_a_standing_latch_does_not_re_notify(tmp_path, monkeypatch) -> None:
+    """A latched circuit refuses dispatch on every subsequent tick. Edge-
+    triggered on (provider, generation) so the operator gets one message, not a
+    heartbeat for as long as they are away."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+    for _ in range(3):
+        await orch._tick()
+
+    notices = [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+    assert len(notices) == 1
+
+
+async def test_a_failed_notice_is_retried_not_swallowed(
+    tmp_path, monkeypatch
+) -> None:
+    """If the post itself fails, the notice must not be marked sent — a notice
+    dropped in silence is the exact failure this change exists to remove."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    tracker.ops_issue_error = TrackerError("github down")
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: not orch._latch_notice_tasks)
+    assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+    assert not orch._latch_notices          # un-marked, so a later latch retries

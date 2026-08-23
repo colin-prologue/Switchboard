@@ -311,6 +311,13 @@ class Orchestrator:
         self.provider_circuits: dict[str, ProviderCircuit] = {}
         self.provider_waiting: dict[str, ProviderWaitEntry] = {}
         self._circuit_refusals: set[tuple[str, str, int]] = set()
+        # issue #165: latch notices already posted, keyed by
+        # (provider, generation) — one notice per latch, never per tick.
+        self._latch_notices: set[tuple[str, int]] = set()
+        # Strong refs for the fire-and-forget notice tasks: `_on_worker_done`
+        # is a sync done-callback, so the post cannot be awaited inline, and
+        # a bare create_task may be garbage-collected mid-flight.
+        self._latch_notice_tasks: set[asyncio.Task] = set()
 
         # owned extension state (SPEC.md §4 session cap / parking)
         # Keyed by (issue id, session role) — NOT by issue id alone (issue #35 /
@@ -1441,6 +1448,7 @@ class Orchestrator:
                 probe_token=entry.circuit_probe_token,
             )
             self._log_circuit_transition(transition, entry)
+            self._start_latch_notice(transition, entry)
             if circuit.is_circuit_failure(failure_class):
                 self._refund_issue_session(entry.session_key)
                 self.provider_waiting[issue_id] = ProviderWaitEntry(
@@ -1463,6 +1471,68 @@ class Orchestrator:
                 provider_id=entry.provider_id, session_id=entry.session_id,
                 outcome="failed", failure_class=failure_class.value,
                 error=str(exc))
+
+    def _start_latch_notice(
+        self, transition: CircuitTransition | None, entry: RunningEntry
+    ) -> None:
+        """Fire the latch notice without blocking worker teardown (issue #165).
+
+        The claim/refund/park bookkeeping below must not wait on a GitHub round
+        trip, and `_on_worker_done` is sync anyway. Marking the notice sent
+        happens HERE, before the task runs, so two workers failing into the same
+        latch in the same tick cannot both queue a post.
+        """
+        if transition is None or transition.state is not CircuitState.OPEN_LATCHED:
+            return
+        key = (transition.provider_id, transition.generation)
+        if key in self._latch_notices:
+            return
+        self._latch_notices.add(key)
+        task = asyncio.create_task(self._notify_latched_circuit(transition, entry, key))
+        self._latch_notice_tasks.add(task)
+        task.add_done_callback(self._latch_notice_tasks.discard)
+
+    async def _notify_latched_circuit(
+        self,
+        transition: CircuitTransition,
+        entry: RunningEntry,
+        key: tuple[str, int],
+    ) -> None:
+        """Post ONE operator notice when the circuit latches (issue #165).
+
+        Only the LATCHED classes reach here: auth, plan limit, credits. Each one
+        stops every project's work and none of them clears itself, so this is
+        the narrow set worth interrupting an operator for. Transient failures
+        (rate limit, 5xx) self-heal through the cooldown and are deliberately
+        silent — Switchboard runs in waves, and a channel that also carries
+        recoverable noise is one the operator learns to ignore.
+
+        Edge-triggered on (provider, generation): a latched circuit refuses
+        dispatch on every subsequent tick, and this must not narrate that.
+        """
+        failure = (
+            transition.failure_class.value
+            if transition.failure_class else "unknown"
+        )
+        tracker, _ = self._components()
+        body = (
+            f"**Switchboard stopped dispatching — `{failure}` on provider "
+            f"`{transition.provider_id}`.**\n\n"
+            f"This class does not clear on its own; nothing will run until you "
+            f"fix it and restart the orchestrator. No session budget was spent "
+            f"on it — the issue that hit it (`{entry.identifier}`) was refunded "
+            f"and is waiting, not parked.\n\n"
+            f"Most likely: the `claude` CLI needs a fresh login."
+        )
+        try:
+            ops_issue_id = await tracker.find_or_create_ops_issue()
+            await tracker.add_issue_comment(ops_issue_id, body)
+        except Exception as exc:  # noqa: BLE001 - notification must never fail a turn
+            # Un-mark so a later latch in the same generation can try again:
+            # dropping the notice silently is the failure this change removes.
+            self._latch_notices.discard(key)
+            log("latch notice failed", provider_id=transition.provider_id,
+                outcome="failed", error=str(exc))
 
     def _refund_issue_session(self, session_key: tuple[str, str]) -> None:
         """Give back the session a provider-circuit failure burned. Refunds the
