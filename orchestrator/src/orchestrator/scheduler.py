@@ -325,6 +325,13 @@ class Orchestrator:
         # is a sync done-callback, so the post cannot be awaited inline, and
         # a bare create_task may be garbage-collected mid-flight.
         self._latch_notice_tasks: set[asyncio.Task] = set()
+        # Ops-issue resolution is SHARED and single-flighted across notice
+        # tasks (codex review on PR #166, round 5): in mixed mode two
+        # providers can latch in the same tick, and two concurrent
+        # find-or-create calls each miss the other's create — producing two
+        # ops logs with no network failure involved at all.
+        self._ops_issue_id: str | None = None
+        self._ops_issue_lock = asyncio.Lock()
 
         # owned extension state (SPEC.md §4 session cap / parking)
         # Keyed by (issue id, session role) — NOT by issue id alone (issue #35 /
@@ -1507,6 +1514,21 @@ class Orchestrator:
         self._latch_notice_tasks.add(task)
         task.add_done_callback(self._latch_notice_tasks.discard)
 
+    async def _post_latch_notice(self, tracker, body: str) -> None:
+        """Resolve the ops issue at most once per process, then comment.
+
+        The lock is the single-flight: two notice tasks latching in the same
+        tick would otherwise both query, both miss the other's create, and both
+        create an ops log. The cached id also removes the retry-side
+        re-resolution — `find_or_create_ops_issue` is not idempotent under a lost
+        response either. The residual (a create whose response is lost) stays
+        accepted; see AgDR-046.
+        """
+        async with self._ops_issue_lock:
+            if self._ops_issue_id is None:
+                self._ops_issue_id = await tracker.find_or_create_ops_issue()
+        await tracker.add_issue_comment(self._ops_issue_id, body)
+
     async def _notify_latched_circuit(
         self,
         transition: CircuitTransition,
@@ -1565,22 +1587,28 @@ class Orchestrator:
         # call this again — un-marking the key retries nothing (codex review on
         # PR #166). The retry has to happen here or the notice is lost for the
         # life of the process, which is the silent drop this change removes.
-        # Resolved once and REUSED across attempts (codex review on PR #166):
-        # `find_or_create_ops_issue` is not idempotent under a lost response, so
-        # re-resolving on every retry risks a second ops issue — a duplicate of
-        # the durable thing rather than of one comment. The residual duplicate
-        # COMMENT is accepted and documented in AgDR-046: a notice posted twice
-        # is cosmetic, a notice lost is the defect this exists to remove.
-        ops_issue_id: str | None = None
         for attempt in range(1, LATCH_NOTICE_ATTEMPTS + 1):
             try:
                 # Resolved INSIDE the guard: `_components()` raises when the
                 # config is not loaded, and letting that escape would strand the
                 # notice as an unhandled task exception.
                 tracker, _ = self._components()
-                if ops_issue_id is None:
-                    ops_issue_id = await tracker.find_or_create_ops_issue()
-                await tracker.add_issue_comment(ops_issue_id, body)
+                # Re-check the circuit before POSTING (codex review on PR #166,
+                # round 5). `record_success` closes a latched circuit
+                # (`test_success_closes_latched_circuit_from_already_running_worker`),
+                # so a worker still in flight when the latch opened can clear it
+                # while this task is queued or backing off. Posting anyway hands
+                # the operator a stale outage and buys the unnecessary restart
+                # this notice exists to make unnecessary.
+                circuit = self._provider_circuit(transition.provider_id)
+                if (circuit.state is not CircuitState.OPEN_LATCHED
+                        or circuit.generation != transition.generation):
+                    log("latch notice withdrawn; circuit recovered",
+                        provider_id=transition.provider_id,
+                        circuit_state=circuit.state.value, outcome="skipped")
+                    self._latch_notices.discard(key)
+                    return
+                await self._post_latch_notice(tracker, body)
                 return
             except Exception as exc:  # noqa: BLE001 - never fail a turn on this
                 log("latch notice failed", provider_id=transition.provider_id,

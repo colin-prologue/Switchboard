@@ -4081,3 +4081,82 @@ async def test_the_notice_scopes_the_outage_to_the_latched_provider(
     mixed_body = [b for t, b in tracker.comments if t == "ops-issue-node-id"][-1]
     assert "no issue assigned to `claude` will run" in mixed_body
     assert "nothing will run" not in mixed_body
+
+
+async def test_a_recovered_circuit_withdraws_its_pending_notice(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 5. `record_success` closes a latched
+    circuit (`test_success_closes_latched_circuit_from_already_running_worker`),
+    so a worker still in flight when the latch opened can clear it while this
+    notice is backing off. Posting anyway hands the operator a stale outage and
+    buys the restart the notice exists to make unnecessary."""
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_RETRY_MS", 20)
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_POLL_MS", 5)
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    # Fail the first post so the task enters the backoff, which is the window
+    # an in-flight success actually lands in.
+    tracker.ops_issue_failures_left = 1
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: tracker.ops_issue_calls >= 1)
+    orch._provider_circuit("claude").record_success()
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+    assert not orch._latch_notices
+
+
+async def test_two_providers_latching_together_share_one_ops_issue(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 5. Under `mixed` both providers can latch
+    in the same tick; two concurrent find-or-creates each miss the other's
+    create. No network failure needed — this is a plain race."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+    entry = next(iter(orch.provider_waiting.values()))
+
+    # Two providers latch together, both resolving the ops issue concurrently.
+    orch._latch_notices.clear()
+    tracker.comments.clear()
+    orch._ops_issue_id = None
+    tracker.ops_issue_calls = 0          # count only the concurrent pair below
+    claude = orch._provider_circuit("claude")
+    codex = orch._provider_circuit("codex")
+    t2 = codex._open_latched(FailureClass.PROVIDER_AUTHENTICATION)
+    await asyncio.gather(
+        orch._notify_latched_circuit(
+            replace_transition(claude), entry, ("claude", claude.generation)),
+        orch._notify_latched_circuit(t2, entry, ("codex", codex.generation)),
+    )
+
+    assert tracker.ops_issues_created == 1
+    assert tracker.ops_issue_calls == 1     # single-flighted, not re-resolved
+    assert len([c for c in tracker.comments if c[0] == "ops-issue-node-id"]) == 2
+
+
+def replace_transition(circuit):
+    """The latched transition `circuit` is already in, re-expressed for a
+    direct `_notify_latched_circuit` call."""
+    from orchestrator.provider_circuit import CircuitTransition
+    return CircuitTransition(
+        provider_id=circuit.provider_id,
+        previous_state=CircuitState.CLOSED,
+        state=CircuitState.OPEN_LATCHED,
+        generation=circuit.generation,
+        failure_class=FailureClass.PROVIDER_AUTHENTICATION,
+    )

@@ -170,14 +170,29 @@ Three findings, all adopted; two changed the decision rather than the code.
   earlier, in the sentence next to it. The claim is now exact in both modes:
   total for a single-provider project, scoped to the provider under `mixed`.
 
+### Fifth round (codex, PR #166)
+
+- **The circuit is re-checked immediately before posting.** `record_success`
+  closes a latched circuit, so a worker still in flight when the latch opened
+  can clear it while the notice is queued or backing off. The notice is
+  withdrawn (and the key released) rather than posted, because a stale outage
+  buys exactly the unnecessary restart this notice exists to prevent.
+- **Ops-issue resolution is single-flighted and shared across notice tasks.**
+  Under `mixed`, two providers can latch in the same tick; two concurrent
+  find-or-creates each miss the other's create and make two ops logs. This race
+  needs no network failure, which is what distinguishes it from the accepted
+  residual below. Resolution now happens at most once per process, behind a
+  lock, and the cached id also removes the retry-side re-resolution.
+
 **Accepted residual: a latch notice can post twice, and can leave a second ops
 issue behind.** Neither `addComment` nor `createIssue` is idempotent, and GitHub
 offers no client key for either. A lost response followed by a retry can
-therefore produce two identical notices; and because the reuse in round two
-begins only after a *successful* create, a create whose response is lost can be
-re-run and — if the first write is not yet visible to the finder — make a second
-ops log. Round two's reply overstated its own fix on this second point; this
-record is the correction.
+therefore produce two identical notices; and because resolution caches only a
+*successful* create, a create whose response is lost can be re-run and — if the
+first write is not yet visible to the finder — make a second ops log. Round
+two's reply overstated its own fix on this second point; this record is the
+correction. Round five removed the concurrent case (which needed no failure at
+all); what remains is strictly the ambiguous-response one.
 
 Codex proposed a durable marker plus read-before-retry. Rejected as
 disproportionate, and as not actually closing the race: with no idempotency key
