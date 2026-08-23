@@ -151,15 +151,37 @@ Three findings, all adopted; two changed the decision rather than the code.
   re-resolving per attempt risked a second *ops issue* — duplicating the durable
   thing, not just a comment.
 
-**Accepted residual: a latch notice can post twice.** `addComment` is
-non-idempotent, so a lost response followed by a retry can produce two identical
-notices. Codex proposed a durable client key plus read-before-retry. Rejected as
-disproportionate: the ops log is read by one operator after a wave, a duplicated
-notice costs them a second of confusion, and a *lost* notice costs them the
-whole wave — which is the failure this record exists to remove. The one-notice
-contract is therefore narrowed, on purpose, to "exactly one notice per circuit
-generation **when GitHub answers**". If the ops log ever grows a consumer that
-counts notices, this trade has to be revisited before that consumer ships.
+### Third round (codex, PR #166)
+
+- **The backoff is stop-AWARE, not stop-checked.** Round two checked `_stopping`
+  *before* the wait, which leaves a SIGTERM arriving mid-backoff to expire the
+  5s shutdown grace and cancel the task mid-sleep — losing the notice during the
+  restart it exists to explain, which is exactly what round two set out to fix.
+  The wait now polls at 250ms granularity. Polled rather than event-driven so
+  there is no second shutdown signal to keep in sync with `_stopping`.
+
+**Accepted residual: a latch notice can post twice, and can leave a second ops
+issue behind.** Neither `addComment` nor `createIssue` is idempotent, and GitHub
+offers no client key for either. A lost response followed by a retry can
+therefore produce two identical notices; and because the reuse in round two
+begins only after a *successful* create, a create whose response is lost can be
+re-run and — if the first write is not yet visible to the finder — make a second
+ops log. Round two's reply overstated its own fix on this second point; this
+record is the correction.
+
+Codex proposed a durable marker plus read-before-retry. Rejected as
+disproportionate, and as not actually closing the race: with no idempotency key
+the read-before-retry is itself subject to the same visibility lag, so it
+narrows the window rather than removing it. The ops log is read by one operator
+after a wave, where a duplicated notice costs a second of confusion, a duplicate
+ops issue self-corrects on the next latch (the finder returns the first title
+match), and a *lost* notice costs the whole wave — which is the failure this
+record exists to remove.
+
+The one-notice contract is therefore narrowed, on purpose, to "exactly one
+notice per circuit generation **when GitHub answers**". If the ops log ever
+grows a consumer that counts notices, or the tracker gains an idempotency key,
+this trade has to be revisited before that consumer ships.
 
 ## Blast radius
 

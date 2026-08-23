@@ -80,6 +80,7 @@ SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
 # background loop that outlives the condition it is reporting.
 LATCH_NOTICE_ATTEMPTS = 3
 LATCH_NOTICE_RETRY_MS = 30000
+LATCH_NOTICE_POLL_MS = 250         # backoff granularity, so SIGTERM lands fast
                                    # blocks (after_run hooks) before hard-cancel
 
 # Durable park marker (SPEC.md §4 owned extension). Written to the tracker at
@@ -1582,7 +1583,20 @@ class Orchestrator:
                     # will never run.
                     self._latch_notices.discard(key)
                     return
-                await asyncio.sleep(LATCH_NOTICE_RETRY_MS / 1000)
+                # Stop-AWARE, not stop-checked (codex review on PR #166,
+                # round 3): checking `_stopping` before the wait leaves a
+                # SIGTERM arriving mid-backoff to expire the 5s shutdown grace
+                # and cancel the task mid-sleep — losing the notice during the
+                # restart it exists to explain. Polled rather than event-driven
+                # to avoid a second shutdown signal to keep in sync with
+                # `_stopping`.
+                waited = 0
+                while waited < LATCH_NOTICE_RETRY_MS and not self._stopping:
+                    await asyncio.sleep(LATCH_NOTICE_POLL_MS / 1000)
+                    waited += LATCH_NOTICE_POLL_MS
+                if self._stopping:
+                    self._latch_notices.discard(key)
+                    return
 
     def _refund_issue_session(self, session_key: tuple[str, str]) -> None:
         """Give back the session a provider-circuit failure burned. Refunds the

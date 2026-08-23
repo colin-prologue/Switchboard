@@ -4020,3 +4020,27 @@ async def test_a_retry_never_resolves_a_second_ops_issue(
     assert calls["n"] == 3                  # the comment was retried
     assert tracker.ops_issue_calls == 1     # the ops issue was resolved ONCE
     assert tracker.ops_issues_created == 1
+
+
+async def test_shutdown_interrupts_the_notice_backoff(tmp_path, monkeypatch) -> None:
+    """Codex review on PR #166, round 3. Checking `_stopping` BEFORE the wait
+    leaves a SIGTERM arriving mid-backoff to expire the 5s shutdown grace and
+    cancel the task mid-sleep. The wait has to be stop-aware, not stop-checked."""
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_RETRY_MS", 30000)
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_POLL_MS", 5)
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    tracker.ops_issue_error = TrackerError("github down")
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: tracker.ops_issue_calls >= 1)   # now in the backoff
+    await orch.shutdown()
+
+    # Drained, not cancelled mid-sleep: the task is gone and the key released.
+    assert not orch._latch_notice_tasks
+    assert not orch._latch_notices
