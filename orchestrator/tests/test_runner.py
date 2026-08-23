@@ -667,3 +667,23 @@ async def test_a_non_synthetic_record_claiming_a_provider_code_is_ignored(
 
     assert result.status == "succeeded"
     assert result.failure_class is None
+
+
+async def test_synthetic_code_reaches_the_general_failure_branch(
+    workspace: Path, monkeypatch
+) -> None:
+    """Codex review on PR #166. A synthetic provider error followed by a
+    terminal record with a FAILURE subtype took neither the `is_error` gate nor
+    the success branch, so it classified on the subtype alone — WORKER_FAILURE,
+    budget spent, circuit never opened. The same defect this ticket fixes, on
+    the one branch the first pass did not reach."""
+    monkeypatch.setenv("FAKE_SCENARIO", "synthetic_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_CODE", "authentication_failed")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_SUBTYPE", "error_during_execution")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION

@@ -584,7 +584,17 @@ class ClaudeRunner:
                             status="failed",
                             session_id=session_id,
                             error=subtype,
-                            failure_class=classify_claude_failure(
+                            # issue #165 (codex review on PR #166): the standing
+                            # code applies here too. A synthetic provider error
+                            # followed by a terminal record with a FAILURE
+                            # subtype would otherwise classify on the subtype
+                            # alone, stay WORKER_FAILURE, and spend the issue's
+                            # budget — the same defect this ticket fixes, just
+                            # on the branch it had not reached. Safe against
+                            # `error_max_turns_no_session`: reaching a turn cap
+                            # requires real model turns, and any one of them
+                            # clears the standing code.
+                            failure_class=standing_class or classify_claude_failure(
                                 code=subtype,
                                 detail=_structured_error_text(msg),
                             ),

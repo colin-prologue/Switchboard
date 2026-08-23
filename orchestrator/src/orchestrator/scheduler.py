@@ -74,6 +74,12 @@ from .workspace import WorkspaceManager
 CONTINUATION_DELAY_MS = 1000       # core §8.4 fixed continuation delay
 FAILURE_BASE_BACKOFF_MS = 10000    # core §8.4 failure backoff base
 SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
+# issue #165: the latch notice is the only signal that reaches an operator
+# who has walked away, and a latched circuit never re-fires it, so the
+# retry lives in the notice task itself. Bounded: this must not become a
+# background loop that outlives the condition it is reporting.
+LATCH_NOTICE_ATTEMPTS = 3
+LATCH_NOTICE_RETRY_MS = 30000
                                    # blocks (after_run hooks) before hard-cancel
 
 # Durable park marker (SPEC.md §4 owned extension). Written to the tracker at
@@ -1510,32 +1516,54 @@ class Orchestrator:
         Edge-triggered on (provider, generation): a latched circuit refuses
         dispatch on every subsequent tick, and this must not narrate that.
         """
-        failure = (
-            transition.failure_class.value
-            if transition.failure_class else "unknown"
-        )
+        failure_class = transition.failure_class
+        failure = failure_class.value if failure_class else "unknown"
+        # The hint is chosen from the CLASS, not hardcoded (codex review on PR
+        # #166): a credits or plan-limit latch, or an auth latch on a non-Claude
+        # provider, sent the operator to re-login to the wrong CLI while every
+        # project stayed stopped.
+        hints = {
+            FailureClass.PROVIDER_AUTHENTICATION:
+                f"the `{transition.provider_id}` CLI most likely needs a fresh login",
+            FailureClass.PROVIDER_PLAN_LIMIT:
+                "the plan's usage limit is reached — it clears when the window resets",
+            FailureClass.PROVIDER_CREDITS_EXHAUSTED:
+                "the account is out of credits",
+        }
+        hint = hints.get(failure_class) if failure_class else None
         body = (
             f"**Switchboard stopped dispatching — `{failure}` on provider "
             f"`{transition.provider_id}`.**\n\n"
             f"This class does not clear on its own; nothing will run until you "
             f"fix it and restart the orchestrator. No session budget was spent "
             f"on it — the issue that hit it (`{entry.identifier}`) was refunded "
-            f"and is waiting, not parked.\n\n"
-            f"Most likely: the `claude` CLI needs a fresh login."
+            f"and is waiting, not parked."
+            + (f"\n\nLikely cause: {hint}." if hint else "")
         )
-        try:
-            # Resolved INSIDE the guard: `_components()` raises when the config
-            # is not loaded, and letting that escape would strand the notice as
-            # an unhandled task exception with the key still marked sent.
-            tracker, _ = self._components()
-            ops_issue_id = await tracker.find_or_create_ops_issue()
-            await tracker.add_issue_comment(ops_issue_id, body)
-        except Exception as exc:  # noqa: BLE001 - notification must never fail a turn
-            # Un-mark so a later latch in the same generation can try again:
-            # dropping the notice silently is the failure this change removes.
-            self._latch_notices.discard(key)
-            log("latch notice failed", provider_id=transition.provider_id,
-                outcome="failed", error=str(exc))
+        # A LATCHED circuit produces no further transitions (`record_failure`
+        # returns None once latched) and refuses every dispatch, so nothing will
+        # call this again — un-marking the key retries nothing (codex review on
+        # PR #166). The retry has to happen here or the notice is lost for the
+        # life of the process, which is the silent drop this change removes.
+        for attempt in range(1, LATCH_NOTICE_ATTEMPTS + 1):
+            try:
+                # Resolved INSIDE the guard: `_components()` raises when the
+                # config is not loaded, and letting that escape would strand the
+                # notice as an unhandled task exception.
+                tracker, _ = self._components()
+                ops_issue_id = await tracker.find_or_create_ops_issue()
+                await tracker.add_issue_comment(ops_issue_id, body)
+                return
+            except Exception as exc:  # noqa: BLE001 - never fail a turn on this
+                log("latch notice failed", provider_id=transition.provider_id,
+                    outcome="failed", attempt=attempt, error=str(exc))
+                if attempt == LATCH_NOTICE_ATTEMPTS:
+                    # Give the key back so a LATER generation (after an operator
+                    # restart re-closes and re-opens the circuit) is not silenced
+                    # by this one's bookkeeping.
+                    self._latch_notices.discard(key)
+                    return
+                await asyncio.sleep(LATCH_NOTICE_RETRY_MS / 1000)
 
     def _refund_issue_session(self, session_key: tuple[str, str]) -> None:
         """Give back the session a provider-circuit failure burned. Refunds the

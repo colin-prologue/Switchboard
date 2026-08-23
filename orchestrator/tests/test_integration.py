@@ -150,6 +150,8 @@ class FakeTracker:
         self.update_body_error: TrackerError | None = None
         self.add_comment_error: TrackerError | None = None
         self.ops_issue_error: TrackerError | None = None
+        self.ops_issue_failures_left = 0
+        self.ops_issue_calls = 0
         self.ops_issue_id: str | None = None
         self.ops_issues_created = 0
         # ONE-SHOT divergence injection: perturbs the STORED bytes for exactly
@@ -216,6 +218,10 @@ class FakeTracker:
         # issue #165: find-or-create, so the counter distinguishes "made one"
         # from "reused the one already there".
         self.api_calls += 1
+        self.ops_issue_calls += 1
+        if self.ops_issue_failures_left > 0:
+            self.ops_issue_failures_left -= 1
+            raise TrackerError("github flaked")
         if self.ops_issue_error is not None:
             raise self.ops_issue_error
         if self.ops_issue_id is None:
@@ -3884,11 +3890,32 @@ async def test_a_standing_latch_does_not_re_notify(tmp_path, monkeypatch) -> Non
     assert len(notices) == 1
 
 
-async def test_a_failed_notice_is_retried_not_swallowed(
-    tmp_path, monkeypatch
-) -> None:
-    """If the post itself fails, the notice must not be marked sent — a notice
-    dropped in silence is the exact failure this change exists to remove."""
+async def test_a_failed_notice_is_actually_retried(tmp_path, monkeypatch) -> None:
+    """A LATCHED circuit produces no further transitions and refuses every
+    dispatch, so nothing re-enters `_start_latch_notice`. Un-marking the key
+    retries nothing — the retry has to happen inside the notice task or the
+    signal is lost for the life of the process."""
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_RETRY_MS", 1)
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    tracker.ops_issue_failures_left = 2      # succeeds on the third attempt
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    assert tracker.ops_issue_calls == 3
+    assert len([c for c in tracker.comments if c[0] == "ops-issue-node-id"]) == 1
+
+
+async def test_an_exhausted_notice_gives_the_key_back(tmp_path, monkeypatch) -> None:
+    """After the bounded attempts are spent the key is released, so a LATER
+    circuit generation is not silenced by this one's bookkeeping."""
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_RETRY_MS", 1)
     orch, tracker, _, _ = _build_harness(
         tmp_path, monkeypatch,
         runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
@@ -3899,6 +3926,34 @@ async def test_a_failed_notice_is_retried_not_swallowed(
     tracker.states[issue.id] = issue
 
     await orch._tick()
+    # Wait on the OBSERVABLE, not on the task set: the set is empty both before
+    # the notice task is created and after it finishes, so waiting on it alone
+    # returns immediately and asserts nothing.
+    await wait_for(
+        lambda: tracker.ops_issue_calls == scheduler_mod.LATCH_NOTICE_ATTEMPTS)
     await wait_for(lambda: not orch._latch_notice_tasks)
+
+    assert tracker.ops_issue_calls == scheduler_mod.LATCH_NOTICE_ATTEMPTS
     assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
-    assert not orch._latch_notices          # un-marked, so a later latch retries
+    assert not orch._latch_notices
+
+
+async def test_the_notice_hint_follows_the_failure_class(
+    tmp_path, monkeypatch
+) -> None:
+    """A credits latch must not tell the operator to re-login, and an auth latch
+    must name the provider that actually needs it."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_CREDITS_EXHAUSTED),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    body = [b for t, b in tracker.comments if t == "ops-issue-node-id"][0]
+    assert "out of credits" in body
+    assert "login" not in body

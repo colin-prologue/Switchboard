@@ -112,6 +112,33 @@ retries rather than inheriting the silence.
   land on tickets that are not at fault, and give no single place to check after
   a wave.
 
+## Revisions from review (codex, PR #166)
+
+Three findings, all adopted; two changed the decision rather than the code.
+
+- **The standing code now reaches the general failure branch.** The first pass
+  wired it into the `is_error` gate and the success branch only, so a synthetic
+  provider error followed by a terminal record with a *failure* subtype still
+  classified on the subtype alone. That is the same defect this record exists to
+  fix, on the branch it had not reached — an instance of the bet decision 3
+  explicitly refuses to make. Safe against `error_max_turns_no_session`, because
+  reaching a turn cap requires real model turns and any one of them clears the
+  standing code.
+- **The notice retries for real.** The first pass un-marked the key on failure
+  and called that a retry. It is not: `record_failure` returns `None` once the
+  circuit is latched, and a latched circuit refuses every dispatch, so nothing
+  re-enters `_start_latch_notice` — the notice was lost for the life of the
+  process. Retry is now bounded (3 attempts, 30s apart) inside the notice task,
+  where the only remaining trigger is. The key is still released afterwards so a
+  later generation is not silenced by this one's bookkeeping. The test that
+  claimed to cover this passed vacuously and leaked a pending task; it now waits
+  on the observable rather than on a task set that is empty both before the task
+  is created and after it ends.
+- **The recovery hint is derived from the failure class**, not hardcoded. A
+  credits or plan-limit latch, and any auth latch on a non-Claude provider, was
+  being told the Claude CLI needed a fresh login — an operational instruction
+  pointing at the wrong credential while every project stayed stopped.
+
 ## Blast radius
 
 Claude runner only; codex untouched. `_CLAUDE_CODES` gains two entries that

@@ -192,7 +192,7 @@ def main() -> None:
                 "content": [{"type": "text", "text": "Recovered; work continued."}],
             }})
         emit(result_line(
-            "success",
+            os.environ.get("FAKE_CLAUDE_SYNTHETIC_SUBTYPE", "success"),
             session_id="sess-synth",
             is_error=bool(os.environ.get("FAKE_CLAUDE_SYNTHETIC_GATED")),
         ))
