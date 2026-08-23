@@ -1514,7 +1514,6 @@ class Orchestrator:
             transition.failure_class.value
             if transition.failure_class else "unknown"
         )
-        tracker, _ = self._components()
         body = (
             f"**Switchboard stopped dispatching — `{failure}` on provider "
             f"`{transition.provider_id}`.**\n\n"
@@ -1525,6 +1524,10 @@ class Orchestrator:
             f"Most likely: the `claude` CLI needs a fresh login."
         )
         try:
+            # Resolved INSIDE the guard: `_components()` raises when the config
+            # is not loaded, and letting that escape would strand the notice as
+            # an unhandled task exception with the key still marked sent.
+            tracker, _ = self._components()
             ops_issue_id = await tracker.find_or_create_ops_issue()
             await tracker.add_issue_comment(ops_issue_id, body)
         except Exception as exc:  # noqa: BLE001 - notification must never fail a turn
