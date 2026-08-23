@@ -321,6 +321,9 @@ class Orchestrator:
         # issue #165: latch notices already posted, keyed by
         # (provider, generation) — one notice per latch, never per tick.
         self._latch_notices: set[tuple[str, int]] = set()
+        # Notices actually POSTED, so a later recovery can correct them
+        # (codex review on PR #166, round 9).
+        self._latch_notices_posted: set[tuple[str, int]] = set()
         # Strong refs for the fire-and-forget notice tasks: `_on_worker_done`
         # is a sync done-callback, so the post cannot be awaited inline, and
         # a bare create_task may be garbage-collected mid-flight.
@@ -1451,6 +1454,7 @@ class Orchestrator:
         exc = task.exception()
         if exc is None:
             transition = self._provider_circuit(entry.provider_id).record_success()
+            self._start_recovery_notice(transition)
             self._log_circuit_transition(transition, entry)
             self._schedule_retry(issue_id, entry.identifier, attempt=1,
                                  delay_ms=CONTINUATION_DELAY_MS)
@@ -1514,6 +1518,61 @@ class Orchestrator:
         self._latch_notice_tasks.add(task)
         task.add_done_callback(self._latch_notice_tasks.discard)
 
+    def _start_recovery_notice(self, transition: CircuitTransition | None) -> None:
+        """Correct a POSTED latch notice once the circuit recovers (issue #165,
+        codex review on PR #166, round 9).
+
+        A same-provider worker still in flight can succeed after the notice has
+        already been written, closing the circuit. The notice then stands as a
+        false "everything is stopped" — and in a wave-operated system the
+        operator reads it days later and restarts for nothing.
+
+        Round five declined this on the grounds that a correction is "a second
+        message about a non-event". That was wrong for this operating model:
+        when the reader arrives long after the fact, "stopped" followed by
+        "recovered" is a materially different message from a bare "stopped",
+        and the restart it prevents is the exact cost this notice exists to
+        avoid. AgDR-046 records the reversal.
+        """
+        if (transition is None
+                or transition.state is not CircuitState.CLOSED
+                or transition.previous_state is not CircuitState.OPEN_LATCHED):
+            return
+        posted = {k for k in self._latch_notices_posted
+                  if k[0] == transition.provider_id}
+        if not posted:
+            return
+        self._latch_notices_posted -= posted
+        task = asyncio.create_task(
+            self._notify_circuit_recovered(transition.provider_id))
+        # Shares the notice task set, so shutdown drains it on the same grace.
+        self._latch_notice_tasks.add(task)
+        task.add_done_callback(self._latch_notice_tasks.discard)
+
+    async def _notify_circuit_recovered(self, provider_id: str) -> None:
+        """Post the correction. Single attempt, and silent on failure.
+
+        Deliberately NOT retried like the latch notice: that notice is the only
+        signal a stopped system produces, so losing it strands the operator,
+        whereas losing a correction leaves them with a stale warning that at
+        worst costs one unnecessary restart. Retrying it would spend the
+        shutdown grace on the less important of the two messages.
+        """
+        body = (
+            f"**Recovered — `{provider_id}` is dispatching again.**\n\n"
+            f"A worker already in flight when the circuit latched completed "
+            f"successfully, which closed it. The outage notice above no longer "
+            f"applies and no restart is needed."
+        )
+        try:
+            tracker, _ = self._components()
+            if self._ops_issue_id is None:
+                return          # nothing was posted anywhere to correct
+            await tracker.add_issue_comment(self._ops_issue_id, body)
+        except Exception as exc:  # noqa: BLE001 - never fail a turn on this
+            log("recovery notice failed", provider_id=provider_id,
+                outcome="failed", error=str(exc))
+
     def _latch_still_open(self, transition: CircuitTransition) -> bool:
         """Is the circuit still latched in the generation this notice is about?"""
         circuit = self._provider_circuit(transition.provider_id)
@@ -1558,6 +1617,8 @@ class Orchestrator:
         if not self._latch_still_open(transition):
             return False
         await tracker.add_issue_comment(self._ops_issue_id, body)
+        self._latch_notices_posted.add(
+            (transition.provider_id, transition.generation))
         return True
 
     async def _notify_latched_circuit(

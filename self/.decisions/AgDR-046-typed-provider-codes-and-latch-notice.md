@@ -219,7 +219,32 @@ Three findings, all adopted; two changed the decision rather than the code.
   scope, for the third time. Resolution now reads the cached issue's state
   first, at one extra read per latch generation.
 
-**This is where the TOCTOU narrowing stops.** The comment round trip itself is
+### Ninth round (codex, PR #166) — a reversal
+
+- **A posted notice is corrected when the circuit recovers.** Round five
+  declined exactly this, on the grounds that a correction is "a second message
+  about a non-event". **That reasoning was wrong for this operating model**, and
+  the record corrects itself rather than defending the earlier call. Switchboard
+  runs in waves: the operator reads the ops log days later, so a standing
+  "everything is stopped" that was falsified minutes after it was written buys
+  precisely the unnecessary restart this notice exists to prevent. "Stopped"
+  followed by "recovered" is materially different information from a bare
+  "stopped" — it is not a second message about a non-event, it is the second
+  half of the first message.
+
+  The correction is single-attempt and silent on failure, deliberately unlike
+  the latch notice: the latch notice is the only signal a stopped system emits,
+  so losing it strands the operator, whereas losing a correction leaves a stale
+  warning costing at most one restart. Retrying it would spend the shutdown
+  grace on the less important of the two.
+
+  It fires only for notices actually POSTED — a latch that recovered before its
+  notice went out has nothing to correct, and the correction must never be the
+  first the operator hears of an outage that never reached them.
+
+**This is where the TOCTOU narrowing stops** *for the pre-post window.* The
+recovery correction above closes the post-post case that the irreducible window
+leaves behind, which is a different mechanism, not a further narrowing. The comment round trip itself is
 an irreducible window: GitHub offers no conditional write, so a latch that
 recovers while the mutation is in flight will always be able to produce one
 stale notice. Six rounds of review moved the check from "not present" to "the

@@ -4234,3 +4234,73 @@ async def test_a_closed_ops_issue_is_replaced_not_reused(tmp_path, monkeypatch) 
 
     assert tracker.ops_issues_created == 2          # a replacement was opened
     assert tracker.comments[-1][0] == "ops-issue-node-id-2"
+
+
+async def test_a_posted_notice_is_corrected_when_the_circuit_recovers(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 9. A same-provider worker still in flight
+    can succeed AFTER the notice is written, closing the circuit and leaving a
+    false "everything is stopped" standing. In a wave-operated system the
+    operator reads that days later and restarts for nothing."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    # A same-provider worker that was ALREADY RUNNING when the latch opened now
+    # finishes successfully. Driven through `_on_worker_done` rather than by
+    # calling the notice helper directly — the wiring is the thing under test.
+    other = make_issue(2)
+
+    async def _done():
+        return None
+
+    task = asyncio.create_task(_done())
+    await task
+    orch.running[other.id] = scheduler_mod.RunningEntry(
+        task=task, identifier=other.identifier, issue=other,
+        provider_id="claude", stall_timeout_ms=60000,
+        session_key=(other.id, "implement"),
+    )
+    orch._on_worker_done(other.id, task)
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    bodies = [b for t, b in tracker.comments if t == "ops-issue-node-id"]
+    assert len(bodies) == 2
+    assert "Recovered" in bodies[1] and "no restart is needed" in bodies[1]
+
+
+async def test_recovery_without_a_posted_notice_says_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    """A circuit that latched and recovered before its notice was ever posted
+    has nothing to correct — the correction must not be the first thing the
+    operator hears about an outage that never reached them."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    circuit = orch._provider_circuit("claude")
+    circuit._open_latched(FailureClass.PROVIDER_AUTHENTICATION)
+    issue = make_issue(2)
+
+    async def _done():
+        return None
+
+    task = asyncio.create_task(_done())
+    await task
+    orch.running[issue.id] = scheduler_mod.RunningEntry(
+        task=task, identifier=issue.identifier, issue=issue,
+        provider_id="claude", stall_timeout_ms=60000,
+        session_key=(issue.id, "implement"),
+    )
+    orch._on_worker_done(issue.id, task)
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
