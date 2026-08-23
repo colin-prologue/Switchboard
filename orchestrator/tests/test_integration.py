@@ -3957,3 +3957,66 @@ async def test_the_notice_hint_follows_the_failure_class(
     body = [b for t, b in tracker.comments if t == "ops-issue-node-id"][0]
     assert "out of credits" in body
     assert "login" not in body
+
+
+async def test_shutdown_drains_an_in_flight_latch_notice(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166. An operator restarts BECAUSE of a latch, so an
+    un-drained notice task loses the message explaining why — during the very
+    action it asks for."""
+    released = asyncio.Event()
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    real_comment = tracker.add_issue_comment
+
+    async def slow_comment(issue_id, body):
+        await released.wait()
+        await real_comment(issue_id, body)
+
+    tracker.add_issue_comment = slow_comment
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: bool(orch._latch_notice_tasks))
+    released.set()
+    await orch.shutdown()
+
+    assert [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+
+
+async def test_a_retry_never_resolves_a_second_ops_issue(
+    tmp_path, monkeypatch
+) -> None:
+    """`find_or_create_ops_issue` is not idempotent under a lost response, so
+    the id is resolved once and reused: a retry must not be able to create a
+    second ops log."""
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_RETRY_MS", 1)
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    calls = {"n": 0}
+    real_comment = tracker.add_issue_comment
+
+    async def flaky_comment(issue_id, body):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise TrackerError("comment flaked")
+        await real_comment(issue_id, body)
+
+    tracker.add_issue_comment = flaky_comment
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    assert calls["n"] == 3                  # the comment was retried
+    assert tracker.ops_issue_calls == 1     # the ops issue was resolved ONCE
+    assert tracker.ops_issues_created == 1

@@ -564,7 +564,15 @@ class Orchestrator:
         # teardowns, bounded: a wedged hook must not hold SIGTERM hostage for
         # hooks.timeout_ms. Past the grace, a second cancel interrupts the hook
         # await, and _run_hook kills the hook's process group on the way out.
-        pending = {e.task for e in self.running.values()} | set(self.terminating.values())
+        # The latch notice is drained too (codex review on PR #166): an
+        # operator restarts BECAUSE of a latch, so the un-drained case loses
+        # precisely the message explaining why — during the very action it asks
+        # for. Same bounded grace: it must not hold SIGTERM open either.
+        pending = (
+            {e.task for e in self.running.values()}
+            | set(self.terminating.values())
+            | set(self._latch_notice_tasks)
+        )
         if pending:
             _, not_done = await asyncio.wait(
                 pending, timeout=SHUTDOWN_TEARDOWN_GRACE_MS / 1000)
@@ -1545,22 +1553,33 @@ class Orchestrator:
         # call this again — un-marking the key retries nothing (codex review on
         # PR #166). The retry has to happen here or the notice is lost for the
         # life of the process, which is the silent drop this change removes.
+        # Resolved once and REUSED across attempts (codex review on PR #166):
+        # `find_or_create_ops_issue` is not idempotent under a lost response, so
+        # re-resolving on every retry risks a second ops issue — a duplicate of
+        # the durable thing rather than of one comment. The residual duplicate
+        # COMMENT is accepted and documented in AgDR-046: a notice posted twice
+        # is cosmetic, a notice lost is the defect this exists to remove.
+        ops_issue_id: str | None = None
         for attempt in range(1, LATCH_NOTICE_ATTEMPTS + 1):
             try:
                 # Resolved INSIDE the guard: `_components()` raises when the
                 # config is not loaded, and letting that escape would strand the
                 # notice as an unhandled task exception.
                 tracker, _ = self._components()
-                ops_issue_id = await tracker.find_or_create_ops_issue()
+                if ops_issue_id is None:
+                    ops_issue_id = await tracker.find_or_create_ops_issue()
                 await tracker.add_issue_comment(ops_issue_id, body)
                 return
             except Exception as exc:  # noqa: BLE001 - never fail a turn on this
                 log("latch notice failed", provider_id=transition.provider_id,
                     outcome="failed", attempt=attempt, error=str(exc))
-                if attempt == LATCH_NOTICE_ATTEMPTS:
+                if attempt == LATCH_NOTICE_ATTEMPTS or self._stopping:
                     # Give the key back so a LATER generation (after an operator
                     # restart re-closes and re-opens the circuit) is not silenced
-                    # by this one's bookkeeping.
+                    # by this one's bookkeeping. `_stopping` short-circuits the
+                    # wait: the process is going down, so sleeping out the
+                    # backoff only spends the shutdown grace on a retry that
+                    # will never run.
                     self._latch_notices.discard(key)
                     return
                 await asyncio.sleep(LATCH_NOTICE_RETRY_MS / 1000)

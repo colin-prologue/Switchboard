@@ -139,6 +139,28 @@ Three findings, all adopted; two changed the decision rather than the code.
   being told the Claude CLI needed a fresh login — an operational instruction
   pointing at the wrong credential while every project stayed stopped.
 
+### Second round (codex, PR #166)
+
+- **Shutdown drains the notice task.** An operator restarts *because* of a
+  latch, so an un-drained task loses the message explaining why — during the
+  very action the message asks for. Added to the same bounded grace as workers
+  and teardowns, and the retry backoff short-circuits on `_stopping` rather than
+  sleeping out a wait that will never complete.
+- **The ops issue is resolved once and reused across retries.**
+  `find_or_create_ops_issue` is not idempotent under a lost response, so
+  re-resolving per attempt risked a second *ops issue* — duplicating the durable
+  thing, not just a comment.
+
+**Accepted residual: a latch notice can post twice.** `addComment` is
+non-idempotent, so a lost response followed by a retry can produce two identical
+notices. Codex proposed a durable client key plus read-before-retry. Rejected as
+disproportionate: the ops log is read by one operator after a wave, a duplicated
+notice costs them a second of confusion, and a *lost* notice costs them the
+whole wave — which is the failure this record exists to remove. The one-notice
+contract is therefore narrowed, on purpose, to "exactly one notice per circuit
+generation **when GitHub answers**". If the ops log ever grows a consumer that
+counts notices, this trade has to be revisited before that consumer ships.
+
 ## Blast radius
 
 Claude runner only; codex untouched. `_CLAUDE_CODES` gains two entries that
