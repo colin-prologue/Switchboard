@@ -242,6 +242,16 @@ Three findings, all adopted; two changed the decision rather than the code.
   notice went out has nothing to correct, and the correction must never be the
   first the operator hears of an outage that never reached them.
 
+### Tenth round (codex, PR #166)
+
+- **A correction goes to the issue its notice landed in.** Round nine read
+  `_ops_issue_id` at correction time, but round eight made that id rotate when
+  an operator closes the log — so under `mixed`, a correction for provider A
+  could land in the replacement issue opened for provider B, while A's stale
+  warning stood in the original. The ops issue id is now stored per posted
+  notice. Two independently-correct changes composing into a wrong result, one
+  round apart.
+
 **This is where the TOCTOU narrowing stops** *for the pre-post window.* The
 recovery correction above closes the post-post case that the irreducible window
 leaves behind, which is a different mechanism, not a further narrowing. The comment round trip itself is

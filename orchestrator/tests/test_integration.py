@@ -4304,3 +4304,49 @@ async def test_recovery_without_a_posted_notice_says_nothing(
     await wait_for(lambda: not orch._latch_notice_tasks)
 
     assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+
+
+async def test_a_correction_goes_to_the_issue_its_notice_landed_in(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 10. The ops issue rotates when an operator
+    closes it. A correction that trusted the CURRENT id would land in an issue
+    the outage notice it corrects never appeared in — leaving the stale warning
+    standing exactly where someone will read it."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    # Operator closes the log; a second provider latches into a fresh one.
+    tracker.close_ops_issue()
+    entry = next(iter(orch.provider_waiting.values()))
+    codex = orch._provider_circuit("codex")
+    t2 = codex._open_latched(FailureClass.PROVIDER_AUTHENTICATION)
+    await orch._notify_latched_circuit(t2, entry, ("codex", codex.generation))
+    assert tracker.ops_issues_created == 2
+
+    # Now the in-flight CLAUDE worker succeeds: its correction belongs in the
+    # ORIGINAL issue, where its outage notice is.
+    other = make_issue(2)
+
+    async def _done():
+        return None
+
+    task = asyncio.create_task(_done())
+    await task
+    orch.running[other.id] = scheduler_mod.RunningEntry(
+        task=task, identifier=other.identifier, issue=other,
+        provider_id="claude", stall_timeout_ms=60000,
+        session_key=(other.id, "implement"),
+    )
+    orch._on_worker_done(other.id, task)
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    corrections = [t for t, b in tracker.comments if "Recovered" in b]
+    assert corrections == ["ops-issue-node-id"]

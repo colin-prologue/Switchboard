@@ -321,9 +321,14 @@ class Orchestrator:
         # issue #165: latch notices already posted, keyed by
         # (provider, generation) — one notice per latch, never per tick.
         self._latch_notices: set[tuple[str, int]] = set()
-        # Notices actually POSTED, so a later recovery can correct them
-        # (codex review on PR #166, round 9).
-        self._latch_notices_posted: set[tuple[str, int]] = set()
+        # Notices actually POSTED, mapped to the ops issue each one LANDED IN
+        # (codex review on PR #166, rounds 9 and 10). The id is stored per
+        # notice rather than read from `_ops_issue_id` at correction time: the
+        # ops issue rotates when an operator closes it, so a correction that
+        # trusted the current id could land in an issue the outage notice it
+        # corrects never appeared in — leaving the stale warning standing where
+        # someone will actually read it.
+        self._latch_notices_posted: dict[tuple[str, int], str] = {}
         # Strong refs for the fire-and-forget notice tasks: `_on_worker_done`
         # is a sync done-callback, so the post cannot be awaited inline, and
         # a bare create_task may be garbage-collected mid-flight.
@@ -1538,18 +1543,24 @@ class Orchestrator:
                 or transition.state is not CircuitState.CLOSED
                 or transition.previous_state is not CircuitState.OPEN_LATCHED):
             return
-        posted = {k for k in self._latch_notices_posted
-                  if k[0] == transition.provider_id}
+        posted = [k for k in self._latch_notices_posted
+                  if k[0] == transition.provider_id]
         if not posted:
             return
-        self._latch_notices_posted -= posted
+        # Correct the issue the notice actually landed in, not whichever one is
+        # current now (round 10).
+        target = self._latch_notices_posted[posted[-1]]
+        for key in posted:
+            del self._latch_notices_posted[key]
         task = asyncio.create_task(
-            self._notify_circuit_recovered(transition.provider_id))
+            self._notify_circuit_recovered(transition.provider_id, target))
         # Shares the notice task set, so shutdown drains it on the same grace.
         self._latch_notice_tasks.add(task)
         task.add_done_callback(self._latch_notice_tasks.discard)
 
-    async def _notify_circuit_recovered(self, provider_id: str) -> None:
+    async def _notify_circuit_recovered(
+        self, provider_id: str, ops_issue_id: str
+    ) -> None:
         """Post the correction. Single attempt, and silent on failure.
 
         Deliberately NOT retried like the latch notice: that notice is the only
@@ -1566,9 +1577,7 @@ class Orchestrator:
         )
         try:
             tracker, _ = self._components()
-            if self._ops_issue_id is None:
-                return          # nothing was posted anywhere to correct
-            await tracker.add_issue_comment(self._ops_issue_id, body)
+            await tracker.add_issue_comment(ops_issue_id, body)
         except Exception as exc:  # noqa: BLE001 - never fail a turn on this
             log("recovery notice failed", provider_id=provider_id,
                 outcome="failed", error=str(exc))
@@ -1617,8 +1626,8 @@ class Orchestrator:
         if not self._latch_still_open(transition):
             return False
         await tracker.add_issue_comment(self._ops_issue_id, body)
-        self._latch_notices_posted.add(
-            (transition.provider_id, transition.generation))
+        self._latch_notices_posted[
+            (transition.provider_id, transition.generation)] = self._ops_issue_id
         return True
 
     async def _notify_latched_circuit(
