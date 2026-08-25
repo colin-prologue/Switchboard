@@ -265,6 +265,28 @@ query($threadId: ID!, $cursor: String) {
 }
 """
 
+# issue #165: the ops log. Identified by TITLE, not by a label — a label would
+# have to be resolved (and created when absent) before the issue can be made,
+# and the whole point of this path is that it works with no prior setup on a
+# repo the operator has walked away from. An issue with no `status:*` label
+# normalizes to state "none" (`normalize_status_state`), which is in no stance's
+# active set, so the ops log is never dispatched to an agent.
+OPS_ISSUE_TITLE = "Switchboard ops log"
+
+REPOSITORY_ID_QUERY = """
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) { id }
+}
+"""
+
+CREATE_ISSUE_MUTATION = """
+mutation($repositoryId: ID!, $title: String!, $body: String!) {
+  createIssue(input: {repositoryId: $repositoryId, title: $title, body: $body}) {
+    issue { id number }
+  }
+}
+"""
+
 LABEL_ID_QUERY = """
 query($owner: String!, $name: String!, $label: String!) {
   repository(owner: $owner, name: $name) {
@@ -498,6 +520,44 @@ class GitHubTracker:
         extension that needs a single write path).
         """
         await self._request(ADD_COMMENT_MUTATION, {"subjectId": issue_id, "body": body})
+
+    async def find_or_create_ops_issue(self) -> str:
+        """Node id of this repo's ops log, creating it if absent (issue #165).
+
+        A latched provider circuit is the one condition that stops ALL work and
+        cannot clear itself — Switchboard is used in waves, so the operator may
+        be a week from reading a terminal. This is the out-of-band channel that
+        reaches them, and like `add_issue_comment` it is a sanctioned exception
+        to the core §11.5 no-tracker-writes boundary.
+
+        Find-or-create rather than configured: a notice that silently goes
+        nowhere when a project skipped its setup is the failure mode this whole
+        change exists to remove.
+        """
+        owner, name = self._split_repo()
+        raw_issues = await self._paginate(
+            CANDIDATE_ISSUES_QUERY, {"owner": owner, "name": name, "states": ["OPEN"]}
+        )
+        for raw in raw_issues:
+            issue = self._normalize_issue(raw)
+            if issue.title.strip() == OPS_ISSUE_TITLE:
+                return issue.id
+        repo = await self._request(REPOSITORY_ID_QUERY, {"owner": owner, "name": name})
+        created = await self._request(
+            CREATE_ISSUE_MUTATION,
+            {
+                "repositoryId": repo["repository"]["id"],
+                "title": OPS_ISSUE_TITLE,
+                "body": (
+                    "Switchboard posts operator-facing notices here — conditions "
+                    "that stop work and that only a human can clear.\n\n"
+                    "This issue carries no `status:*` label on purpose, so the "
+                    "orchestrator never dispatches it. Closing it is safe; the "
+                    "next notice opens a new one."
+                ),
+            },
+        )
+        return created["createIssue"]["issue"]["id"]
 
     async def update_issue_body(self, issue_id: str, body: str) -> None:
         """Replace an issue's body (issue #126: the fold apply step).

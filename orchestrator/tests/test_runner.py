@@ -575,3 +575,152 @@ async def test_no_agent_token_inherits_orchestrator_env(
     assert result.status == "succeeded"
     seen = json.loads(env_file.read_text())
     assert seen == {"GITHUB_TOKEN": "operator-token", "GH_TOKEN": None}
+
+
+# --- issue #165: typed provider codes on CLI-authored synthetic records ------
+
+
+async def test_synthetic_auth_code_latches_even_when_the_gate_claims_it(
+    workspace: Path, monkeypatch
+) -> None:
+    """OAuth expiry: prose no `_TEXT_PATTERNS` entry matches, but the synthetic
+    record carries `error: "authentication_failed"`. The typed code decides."""
+    monkeypatch.setenv("FAKE_SCENARIO", "synthetic_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_GATED", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_CODE", "authentication_failed")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION
+
+
+async def test_synthetic_auth_code_fails_the_turn_when_the_gate_does_not(
+    workspace: Path, monkeypatch
+) -> None:
+    """The `is_error`-absent shape. AgDR-032's gate never claims this record,
+    so before #165 it returned `succeeded` — spending a session and RESETTING
+    the circuit on a turn that did no work."""
+    monkeypatch.setenv("FAKE_SCENARIO", "synthetic_error")
+    monkeypatch.delenv("FAKE_CLAUDE_SYNTHETIC_GATED", raising=False)
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_CODE", "authentication_failed")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION
+
+
+async def test_synthetic_server_error_is_transient_not_latched(
+    workspace: Path, monkeypatch
+) -> None:
+    """`server_error` must reach a TRANSIENT class: latching a 5xx would take
+    the provider down until an operator intervenes (AgDR-032 rejected exactly
+    that outcome when it declined a blanket `is_error` rule)."""
+    monkeypatch.setenv("FAKE_SCENARIO", "synthetic_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_CODE", "server_error")
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_SYNTHETIC_TEXT",
+        "API Error: Connection closed mid-response. The response above may be incomplete.",
+    )
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_class is FailureClass.PROVIDER_UNAVAILABLE
+
+
+async def test_a_recovered_synthetic_error_does_not_fail_the_turn(
+    workspace: Path, monkeypatch
+) -> None:
+    """The standing code is cleared by any REAL model turn after it. A blip the
+    CLI retried through must not fail work that actually landed."""
+    monkeypatch.setenv("FAKE_SCENARIO", "synthetic_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_CODE", "server_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_RECOVERED", "1")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "succeeded"
+    assert result.failure_class is None
+
+
+async def test_a_non_synthetic_record_claiming_a_provider_code_is_ignored(
+    workspace: Path, monkeypatch
+) -> None:
+    """The trust boundary AgDR-032 drew, kept: `model: "<synthetic>"` is what
+    makes the code CLI-authored. A real model turn carrying the same field must
+    not be able to latch the provider and win itself free retries."""
+    monkeypatch.setenv("FAKE_SCENARIO", "spoofed_provider_code")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "succeeded"
+    assert result.failure_class is None
+
+
+async def test_synthetic_code_reaches_the_general_failure_branch(
+    workspace: Path, monkeypatch
+) -> None:
+    """Codex review on PR #166. A synthetic provider error followed by a
+    terminal record with a FAILURE subtype took neither the `is_error` gate nor
+    the success branch, so it classified on the subtype alone — WORKER_FAILURE,
+    budget spent, circuit never opened. The same defect this ticket fixes, on
+    the one branch the first pass did not reach."""
+    monkeypatch.setenv("FAKE_SCENARIO", "synthetic_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_CODE", "authentication_failed")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_SUBTYPE", "error_during_execution")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_class is FailureClass.PROVIDER_AUTHENTICATION
+
+
+async def test_a_standing_provider_error_survives_a_stream_that_never_finishes(
+    workspace: Path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 7. A stream carrying a trusted synthetic
+    provider error that then closes WITHOUT a terminal result is the likeliest
+    shape of an abrupt transport failure — one of the two conditions this ticket
+    exists for. `RUNNER_PROTOCOL` is not a circuit class, so classifying it that
+    way charges the issue's budget and leaves the circuit closed: the production
+    failure, on the one path with no terminal record to read."""
+    monkeypatch.setenv("FAKE_SCENARIO", "synthetic_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_CODE", "server_error")
+    monkeypatch.setenv("FAKE_CLAUDE_SYNTHETIC_NO_RESULT", "1")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_class is FailureClass.PROVIDER_UNAVAILABLE
+    assert result.error == "server_error"
+
+
+async def test_an_unclassified_stream_end_is_still_a_protocol_error(
+    workspace: Path, monkeypatch
+) -> None:
+    """The fallback is narrowed, not replaced: a stream that ends with no
+    result and no standing provider error stays `port_exit`/RUNNER_PROTOCOL."""
+    monkeypatch.setenv("FAKE_SCENARIO", "no_result")
+
+    result = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-165"
+    )
+
+    assert result.status == "failed"
+    assert result.failure_class is FailureClass.RUNNER_PROTOCOL
