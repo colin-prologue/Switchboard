@@ -489,6 +489,12 @@ tracker:
   api_key: "test-token"
   active_states: ["todo", "in progress"]
   terminal_states: ["done", "closed", "cancelled"]
+  # Mirrors WORKFLOW.base.md (issue #52). The harness declared no gates at all,
+  # so every gate-state issue in every test read as a label nobody defined —
+  # invisible only because the sanity check was inert. A harness config that
+  # diverges from the stance it stands in for is how a wiring bug like this
+  # hides: `test_board_sanity.py` was green throughout.
+  gate_states: ["drafting", "plan review", "decision", "blocked", "human review"]
 polling:
   interval_ms: 100
 workspace:
@@ -4369,3 +4375,32 @@ async def test_a_correction_goes_to_the_issue_its_notice_landed_in(
 
     corrections = [t for t, b in tracker.comments if "Recovered" in b]
     assert corrections == ["ops-issue-node-id"]
+
+
+# --- issue #52 wiring: the sanity check must actually run in a tick ----------
+
+
+async def test_board_sanity_runs_against_the_tracker_config_in_a_real_tick(
+    tmp_path, monkeypatch
+) -> None:
+    """`report_board_state` takes a `TrackerConfig`, and `_tick` had been
+    handing it the whole `Config` — so `find_invalid_states` raised
+    `AttributeError` on EVERY issue and the "never raises" contract swallowed it
+    into a per-issue log line. The check was inert in production while all of
+    `test_board_sanity.py` passed, because those fixtures call `.tracker()`
+    themselves.
+
+    Nothing had driven the check through the scheduler. This does.
+    """
+    orch, tracker, _, _ = _build_harness(tmp_path, monkeypatch)
+    bogus = make_issue(1, "todo")
+    bogus.labels = ["status:not-a-real-state"]     # no stance defines this
+    bogus.state = "not a real state"
+    tracker.candidates = [bogus]
+    tracker.states[bogus.id] = bogus
+
+    await orch._tick()
+
+    reports = [b for i, b in tracker.comments if i == bogus.id]
+    assert reports, "the board-state report was never posted"
+    assert "status:not-a-real-state" in reports[0]
