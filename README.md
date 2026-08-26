@@ -164,7 +164,15 @@ the complete contract and rationale.
 
 ### Choosing the entry state (proportionality)
 
-The path a ticket takes *is* the risk control — match it to the risk:
+**This section describes `base`.** Entry states are only meaningful where the
+stance dispatches them, and `prototype` — the `register-project.sh` default —
+dispatches only `todo`, `in progress` and `review`. On a `prototype` project the
+choice below collapses: file at `--entry todo`, because `triage` and `drafting`
+are states nothing there will move. Issue #176 tracks making the tools enforce
+this rather than the reader remembering it.
+
+With that said, at `base` the path a ticket takes *is* the risk control — match
+it to the risk:
 
 - **Trivial / low-risk** (one-line fix, typo, config bump) with already-bounded,
   checkable criteria → file straight at `--entry todo`. Forcing triage onto a
@@ -173,7 +181,8 @@ The path a ticket takes *is* the risk control — match it to the risk:
   verification; an unstamped `status:todo` is refused by the dispatch guard.)
 - **New, author-fresh, or uncertain** — criteria smell unbounded
   ("all/every/comprehensive"), assumptions unstated, size unclear → file at
-  `--entry triage` (the default). A verifier session adversarially reviews the
+  `--entry triage` (the default) **on a `base` project**. A verifier session
+  adversarially reviews the
   ticket and routes it: **PASS** → `todo`; **NEEDS WORK** → back to `drafting`
   with a `## Triage verdict` comment; **SPLIT** → child issues with blocked-by
   chaining. An unverified contract can burn a whole implementation session;

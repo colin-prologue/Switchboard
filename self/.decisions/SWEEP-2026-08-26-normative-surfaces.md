@@ -114,16 +114,27 @@ the canary retirement (#155). `SETUP.md`'s claim that a restart refunds each
 issue's session budget is accurate and load-bearing — it was observed twice on
 2026-08-25/26.
 
-This matters for calibrating the next sweep: doc drift here was **not** general.
-It was one file that fell out of a propagation set, which is a cheaper problem to
-watch for than "the docs rot".
+> ~~This matters for calibrating the next sweep: doc drift here was **not**
+> general. It was one file that fell out of a propagation set, which is a cheaper
+> problem to watch for than "the docs rot".~~
+>
+> **Withdrawn 2026-08-26** — see the corrections above. Struck rather than
+> deleted, per the supersession rule: what was believed, and why it changed, is
+> what makes the next conflict legible. It was wrong in both directions — two
+> files fell out of the set, not one, and README's defects were found only by
+> three successive rounds of adversarial review.
 
 ## What follows
 
-- The cheap invariant this suggests: when a change updates the state machine,
-  `SPEC.md` is in the propagation set with `METHODOLOGY.md`, `README.md` and
-  `SETUP.md`. Three of four were updated every time; the fourth was never
-  updated once.
-- Whether that becomes a checklist item, a test, or nothing is deliberately left
-  open. Both sweeps now argue that anything depending on *remembering* fails the
-  same way — and a fourth item on a list is a memory aid.
+- **Two of four** normative surfaces fell out of the 2026-08-15 propagation set,
+  not one: `SPEC.md` and `README.md`. `METHODOLOGY.md` and `SETUP.md` were
+  updated. A propagation checklist is therefore a *four*-item memory aid, which
+  both sweeps argue will fail the same way.
+- The thing that actually worked is not in this record's method at all. Every
+  README defect — including the one with a user-facing consequence (#176) — was
+  found by **adversarial re-reading by a party who was not the author**, over
+  three successive rounds, after this sweep had declared the file clean. Two of
+  those rounds found defects the sweep itself had just introduced.
+- So the honest recommendation is *not* "adopt the sweep procedure". It is that a
+  single pass by a single reader reproduces the defect class it is hunting.
+  Whatever gets encoded should be about who reads, not about what list they hold.
