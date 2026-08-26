@@ -130,6 +130,35 @@ That makes four separate facts on which `METHODOLOGY.md` was right and
 `SPEC.md` was wrong. The two documents have been diverging for at least two
 months with nothing comparing them.
 
+## Fourth correction — the named authority was itself incomplete
+
+An eighth finding, and a direct consequence of the seventh's fix. Pointing
+`SPEC.md` at `METHODOLOGY.md`'s who-writes-what table as *the authority*
+promoted an incomplete table to authority. It omitted two orchestrator-owned
+writes, both verified in code:
+
+- `status:human-review → status:todo` — the review-response trigger
+  (`scheduler.py`, issue #43 / AgDR-037);
+- `status:drafting → status:triage` — the fold apply step
+  (`fold_apply.py`, issue #126 / AgDR-035).
+
+And it carried a stale parenthetical: the `decision → drafting` row read
+"(manual until #51)", implying a pending ticket. #51 and #126 both shipped, and
+`fold_apply` *deliberately declines* the decision state — `decision → triage` is
+illegal and a NEEDS-DECISION verdict predates the operator's answer, so it
+carries no proposal. That path is manual **by design**, not by omission. All
+three corrected.
+
+**This is the most instructive finding in the record.** `METHODOLOGY.md` was
+right about four facts `SPEC.md` got wrong — so the natural remedy was to name
+it authoritative. Doing that without auditing it first made a partially-correct
+document load-bearing, which is a worse failure than the divergence it was
+meant to end: a reader tracing which component may mutate a ticket would now be
+confidently wrong rather than uncertain.
+
+Promoting a source to authority is itself a change that needs verification.
+Nothing in either sweep's method asked for that.
+
 ## Not found
 
 No stale scripts, flags, config values, or state vocabulary in `SETUP.md` or

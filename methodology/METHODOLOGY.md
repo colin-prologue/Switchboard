@@ -51,9 +51,11 @@ has.
 | `status:drafting`, `status:plan-review`, `status:blocked` | **humans** | authoring/approving at the gates |
 | `status:triage` → `status:todo` \| `status:drafting`      | the **triage verifier agent** | on its PASS / NEEDS WORK / SPLIT verdict |
 | `status:triage` → `status:decision`             | the **triage verifier agent** | on its NEEDS DECISION verdict (issue #55) — the ticket is blocked on an unmade human decision |
-| `status:decision` → `status:drafting`           | **humans** | the operator picked an option; the answer is folded into the body at drafting (manual until #51) |
+| `status:decision` → `status:drafting`           | **humans** | the operator picked an option; the answer is folded into the body at drafting. **Manual by design, not pending** — #51/#126 shipped and `fold_apply` explicitly declines this state (`decision → triage` is illegal, and a NEEDS-DECISION verdict predates the answer so it carries no proposal) |
 | the stance's `handoff_label` — `status:human-review` by default, `status:review` at `prototype` | the **orchestrator** | after provider-turn success + validated handoff evidence (issue #61 / AgDR-028; workers only write `.run/handoff-evidence.json`). The *target* is config (AgDR-039); the validation before writing it is unchanged |
 | `status:review` → `status:todo` \| `status:human-review` | the **QA agent** | on its FIX verdict (back for another pass) or ESCALATE (something on the escalation list, or a finding surviving two rounds). On SHIP it merges and writes no label — the merge closes the issue |
+| `status:human-review` → `status:todo` | the **orchestrator** | review-response trigger: a PR on a handed-off issue owes a bot reply, so the issue is re-dispatched for a response round (issue #43 / AgDR-037; `scheduler.py`). Session counters reset with it |
+| `status:drafting` → `status:triage` | the **orchestrator** | fold apply: the operator approved a triage verdict, the body was rewritten under a base-sha1 CAS, and the ticket goes back for re-triage (issue #126 / AgDR-035; `fold_apply.py`) |
 | `status:todo` → `status:in-progress`, its revert, and `status:parked` | the **orchestrator** | claim taken / claim died / session cap |
 
 `status:in-progress` is **board visibility only, not a lock** — a label cannot
