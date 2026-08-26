@@ -7,8 +7,11 @@ in its own workspace; agents hand finished work back as PRs.
 **Humans always own intent. Who owns *review* is the project's choice** — that
 is what a stance is (AgDR-039/AgDR-043). At `base`, every PR is handed to a human
 to merge. At `prototype` — the `register-project.sh` default — Gate C goes to an
-agent reviewer that may merge on a SHIP verdict and escalates to a human only on
-its escalation list. Pick deliberately; `SETUP.md` has the stance table, and
+agent reviewer that may merge on a SHIP verdict. It escalates to a human on three
+conditions: content on its escalation list, a finding that survives two rounds,
+or — where a cross-model review bot is configured — that bot's review being
+absent, stale, or pending for the current head sha (it fails closed). Pick
+deliberately; `SETUP.md` has the stance table, and
 `--self` defaults to `base` for exactly this reason (#153).
 
 Concretely, it is three things:
