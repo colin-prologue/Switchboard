@@ -100,6 +100,25 @@ on Codex (#135) — but Codex is unused, so no action now.
 `AgDR-046` was written hours before this sweep by the same author. Its rejections
 need a reader who is not me.
 
+## Postscript — the sweep PR repeated the defect it documents
+
+Codex review of this sweep found that `spec/SPEC.md` §1 — which declares itself
+authoritative for orchestrator bindings — still carried `max_turns: 100` after
+three workflow files had been changed to 20. A PR about constraints recorded in
+one place and never propagated, failing to propagate.
+
+Re-reading that section for the same class turned up a second: its
+turn-classification row still described `AgDR-032`'s mechanism (classify over
+`result` / `terminal_reason`) hours after `AgDR-046` replaced it with typed codes
+on synthetic records. Both fixed here.
+
+Neither was found by the sweep, because the sweep read `self/.decisions/` and
+these live in `spec/`. **The next sweep should include the normative surfaces —
+`spec/SPEC.md`, `methodology/METHODOLOGY.md`, `README.md`, `SETUP.md` — not just
+the decision records.** A rejection that decays is a stale belief; a spec that
+decays is a stale instruction, which is worse, because something downstream
+implements it.
+
 ## What follows
 
 1. `claude.max_turns` restored to 20 — done here.
