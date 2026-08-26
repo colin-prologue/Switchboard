@@ -781,7 +781,8 @@ class Orchestrator:
         # can do (a slow comment fetch, an unexpected raise) may delay or block
         # the work the tick exists to start.
         await report_board_state(
-            open_issues, cfg, tracker, reported=self._board_sanity_reported)
+            open_issues, cfg.tracker(), tracker,
+            reported=self._board_sanity_reported)
 
         await self._poll_fold_signals(tracker)
         await self._poll_review_responses(tracker)
