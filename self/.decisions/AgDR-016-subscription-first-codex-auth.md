@@ -36,6 +36,23 @@ expectations.
 
 ## Rejected options (steelmanned)
 
+### Amendment 2026-08-26 — one rejection violated, one revisit condition fired
+
+**Violated.** "Treat subscription limits as ordinary retries" was rejected
+because *"repeated retries consume session caps without making progress and hide
+an operator-level capacity problem as an issue-level failure."* That is the same
+invariant `AgDR-026` states, reached independently — and it is what issue #165
+did to civ-life #8. Now pinned by
+`test_a_provider_outage_never_consumes_issue_allowance`.
+
+**Revisit condition fired.** The first rejection names its own: API-key billing
+*"remains the likely production path if subscription limits are operationally
+constraining."* Claude OAuth lapsed under 24h unattended (civ-life #8
+transcripts, 2026-08-17/18/19), which is that constraint biting on the Claude
+side. Not acted on here; recorded so it is not found a third time.
+
+Found by the SWEEP-2026-08-26-rejection-rationale.md sweep.
+
 - **Require API-key billing from the first Codex test.** This gives explicit
   metering, service-oriented credentials, and clearer cost ownership. Rejected
   for the canary because it expands setup and secret-management scope before

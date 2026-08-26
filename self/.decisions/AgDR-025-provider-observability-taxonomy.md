@@ -125,6 +125,21 @@ Slice 1 implementation requires:
 - **Implement circuit breaking in the same slice.** This would make scheduler
   behavior depend on a new classifier before its false-positive boundary has
   independent review and regression evidence.
+### Amendment 2026-08-26 — one rejection was violated, one superseded
+
+**Violated.** "Use exception or log-message strings as policy" is exactly what
+`_TEXT_PATTERNS` does. The rejection was right: issue #165 was an OAuth-expiry
+wording no pattern matched, classified `worker_failure`, and it cost a wave.
+`AgDR-046` moves classification to typed CLI codes and keeps the patterns only as
+a fallback — restoring this rejection rather than overturning it.
+
+**Superseded.** "Post issue comments for every provider failure" is now done by
+`AgDR-046`, which defeated both clauses of the rationale: edge-triggered per
+circuit generation (no per-retry noise) and posted to a dedicated ops issue (not
+on the work item). Recorded here because the supersession was silent.
+
+Both found by the SWEEP-2026-08-26-rejection-rationale.md sweep.
+
 - **Use exception or log-message strings as policy.** Human-readable text is
   not a stable machine contract and may contain provider detail that should not
   be promoted into scheduler state.

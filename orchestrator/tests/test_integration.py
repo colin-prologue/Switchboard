@@ -4404,3 +4404,80 @@ async def test_board_sanity_runs_against_the_tracker_config_in_a_real_tick(
     reports = [b for i, b in tracker.comments if i == bogus.id]
     assert reports, "the board-state report was never posted"
     assert "status:not-a-real-state" in reports[0]
+
+
+# --- AgDR-026's invariant, pinned end to end (sweep finding 3) ---------------
+#
+# "A provider outage is shared infrastructure state and must not consume issue
+# allowance." That sentence has been in AgDR-026's REJECTED-options section
+# since July, protected by nothing. Issue #165 violated it for five sessions on
+# civ-life #8 and parked the ticket.
+#
+# The tests that looked like they covered it did not: they construct a
+# `TurnResult` with `failure_class=PROVIDER_AUTHENTICATION` already set, so they
+# pin the accountant (given a provider class, refund) while stubbing out the
+# sensor (does a real stream produce that class?). #165 lived in the seam.
+#
+# These drive a REAL `ClaudeRunner` over the fake CLI's real captured shapes, so
+# classification, the circuit, and the refund are all live in one assertion.
+
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+from orchestrator.runner import ClaudeRunner as _ClaudeRunner  # noqa: E402
+from orchestrator.types import ClaudeConfig as _ClaudeConfig  # noqa: E402
+
+_FAKE_CLI = str(_Path(__file__).resolve().parent / "fake_claude.py")
+
+
+def _real_runner_over_fake_cli() -> _ClaudeRunner:
+    runner = _ClaudeRunner(_ClaudeConfig(
+        command=f"{_sys.executable} {_FAKE_CLI}",
+        max_turns=5,
+        max_budget_usd=None,
+        turn_timeout_ms=3600000,
+        read_timeout_ms=5000,
+        stall_timeout_ms=300000,
+    ))
+    runner.provider_id = "claude"
+    return runner
+
+
+@pytest.mark.parametrize(
+    ("scenario", "env", "expect_latched"),
+    [
+        # The real logged-out capture, replayed byte for byte.
+        ("replay_fixture", {"FAKE_CLAUDE_FIXTURE": str(
+            _Path(__file__).resolve().parent / "fixtures"
+            / "claude_cli_auth_logged_out.jsonl")}, True),
+        # OAuth expiry — the wording that cost civ-life #8 five sessions.
+        ("synthetic_error", {"FAKE_CLAUDE_SYNTHETIC_CODE": "authentication_failed",
+                             "FAKE_CLAUDE_SYNTHETIC_GATED": "1"}, True),
+        # Transient transport drop: refunded too, but must NOT latch.
+        ("synthetic_error", {"FAKE_CLAUDE_SYNTHETIC_CODE": "server_error"}, False),
+    ],
+)
+async def test_a_provider_outage_never_consumes_issue_allowance(
+    tmp_path, monkeypatch, scenario, env, expect_latched
+) -> None:
+    """AgDR-026, end to end: real stream -> classification -> circuit -> refund."""
+    monkeypatch.setenv("FAKE_SCENARIO", scenario)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch, runner=_real_runner_over_fake_cli())
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    spent_before = dict(orch.sessions_per_issue)
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+
+    # The invariant. Everything else in this test is scaffolding for it.
+    assert dict(orch.sessions_per_issue) == spent_before, \
+        "a provider outage consumed the issue's session allowance"
+    assert issue.id not in orch.parked
+    latched = orch.provider_circuits["claude"].state is CircuitState.OPEN_LATCHED
+    assert latched is expect_latched
