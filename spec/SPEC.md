@@ -130,16 +130,23 @@ Normalized outputs must match the core's issue domain model.
 | `project_slug` (Linear slug)        | `tracker.repo: owner/name` (one process = one repo)                            |
 | `api_key` / `LINEAR_API_KEY`        | `GITHUB_TOKEN` (GitHub App installation token preferred)                        |
 | workflow **state** (first-class)    | **status label** convention `status:<name>` (GitHub issues are only open/closed)|
-| `active_states`                     | `["triage", "todo", "in progress"]` → labels `status:triage`, `status:todo`, `status:in-progress` |
+| `active_states`                     | **per project, not absolute** (AgDR-039): the stance's list → `status:*` labels. `base` is `["triage", "todo", "in progress"]`; `prototype` is `["todo", "in progress", "review"]` — no `triage`, plus `status:review`. Read it from the project's composed `WORKFLOW.md`, never from this example |
 | terminal states                     | issue **closed** → terminal; `status:*` gate labels are non-active              |
 | `blocked_by` (Linear `blocks`)      | GitHub **native issue dependencies** (blocked-by), read via GraphQL (`blockedBy` connection) |
 | `issue.identifier`                  | the issue **number** (workspace root is per-project, so numbers don't collide)  |
-| tracker **writes**                  | **split.** The agent uses `gh` for comments and PR links but writes **no** `status:*` label; its final action is the handoff evidence contract `.run/handoff-evidence.json` (`orchestrator/src/orchestrator/handoff.py`). The **orchestrator** validates that evidence after verified provider success and performs the single `status:human-review` transition itself, alongside its own claim/park labels (issue #61 / AgDR-028) |
+| tracker **writes**                  | **split, and the split is per ROLE — not "agents never write labels".** An *implementing* worker uses `gh` for comments and PR links but writes **no** `status:*` label; its final action is the handoff evidence contract `.run/handoff-evidence.json` (`orchestrator/src/orchestrator/handoff.py`). The **orchestrator** validates that evidence after verified provider success and performs the single handoff transition itself, alongside its own claim/park labels (issue #61 / AgDR-028). The **target** is the stance's `tracker.handoff_label` — `status:human-review` by default, `status:review` at `prototype` (AgDR-039/AgDR-043) — not a constant; the validation before writing it is unchanged. **Verdict-bearing roles DO write status labels**, by design and by prompt: the triage verifier writes `status:todo` / `status:drafting` / `status:decision` on its PASS / NEEDS WORK / NEEDS DECISION verdict (issue #17, #55 — `base` behaviour, predating the stance ladder), and `prototype`'s QA reviewer writes `status:todo` on FIX and `status:human-review` on ESCALATE (`WORKFLOW.prototype.md`). `methodology/METHODOLOGY.md`'s who-writes-what table is the authority for this; keep it in sync |
 
 **State mapping is the one real semantic gap.** Model state as `status:*` labels:
-the adapter normalizes a `status:todo` label into `state: "todo"`. Gate states
-(`status:drafting`, `status:decision`, `status:plan-review`, `status:human-review`)
-are **not** in `active_states`, so the orchestrator never dispatches a gated ticket
+the adapter normalizes a `status:todo` label into `state: "todo"`. Gate states are per
+stance, and "gate" has two senses that only coincide at `base`. The **declared**
+vocabulary is `gate_states` (AgDR-045): `base` declares `status:drafting`,
+`status:decision`, `status:plan-review`, `status:blocked` and
+`status:human-review`; `prototype` declares only `status:human-review`. The
+**behavioural** gate is any state absent from `active_states`, which is a wider
+set — a `status:blocked` ticket on a `prototype` project is not dispatched even
+though that stance does not declare it, and the board-state check will report the
+label as one the project does not define. A gate in either sense is
+**not** in `active_states`, so the orchestrator never dispatches a gated ticket
 and parks at a handoff state — the human gate is enforced by state, costing zero
 orchestrator code. Gating is by **omission**: adding a gate state is a label plus
 docs, never an `active_states` edit (`status:decision`, issue #55, was added this
