@@ -198,6 +198,34 @@ So the recommendation is neither "adopt the sweep" nor "add a checklist". It is:
 checked it against the code, and one is not enough — including when that one is
 correcting a previous pass.**
 
+## Closing note — merged, not finished
+
+Merged on operator decision after **twelve review findings across six rounds**.
+Four of the twelve were defects this sweep introduced; the last two were in text
+written one round earlier. The finding rate was not falling when it stopped.
+
+**This record does not claim these documents are now correct.** It claims they
+are materially more accurate than they were, and that the remaining error rate is
+unknown because the only reader who has checked the final text is the author of
+it. The honest status of `README.md`, `spec/SPEC.md` and `methodology/METHODOLOGY.md`
+after this PR is *"re-read by one party, once, after heavy editing"* — which is
+precisely the condition this sweep found them in to begin with.
+
+Two behavioural defects were found along the way and are the durable output,
+above any wording change here:
+
+- **#176** — `register-project.sh` defaults to `prototype`, `new-ticket.sh`
+  defaults to `--entry triage`, and `prototype` does not dispatch `triage`. The
+  documented onboarding path filed a ticket that is never worked.
+- **#178** — `transitions.yml` sanctions two actors on `human-review → todo`;
+  only the orchestrator path resets session counters, so a human requesting
+  changes on a budget-spent ticket gets an immediate `budget exhausted` park.
+
+If one thing is carried forward from both sweeps, it is not a procedure. It is
+that **a document's accuracy is a function of how many independent readers have
+checked it against the code**, that one is never enough, and that this holds
+most strongly for the reader who has just finished editing it.
+
 ## Not found
 
 No stale scripts, flags, config values, or state vocabulary in `SETUP.md` or
