@@ -69,13 +69,20 @@ UTC = timezone.utc
 
 
 def make_issue(n: int, state: str = "todo", blockers: list[BlockerRef] | None = None,
-               updated: str = "2026-07-01T10:00:00+00:00") -> Issue:
+               updated: str = "2026-07-01T10:00:00+00:00",
+               fail_reviewed: bool = False) -> Issue:
     # A dispatchable todo has passed triage, so it carries gate:triage-passed
     # (issue #29): the orchestrator dispatch guard refuses a status:todo without
     # it. Other states don't require the marker.
     labels = [f"status:{state.replace(' ', '-')}"]
     if state == "todo":
         labels.append("gate:triage-passed")
+    # issue #31: the durable episode bound. With it present an implement-role
+    # cap-hit PARKS (this issue already had its diagnosis) instead of opening a
+    # fail-review episode — which is what the pre-#31 park tests below are
+    # about, so they seed it rather than re-testing the new routing.
+    if fail_reviewed:
+        labels.append("gate:fail-reviewed")
     return Issue(
         id=f"node-{n}", identifier=str(n), title=f"Issue {n}",
         description="body", priority=None, state=state, branch_name=None,
@@ -723,7 +730,10 @@ async def test_stall_detection_terminates_and_retries(harness, monkeypatch, capf
 
 async def test_session_cap_parks_issue(harness):
     orch, tracker, runner, ws_root = harness
-    issue = make_issue(1)  # stays "todo" forever: agent never moves the label
+    # stays "todo" forever: agent never moves the label. `fail_reviewed` seeds
+    # the #31 episode bound so the cap-hit takes the PARK branch — this test
+    # owns park behaviour; the fail-review routing has its own suite.
+    issue = make_issue(1, fail_reviewed=True)
     tracker.candidates = [issue]
     tracker.states = {"node-1": issue}
 
@@ -745,11 +755,18 @@ async def test_session_cap_parks_issue(harness):
     assert tracker.labels_added == [
         ("node-1", ("status:in-progress",)),          # todo dispatch: claim visible
         ("node-1", ("status:parked",)),               # durable park marker
+        # issue #31: ADD-FIRST backfill. Stripping the claim label would leave
+        # no non-park status label at all, and an issue at `[status:parked]`
+        # alone derives "none" the moment the operator unparks it — invisible
+        # to the candidate poll, stranded on the documented recovery action.
+        ("node-1", ("status:todo",)),
     ]
     assert ("node-1", ("status:todo",)) in tracker.labels_removed         # dispatch swap
     assert ("node-1", ("status:in-progress",)) in tracker.labels_removed  # cleared at park
     assert "status:parked" in issue.labels            # visible on future fetches
     assert "status:in-progress" not in issue.labels   # one-status-label contract
+    # ...and `status:parked` sorts first, so it still DERIVES parked while parked.
+    assert "status:todo" in issue.labels
     assert (ws_root / "1").is_dir()                   # workspace preserved
     assert "node-1" not in orch.claimed
     assert "node-1" not in orch.retry_attempts
@@ -757,7 +774,7 @@ async def test_session_cap_parks_issue(harness):
     await orch._tick()                                # still parked: no re-dispatch
     assert orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 2}
     assert len(tracker.comments) == 1
-    assert len(tracker.labels_added) == 2             # not re-labelled past park
+    assert len(tracker.labels_added) == 3             # not re-labelled past park
 
     # The parking comment bumped updatedAt (FakeTracker mimics GitHub); the
     # label — not updatedAt — is authoritative, so the issue STAYS parked.
@@ -816,7 +833,7 @@ async def test_park_label_write_failure_holds_at_cap_without_looping(harness):
     """
     orch, tracker, runner, _ = harness
     tracker.add_labels_error = TrackerError("github_api_status", "transient boom")
-    issue = make_issue(1)
+    issue = make_issue(1, fail_reviewed=True)  # episode bound spent -> park branch
     tracker.candidates = [issue]
     tracker.states = {"node-1": issue}
 
@@ -2312,7 +2329,9 @@ async def test_codex_mode_parks_after_session_cap(tmp_path, monkeypatch):
         runner=runner,
         provider_id="codex",
     )
-    issue = make_issue(1)
+    # `fail_reviewed`: the #31 episode bound is already spent, so the cap-hit
+    # parks rather than opening a fail-review episode (this test owns park).
+    issue = make_issue(1, fail_reviewed=True)
     tracker.candidates = [issue]
     tracker.states[issue.id] = issue
 
@@ -2393,7 +2412,7 @@ async def test_failure_retries_do_not_reflap_in_progress_label(tmp_path, monkeyp
         return TurnResult(status="failed", session_id=None, error="boom")
     runner.run_turn = failing_turn
 
-    issue = make_issue(1, "todo")
+    issue = make_issue(1, "todo", fail_reviewed=True)  # episode bound spent -> park
     tracker.candidates = [issue]
     tracker.states = {"node-1": issue}
 
@@ -2405,6 +2424,7 @@ async def test_failure_retries_do_not_reflap_in_progress_label(tmp_path, monkeyp
     assert tracker.labels_added == [
         ("node-1", ("status:in-progress",)),            # first dispatch: claim visible
         ("node-1", ("status:parked",)),                 # durable park marker
+        ("node-1", ("status:todo",)),                   # #31 add-first unpark backfill
     ]
     assert tracker.labels_removed.count(("node-1", ("status:todo",))) == 1
     assert ("node-1", ("status:in-progress",)) in tracker.labels_removed   # cleared at park

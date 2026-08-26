@@ -1029,15 +1029,18 @@ def test_decision_is_not_an_active_state(tmp_path: Path):
 
     cfg = Config(load_workflow(p), tmp_path)
     assert "decision" not in cfg.tracker().active_states
-    # The whole allowlist, pinned: gates are the states NOT here.
-    assert cfg.tracker().active_states == ["triage", "todo", "in progress"]
+    # The whole allowlist, pinned: gates are the states NOT here. `fail review`
+    # joined it in #31 — the post-failure verifier is DISPATCHED, so a state the
+    # prompt names is a gate unless it is listed here.
+    assert cfg.tracker().active_states == [
+        "triage", "todo", "in progress", "fail review"]
 
 
 def test_active_states_line_is_byte_identical_in_base_and_composed():
     """#55 added a gate state without touching this line. Both files must still
     carry the exact same `active_states` declaration."""
     repo_root = Path(__file__).resolve().parents[2]
-    expected = '  active_states: ["triage", "todo", "in progress"]'
+    expected = '  active_states: ["triage", "todo", "in progress", "fail review"]'
     for rel in ("workflow/WORKFLOW.base.md", "projects/switchboard-self/WORKFLOW.md"):
         lines = (repo_root / rel).read_text(encoding="utf-8").splitlines()
         matches = [l for l in lines if l.strip().startswith("active_states:")]

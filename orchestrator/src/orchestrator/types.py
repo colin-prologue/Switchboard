@@ -207,6 +207,16 @@ class AgentConfig:
     # Always on: invalid or non-positive values coerce back to the default —
     # the cap cannot be disabled (parking is the diagnostic checkpoint).
     max_sessions_per_issue: int          # default 3
+    # Owned extension (issue #31): the FAIL-REVIEW role's own cap. Separate
+    # field rather than a shared scalar because the verifier is one diagnostic
+    # pass, not an implementation budget. Same always-on coercion.
+    #
+    # Accepted tradeoff at the default of 1: the verifier gets no retry budget.
+    # `_refund_issue_session` refunds only on a provider-circuit failure, so an
+    # `error_max_turns` or a denied-command strand burns the single fail-review
+    # session and the next dispatch parks the issue with no verdict comment.
+    # That is deliberate — raising the default is not the fix.
+    max_fail_review_sessions_per_issue: int = 1
 
 
 @dataclass

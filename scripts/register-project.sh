@@ -223,10 +223,23 @@ mklabel "status:review"       "8A63D2" "Agent QA: PR open, awaiting review by a 
 # with status:parked (cap-park). Human/board-managed; the dispatch guard ignores it.
 mklabel "status:blocked"      "B60205" "Advisory only (human/board-managed); orchestrator gates on native blocked-by, not this label"
 mklabel "status:parked"       "E99695" "Cap-park: orchestrator halted at session cap — remove to re-dispatch"
+# #31: post-failure diagnosis. An implement-role cap-hit routes HERE instead of
+# straight to parked; an independent verifier session classifies the failure and
+# routes recovery. ACTIVE — the orchestrator dispatches it. Unprovisioned on
+# projects registered before #31, which is why the cap branch falls back to
+# _park() on github_label_not_found rather than retrying a write that can never
+# land.
+mklabel "status:fail-review"  "D4C5F9" "Post-failure diagnosis: a verifier session is classifying why this issue capped"
 # Provenance marker (issue #29): applied automatically by triage on PASS. Its
 # presence is the durable proof an issue passed triage; the dispatch guard
 # refuses to claim a status:todo that lacks it. Not a status:* state.
 mklabel "gate:triage-passed"  "0E8A16" "Provenance: promoted by triage (PASS). Dispatch guard requires it on status:todo"
+# Episode bound (issue #31): written by the orchestrator alongside
+# status:fail-review. Its presence at a later implement cap-hit means the issue
+# already had its diagnosis, so the cap branch parks instead of opening a second
+# episode. Durable on purpose — in-memory state would empty on restart and the
+# loop would be unbounded. Removing it re-arms fail-review. Not a status:* state.
+mklabel "gate:fail-reviewed"  "D4C5F9" "Episode bound: this issue already had a fail-review diagnosis. Remove to re-arm"
 
 cat <<EOF
 
