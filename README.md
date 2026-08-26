@@ -2,8 +2,17 @@
 
 Switchboard turns a GitHub issue board into a work queue for Claude agents.
 You file tickets; an orchestrator dispatches each one to a fresh Claude session
-in its own workspace; agents hand finished work back as PRs for a human to
-merge. Humans own **intent** and **review**; the system owns **implementation**.
+in its own workspace; agents hand finished work back as PRs.
+
+**Humans always own intent. Who owns *review* is the project's choice** — that
+is what a stance is (AgDR-039/AgDR-043). At `base`, every PR is handed to a human
+to merge. At `prototype` — the `register-project.sh` default — Gate C goes to an
+agent reviewer that may merge on a SHIP verdict. It escalates to a human on three
+conditions: content on its escalation list, a finding that survives two rounds,
+or — where a cross-model review bot is configured — that bot's review being
+absent, stale, or pending for the current head sha (it fails closed). Pick
+deliberately; `SETUP.md` has the stance table, and
+`--self` defaults to `base` for exactly this reason (#153).
 
 Concretely, it is three things:
 
@@ -44,8 +53,13 @@ scripts/run-project.sh acme-api
 #    (--repo is required here: without it new-ticket.sh falls back to
 #    SB_GITHUB_REPO or the current checkout's git remote — i.e. Switchboard
 #    itself. Alternatively, source projects/acme-api/project.env first.)
+#
+#    --entry todo is REQUIRED on a `prototype` project, which is what step 1
+#    registers by default. new-ticket.sh defaults to `--entry triage`, and
+#    `prototype` does not dispatch `triage` — the two defaults compose into a
+#    ticket that is never picked up. Issue #176.
 scripts/new-ticket.sh --scaffold > body.md   # edit the skeleton
-scripts/new-ticket.sh --repo acme/api \
+scripts/new-ticket.sh --repo acme/api --entry todo \
   --title "Fix retry backoff in sync worker" --body-file body.md
 ```
 
@@ -68,7 +82,7 @@ the state machine — the orchestrator dispatches **active** states and parks at
 | Label                 | Active? | Meaning                                                          |
 |-----------------------|---------|------------------------------------------------------------------|
 | `status:drafting`     | no      | Gate A pending — intent + spec being authored/approved            |
-| `status:triage`       | **yes** | Adversarial ticket verification — dispatched to a verifier session |
+| `status:triage`       | *stance*| Adversarial ticket verification — dispatched to a verifier session; active at `base`, absent from `prototype` |
 | `status:todo`         | **yes** | Approved, unblocked, dispatchable                                 |
 | `status:in-progress`  | **yes** | An agent is working it                                            |
 | `status:decision`     | no      | Waiting-on-operator gate — triage found an unmade human decision; reply with your choice, fold it, relabel to drafting |
@@ -116,6 +130,12 @@ flowchart TD
     parked -.->|"human removes label:<br/>re-dispatch, counter resets"| triage & inprog
 ```
 
+**The diagram is the `base` pipeline.** Which states are active is the stance's
+choice, so a project on another stance walks a different path through the same
+labels — `prototype` has no `triage` step and routes Gate C to `status:review`
+(an agent reviewer) rather than `status:human-review`. See the stance table in
+`SETUP.md` before reading this as universal.
+
 Solid edges are the main pathway; dashed edges are the cap-park escape hatch
 (`status:parked` is added *alongside* the current status, so unparking resumes
 in the same role). Not shown: `status:blocked`, a manually-applied gate used
@@ -144,14 +164,24 @@ After the worker turn succeeds, the orchestrator validates that the evidence is
 fresh, the worktree is clean, and exactly one open PR exists on the issue branch.
 That PR must link to and close the issue, and its head must match both `head_sha`
 and the workspace HEAD. Only then does the orchestrator perform the single
-transition to `status:human-review`. Invalid or stale evidence produces a
+handoff transition — to the stance's `tracker.handoff_label`, which is
+`status:human-review` by default and `status:review` at `prototype`
+(AgDR-039/AgDR-043), not a constant. Invalid or stale evidence produces a
 diagnostic and no transition. See
 [`AgDR-028`](self/.decisions/AgDR-028-orchestrator-owned-terminal-handoff.md) for
 the complete contract and rationale.
 
 ### Choosing the entry state (proportionality)
 
-The path a ticket takes *is* the risk control — match it to the risk:
+**This section describes `base`.** Entry states are only meaningful where the
+stance dispatches them, and `prototype` — the `register-project.sh` default —
+dispatches only `todo`, `in progress` and `review`. On a `prototype` project the
+choice below collapses: file at `--entry todo`, because `triage` and `drafting`
+are states nothing there will move. Issue #176 tracks making the tools enforce
+this rather than the reader remembering it.
+
+With that said, at `base` the path a ticket takes *is* the risk control — match
+it to the risk:
 
 - **Trivial / low-risk** (one-line fix, typo, config bump) with already-bounded,
   checkable criteria → file straight at `--entry todo`. Forcing triage onto a
@@ -160,7 +190,8 @@ The path a ticket takes *is* the risk control — match it to the risk:
   verification; an unstamped `status:todo` is refused by the dispatch guard.)
 - **New, author-fresh, or uncertain** — criteria smell unbounded
   ("all/every/comprehensive"), assumptions unstated, size unclear → file at
-  `--entry triage` (the default). A verifier session adversarially reviews the
+  `--entry triage` (the default) **on a `base` project**. A verifier session
+  adversarially reviews the
   ticket and routes it: **PASS** → `todo`; **NEEDS WORK** → back to `drafting`
   with a `## Triage verdict` comment; **SPLIT** → child issues with blocked-by
   chaining. An unverified contract can burn a whole implementation session;
