@@ -57,11 +57,30 @@ provider's runner then shipped). It is also the exact defect class #164 fixed in
 `status_board.py` — "the board derived every project's rules from one template" —
 still live in the document that declares itself authoritative for the bindings.
 
+## Correction 2026-08-26 — this sweep produced a false negative
+
+Codex review of this sweep's own PR found that `README.md:71` marked
+`status:triage` as unconditionally **active**, while marking only `status:review`
+as stance-dependent. `prototype`'s `active_states` is
+`["todo", "in progress", "review"]` — no `triage`. So README carried the *same*
+flat-state defect this sweep was written to find, and the audit below recorded it
+as accurate.
+
+The lifecycle diagram had it too, and is now labelled as the `base` pipeline.
+
+**The audit's method was the weakness, not its attention.** README was checked by
+grepping for the word "stance" and finding it present. That confirms a document
+mentions stances somewhere; it cannot confirm every state claim inside it is
+qualified. A per-state comparison against each stance's `active_states` would
+have caught it — and is what the next pass should do instead.
+
+Both corrected. The finding below stands, but its scope was one file wider than
+recorded, and the "not general" conclusion is correspondingly weaker.
+
 ## Not found
 
-No stale scripts, flags, config values, or state vocabulary in `README.md`,
-`SETUP.md` or `METHODOLOGY.md`. All three were updated with the stance ladder
-(#146, #152) and remain accurate. `README.md`'s Codex section correctly records
+No stale scripts, flags, config values, or state vocabulary in `SETUP.md` or
+`METHODOLOGY.md`. `README.md` was **not** clean — see the correction above. `README.md`'s Codex section correctly records
 the canary retirement (#155). `SETUP.md`'s claim that a restart refunds each
 issue's session budget is accurate and load-bearing — it was observed twice on
 2026-08-25/26.

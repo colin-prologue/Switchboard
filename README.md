@@ -68,7 +68,7 @@ the state machine — the orchestrator dispatches **active** states and parks at
 | Label                 | Active? | Meaning                                                          |
 |-----------------------|---------|------------------------------------------------------------------|
 | `status:drafting`     | no      | Gate A pending — intent + spec being authored/approved            |
-| `status:triage`       | **yes** | Adversarial ticket verification — dispatched to a verifier session |
+| `status:triage`       | *stance*| Adversarial ticket verification — dispatched to a verifier session; active at `base`, absent from `prototype` |
 | `status:todo`         | **yes** | Approved, unblocked, dispatchable                                 |
 | `status:in-progress`  | **yes** | An agent is working it                                            |
 | `status:decision`     | no      | Waiting-on-operator gate — triage found an unmade human decision; reply with your choice, fold it, relabel to drafting |
@@ -115,6 +115,12 @@ flowchart TD
     triage & inprog -.->|"per-issue session cap hit:<br/>claim released, workspace kept"| parked
     parked -.->|"human removes label:<br/>re-dispatch, counter resets"| triage & inprog
 ```
+
+**The diagram is the `base` pipeline.** Which states are active is the stance's
+choice, so a project on another stance walks a different path through the same
+labels — `prototype` has no `triage` step and routes Gate C to `status:review`
+(an agent reviewer) rather than `status:human-review`. See the stance table in
+`SETUP.md` before reading this as universal.
 
 Solid edges are the main pathway; dashed edges are the cap-park escape hatch
 (`status:parked` is added *alongside* the current status, so unparking resumes
