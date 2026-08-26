@@ -2,8 +2,14 @@
 
 Switchboard turns a GitHub issue board into a work queue for Claude agents.
 You file tickets; an orchestrator dispatches each one to a fresh Claude session
-in its own workspace; agents hand finished work back as PRs for a human to
-merge. Humans own **intent** and **review**; the system owns **implementation**.
+in its own workspace; agents hand finished work back as PRs.
+
+**Humans always own intent. Who owns *review* is the project's choice** — that
+is what a stance is (AgDR-039/AgDR-043). At `base`, every PR is handed to a human
+to merge. At `prototype` — the `register-project.sh` default — Gate C goes to an
+agent reviewer that may merge on a SHIP verdict and escalates to a human only on
+its escalation list. Pick deliberately; `SETUP.md` has the stance table, and
+`--self` defaults to `base` for exactly this reason (#153).
 
 Concretely, it is three things:
 

@@ -159,6 +159,45 @@ confidently wrong rather than uncertain.
 Promoting a source to authority is itself a change that needs verification.
 Nothing in either sweep's method asked for that.
 
+## Fifth correction — the README's thesis sentence was wrong
+
+Findings nine and ten. The second is the most consequential documentation defect
+in either sweep, and it was in the first paragraph of the README the whole time.
+
+**The opening asserted that humans own review.** *"Agents hand finished work back
+as PRs for a human to merge. Humans own intent and review."* At `prototype` —
+the `register-project.sh` default — the QA reviewer merges on a SHIP verdict
+(`WORKFLOW.prototype.md`). So the project's thesis sentence misdescribed **merge
+authority** for the default onboarding path. That is governance-relevant, not
+cosmetic: AgDR-043 exists because Gate C's owner is a stance property, and #153
+changed `--self` to default to `base` precisely so Switchboard's own workers
+could not merge changes to the file deciding who may merge. The README described
+none of it. Rewritten: humans always own intent; who owns review is the stance's
+choice, stated with both stances named.
+
+**And the two-actor edge.** The row added in the fourth correction attributed
+`human-review → todo` to the orchestrator alone. `transitions.yml` states in
+capitals that this edge has **TWO actors** — the human path is a
+changes-requested verdict, the orchestrator path is the review-response
+sub-poll. A row added to fix an incomplete table was itself incomplete.
+
+## The finding this record actually produced
+
+Ten review findings on a sweep whose subject is documents that stopped
+describing the system. **Four of them were defects this sweep introduced**, and
+three were the same class re-emerging after a fix addressed the cited line rather
+than the class.
+
+The sweep's method — read for claims, check each against code — is sound and
+found real defects. What it cannot do is bound its own error rate. Every one of
+the ten came from a reader who was not the author, and four of those ten existed
+only because the author had just edited the file.
+
+So the recommendation is neither "adopt the sweep" nor "add a checklist". It is:
+**a document's accuracy is a function of how many independent readers have
+checked it against the code, and one is not enough — including when that one is
+correcting a previous pass.**
+
 ## Not found
 
 No stale scripts, flags, config values, or state vocabulary in `SETUP.md` or
