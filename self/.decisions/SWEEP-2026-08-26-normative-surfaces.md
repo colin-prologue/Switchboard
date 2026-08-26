@@ -106,6 +106,30 @@ describing the system" found three more instances in that sweep's own output.
 The method — read for claims, check each against code — works. Doing it once
 does not.
 
+## Third correction — the framing was too narrow
+
+A seventh review finding: `SPEC.md:137` claimed "the agent ... writes **no**
+`status:*` label". Two agent roles contradict it, both documented correctly in
+`METHODOLOGY.md`'s who-writes-what table:
+
+- the **triage verifier** writes `status:todo` / `status:drafting` /
+  `status:decision` on its verdict (issues #17, #55);
+- `prototype`'s **QA reviewer** writes `status:todo` on FIX and
+  `status:human-review` on ESCALATE, by explicit prompt instruction.
+
+The first is `base` behaviour and shipped 2026-07-03 — **six weeks before the
+stance ladder.** So this record's title and framing ("SPEC never learned the
+stance ladder") are too narrow: SPEC never learned about verdict-bearing agent
+roles either, and has been wrong about the tracker-write contract for longer than
+the period this sweep examined.
+
+The corrected claim is that the split is **per role**, not "agents never write
+labels", with `METHODOLOGY.md` named as the authority for the table.
+
+That makes four separate facts on which `METHODOLOGY.md` was right and
+`SPEC.md` was wrong. The two documents have been diverging for at least two
+months with nothing comparing them.
+
 ## Not found
 
 No stale scripts, flags, config values, or state vocabulary in `SETUP.md` or
