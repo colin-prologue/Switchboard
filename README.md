@@ -44,8 +44,13 @@ scripts/run-project.sh acme-api
 #    (--repo is required here: without it new-ticket.sh falls back to
 #    SB_GITHUB_REPO or the current checkout's git remote — i.e. Switchboard
 #    itself. Alternatively, source projects/acme-api/project.env first.)
+#
+#    --entry todo is REQUIRED on a `prototype` project, which is what step 1
+#    registers by default. new-ticket.sh defaults to `--entry triage`, and
+#    `prototype` does not dispatch `triage` — the two defaults compose into a
+#    ticket that is never picked up. Issue #176.
 scripts/new-ticket.sh --scaffold > body.md   # edit the skeleton
-scripts/new-ticket.sh --repo acme/api \
+scripts/new-ticket.sh --repo acme/api --entry todo \
   --title "Fix retry backoff in sync worker" --body-file body.md
 ```
 
@@ -150,7 +155,9 @@ After the worker turn succeeds, the orchestrator validates that the evidence is
 fresh, the worktree is clean, and exactly one open PR exists on the issue branch.
 That PR must link to and close the issue, and its head must match both `head_sha`
 and the workspace HEAD. Only then does the orchestrator perform the single
-transition to `status:human-review`. Invalid or stale evidence produces a
+handoff transition — to the stance's `tracker.handoff_label`, which is
+`status:human-review` by default and `status:review` at `prototype`
+(AgDR-039/AgDR-043), not a constant. Invalid or stale evidence produces a
 diagnostic and no transition. See
 [`AgDR-028`](self/.decisions/AgDR-028-orchestrator-owned-terminal-handoff.md) for
 the complete contract and rationale.

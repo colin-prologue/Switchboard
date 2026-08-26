@@ -77,6 +77,35 @@ have caught it — and is what the next pass should do instead.
 Both corrected. The finding below stands, but its scope was one file wider than
 recorded, and the "not general" conclusion is correspondingly weaker.
 
+## Second correction — the sweep's scope conclusion does not survive
+
+Two further findings on the same PR, both in `README.md`, after the first
+correction claimed both README defects were fixed:
+
+- **The documented quick start produced a ticket that is never dispatched.**
+  `register-project.sh:51` defaults `--stance prototype`; `new-ticket.sh:23`
+  defaults `--entry triage`; `prototype` does not dispatch `triage`. Following
+  the README verbatim files a dead ticket under a line promising "the
+  orchestrator picks it up". Filed as **#176** — the tools carry the trap, and
+  the doc warning added here is a memory aid, not a fix.
+- **The handoff contract still stated a constant target.** `README.md:151` said
+  the orchestrator performs "the single transition to `status:human-review`" —
+  contradicting `tracker.handoff_label`, and contradicting a paragraph added
+  earlier in this same PR.
+
+**The "drift was not general" conclusion is withdrawn.** It survived one
+correction and not two. Four defects in `README.md` alone, all stance-blindness,
+all from the same 2026-08-15 propagation gap — that is a pattern, not a file
+that fell out of a set. The honest summary is: **`SETUP.md` and
+`METHODOLOGY.md` were updated for the stance ladder; `spec/SPEC.md` and
+`README.md` were not**, and the second sweep found the fourth defect only after
+review found the second and third.
+
+Three rounds of review on a sweep whose subject is "documents that stopped
+describing the system" found three more instances in that sweep's own output.
+The method — read for claims, check each against code — works. Doing it once
+does not.
+
 ## Not found
 
 No stale scripts, flags, config values, or state vocabulary in `SETUP.md` or
