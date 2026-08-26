@@ -109,7 +109,25 @@ claude:
   # double quotes, so {{VERIFY_TOOLS}} can be substituted verbatim as
   # '"Bash(godot:*)"' without an escaping pass that sed would mangle.
   command: 'claude -p --model claude-opus-5 --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools "Bash(git:*)" "Bash(gh:*)" {{VERIFY_TOOLS}}'
-  max_turns: 100
+  # 20 -> 100 (2026-07-06, AgDR-013) -> 20 (2026-08-26, rejection sweep).
+  #
+  # The raise was a stopgap, and AgDR-013 said so: it rejected "keep 20, add
+  # --resume on error_max_turns" as "the correct structural fix ... ticketed
+  # separately rather than rushed". That ticket (#47) shipped on 2026-07-27 —
+  # `error_max_turns` now yields `incomplete` + RESUME_SESSION
+  # (runner.py, AgDR-027), the orchestrator continues the SAME session, and the
+  # continuation does not spend session budget (scheduler.py). The wall the
+  # raise existed to clear is a checkpoint now.
+  #
+  # Nothing revisited the stopgap for seven weeks, because the condition for
+  # revisiting it lived in a REJECTED-options section that nothing re-reads.
+  # Found by the 2026-08-26 sweep; see SWEEP-2026-08-26-rejection-rationale.md.
+  #
+  # Restored to 20 rather than to a new number: AgDR-013 rejected picking a
+  # fresh arbitrary wall, and 20 is the value chosen on evidence before the
+  # stopgap. `agent.max_turns` (20 orchestrator turns) still bounds the session
+  # at ~400 CLI turns, and max_budget_usd bounds it in dollars.
+  max_turns: 20
   max_budget_usd: 5
   turn_timeout_ms: 3600000
   read_timeout_ms: 30000

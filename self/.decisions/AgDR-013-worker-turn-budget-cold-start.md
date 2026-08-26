@@ -29,6 +29,17 @@ bounds every session; `turn_timeout_ms` and `stall_timeout_ms` are unchanged.
 
 ## Rejected options (steelmanned)
 
+### Amendment 2026-08-26 — the deferred fix shipped; the stopgap did not move
+
+The first rejection below calls resume-on-`error_max_turns` "the correct
+structural fix", deferred only because it was scheduler work to design. That
+ticket (#47) shipped on 2026-07-27 as `AgDR-027`. `claude.max_turns` stayed at
+100 for seven more weeks and the config comment still read "Structural fix … is
+ticketed separately" in the present tense.
+
+Restored to 20 by the SWEEP-2026-08-26-rejection-rationale.md sweep. The condition for revisiting the stopgap
+was recorded here, in a rejection, and nothing re-read it.
+
 - **Keep 20 turns, add `--resume` on `error_max_turns`.** The correct
   structural fix — a resumed session loses nothing and the cap stays a
   diagnostic checkpoint. Rejected *as the immediate move* because it is

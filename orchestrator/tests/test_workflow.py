@@ -1184,11 +1184,25 @@ def test_workflow_prompt_pins_in_brief_block():
 def test_decision_record_numbers_are_unique_and_match_headings():
     decisions = Path(__file__).resolve().parents[2] / "self" / ".decisions"
     pattern = re.compile(r"^(ADR|AgDR)-(\d+)-.+\.md$")
+    # Sweeps are dated, not numbered: they record a re-reading of the numbered
+    # records rather than a new decision, so they take no number and cannot
+    # collide (issue #154 is about number collisions). Heading is still pinned.
+    sweep = re.compile(r"^SWEEP-(\d{4}-\d{2}-\d{2})-.+\.md$")
 
     seen: dict[tuple[str, int], str] = {}
     for path in sorted(decisions.glob("*.md")):
+        if sw := sweep.match(path.name):
+            heading = path.read_text(encoding="utf-8").splitlines()[0]
+            assert heading.startswith(f"# Sweep {sw.group(1)}"), (
+                f"{path.name}: H1 heading {heading!r} does not carry the "
+                f"filename's date {sw.group(1)}"
+            )
+            continue
         m = pattern.match(path.name)
-        assert m, f"{path.name}: does not match (ADR|AgDR)-NNN-<slug>.md"
+        assert m, (
+            f"{path.name}: does not match (ADR|AgDR)-NNN-<slug>.md "
+            f"or SWEEP-YYYY-MM-DD-<slug>.md"
+        )
         key = (m.group(1), int(m.group(2)))
         assert key not in seen, (
             f"duplicate {m.group(1)}-{m.group(2)}: {seen[key]} and {path.name}. "

@@ -48,6 +48,21 @@ heartbeat and cannot regress the stall watchdog (`stall_timeout_ms`).
 
 ## Rejected options
 
+### Amendment 2026-08-26 — this record predicted PR #166's round-7 defect
+
+The third rejection below says treating EOF-after-error as `port_exit` would
+*"collapse a real provider auth outage into `RUNNER_PROTOCOL`, which AgDR-026
+excludes from circuit triggers — reopening the original bug from the other end."*
+
+The **Claude** runner did precisely that until 2026-08-26: a stream carrying a
+provider error that closed without a terminal record fell to
+`RUNNER_PROTOCOL`/`port_exit`, spent the issue's budget, and left the circuit
+closed. Codex review found it on PR #166; this record had named it, and the
+mechanism, three weeks earlier.
+
+The rejection was correct, provider-general, and confined to the Codex record.
+Nothing propagated it. The SWEEP-2026-08-26-rejection-rationale.md sweep's headline finding.
+
 - **Keep breaking on `error`, but only for non-`Reconnecting` text.** Steelman:
   it is a one-line change and preserves fast failure on "real" errors. Rejected
   because it reintroduces string-sniffing at the transport layer — the exact

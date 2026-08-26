@@ -253,6 +253,30 @@ merged in Switchboard PR #104 at `5cd0b9a`.
 
 - **Fall back to the other provider.** A circuit is an availability boundary,
   not permission to transfer a potentially dirty workspace.
+### Amendment 2026-08-26 — this rejection is now pinned by a test
+
+The rejection below states an invariant — *a provider outage must not consume
+issue allowance* — and for seven months nothing enforced it. Issue #165 violated
+it on civ-life #8: five infrastructure failures (two transport drops, three
+OAuth expiries) were classified `worker_failure`, each spent a verify session,
+and the ticket parked at 5/5 having reviewed nothing.
+
+The tests that appeared to cover this did not. They construct a `TurnResult`
+with `failure_class=PROVIDER_AUTHENTICATION` already set — pinning the
+accountant (given a provider class, refund) while stubbing the sensor (does a
+real stream produce that class?). #165 lived in that seam for the whole time.
+
+`test_a_provider_outage_never_consumes_issue_allowance` now drives a real
+`ClaudeRunner` over captured CLI shapes, so classification, the circuit and the
+refund are live in one assertion. Reverted to pre-#165 code it reproduces the
+incident verbatim — `worker completed` on a session that did nothing, then
+`ISSUE PARKED — budget exhausted`.
+
+Found by a sweep of rejection rationale (not of `Weakest point` sections, which
+predicted a different failure that has never occurred). The general lesson is
+recorded in `methodology/METHODOLOGY.md`: this project's real constraints are
+often written in the REJECTED-options section, which had no reader and no teeth.
+
 - **Park every affected issue.** Parking is an issue-level diagnostic checkpoint
   and requires human ticket action; a provider outage is shared infrastructure
   state and must not consume issue allowance.
