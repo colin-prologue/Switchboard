@@ -152,6 +152,11 @@ class FakeTracker:
         self.body_writes: list[tuple[str, str]] = []
         self.update_body_error: TrackerError | None = None
         self.add_comment_error: TrackerError | None = None
+        self.ops_issue_error: TrackerError | None = None
+        self.ops_issue_failures_left = 0
+        self.ops_issue_calls = 0
+        self.ops_issue_id: str | None = None
+        self.ops_issues_created = 0
         # ONE-SHOT divergence injection: perturbs the STORED bytes for exactly
         # one write. The only way a derive-faithful fake can exercise the
         # verify-after-write branch (AC 1) without lying about anything else.
@@ -227,6 +232,30 @@ class FakeTracker:
         for issue in self._issues_with_id(issue_id):
             issue.description = stored
             issue.updated_at = bump
+
+    def close_ops_issue(self):
+        """Operator closes the ops log without restarting the orchestrator."""
+        if self.ops_issue_id is not None:
+            self.states[self.ops_issue_id].state = "closed"
+            self.ops_issue_id = None
+
+    async def find_or_create_ops_issue(self):
+        # issue #165: find-or-create, so the counter distinguishes "made one"
+        # from "reused the one already there".
+        self.api_calls += 1
+        self.ops_issue_calls += 1
+        if self.ops_issue_failures_left > 0:
+            self.ops_issue_failures_left -= 1
+            raise TrackerError("github flaked")
+        if self.ops_issue_error is not None:
+            raise self.ops_issue_error
+        if self.ops_issue_id is None:
+            self.ops_issues_created += 1
+            suffix = "" if self.ops_issues_created == 1 else f"-{self.ops_issues_created}"
+            self.ops_issue_id = f"ops-issue-node-id{suffix}"
+            self.states[self.ops_issue_id] = make_issue(900 + self.ops_issues_created)
+            self.states[self.ops_issue_id].id = self.ops_issue_id
+        return self.ops_issue_id
 
     async def add_issue_comment(self, issue_id, body):
         self.api_calls += 1
@@ -3801,3 +3830,542 @@ async def test_review_poll_runs_inside_the_tick(tmp_path, monkeypatch, capfd):
 
     await orch._tick()   # inside REVIEW_POLL_INTERVAL_MS: no second round
     assert len(markers()) == 1
+
+
+# --- issue #165: the latched circuit reaches the operator --------------------
+
+
+def _latching_runner(failure_class: FailureClass) -> FakeRunner:
+    runner = FakeRunner()
+    runner.provider_id = "claude"
+
+    async def failing_turn(*args, **kwargs):
+        return TurnResult(
+            status="failed",
+            session_id="sess-165",
+            error="oauth",
+            failure_class=failure_class,
+        )
+
+    runner.run_turn = failing_turn
+    return runner
+
+
+async def test_a_latched_circuit_posts_one_notice_to_the_ops_issue(
+    tmp_path, monkeypatch
+) -> None:
+    """Switchboard is used in WAVES: a latched circuit stops everything and the
+    operator may be days from a terminal. The log line AgDR-026 already emits is
+    not a channel that reaches them; a GitHub comment is."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    notices = [body for target, body in tracker.comments
+               if target == "ops-issue-node-id"]
+    assert len(notices) == 1
+    assert "provider_authentication" in notices[0]
+    assert tracker.ops_issues_created == 1
+    # The notice is not a park: the ticket keeps its budget and its place.
+    assert issue.id not in orch.parked
+
+
+async def test_a_transient_failure_posts_no_notice(tmp_path, monkeypatch) -> None:
+    """The whole point of a wave-friendly channel: a 5xx that the cooldown
+    heals must never reach it, or the operator learns to ignore the channel."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_UNAVAILABLE),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+
+    assert orch.provider_circuits["claude"].state is not CircuitState.OPEN_LATCHED
+    assert tracker.ops_issues_created == 0
+    assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+
+
+async def test_a_standing_latch_does_not_re_notify(tmp_path, monkeypatch) -> None:
+    """A latched circuit refuses dispatch on every subsequent tick. Edge-
+    triggered on (provider, generation) so the operator gets one message, not a
+    heartbeat for as long as they are away."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+    for _ in range(3):
+        await orch._tick()
+
+    notices = [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+    assert len(notices) == 1
+
+
+async def test_a_failed_notice_is_actually_retried(tmp_path, monkeypatch) -> None:
+    """A LATCHED circuit produces no further transitions and refuses every
+    dispatch, so nothing re-enters `_start_latch_notice`. Un-marking the key
+    retries nothing — the retry has to happen inside the notice task or the
+    signal is lost for the life of the process."""
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_RETRY_MS", 1)
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    tracker.ops_issue_failures_left = 2      # succeeds on the third attempt
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    assert tracker.ops_issue_calls == 3
+    assert len([c for c in tracker.comments if c[0] == "ops-issue-node-id"]) == 1
+
+
+async def test_an_exhausted_notice_gives_the_key_back(tmp_path, monkeypatch) -> None:
+    """After the bounded attempts are spent the key is released, so a LATER
+    circuit generation is not silenced by this one's bookkeeping."""
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_RETRY_MS", 1)
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    tracker.ops_issue_error = TrackerError("github down")
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    # Wait on the OBSERVABLE, not on the task set: the set is empty both before
+    # the notice task is created and after it finishes, so waiting on it alone
+    # returns immediately and asserts nothing.
+    await wait_for(
+        lambda: tracker.ops_issue_calls == scheduler_mod.LATCH_NOTICE_ATTEMPTS)
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    assert tracker.ops_issue_calls == scheduler_mod.LATCH_NOTICE_ATTEMPTS
+    assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+    assert not orch._latch_notices
+
+
+async def test_the_notice_hint_follows_the_failure_class(
+    tmp_path, monkeypatch
+) -> None:
+    """A credits latch must not tell the operator to re-login, and an auth latch
+    must name the provider that actually needs it."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_CREDITS_EXHAUSTED),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    body = [b for t, b in tracker.comments if t == "ops-issue-node-id"][0]
+    assert "out of credits" in body
+    assert "login" not in body
+
+
+async def test_shutdown_drains_an_in_flight_latch_notice(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166. An operator restarts BECAUSE of a latch, so an
+    un-drained notice task loses the message explaining why — during the very
+    action it asks for."""
+    released = asyncio.Event()
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    real_comment = tracker.add_issue_comment
+
+    async def slow_comment(issue_id, body):
+        await released.wait()
+        await real_comment(issue_id, body)
+
+    tracker.add_issue_comment = slow_comment
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: bool(orch._latch_notice_tasks))
+    released.set()
+    await orch.shutdown()
+
+    assert [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+
+
+async def test_a_retry_never_resolves_a_second_ops_issue(
+    tmp_path, monkeypatch
+) -> None:
+    """`find_or_create_ops_issue` is not idempotent under a lost response, so
+    the id is resolved once and reused: a retry must not be able to create a
+    second ops log."""
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_RETRY_MS", 1)
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    calls = {"n": 0}
+    real_comment = tracker.add_issue_comment
+
+    async def flaky_comment(issue_id, body):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise TrackerError("comment flaked")
+        await real_comment(issue_id, body)
+
+    tracker.add_issue_comment = flaky_comment
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    assert calls["n"] == 3                  # the comment was retried
+    assert tracker.ops_issue_calls == 1     # the ops issue was resolved ONCE
+    assert tracker.ops_issues_created == 1
+
+
+async def test_shutdown_interrupts_the_notice_backoff(tmp_path, monkeypatch) -> None:
+    """Codex review on PR #166, round 3. Checking `_stopping` BEFORE the wait
+    leaves a SIGTERM arriving mid-backoff to expire the 5s shutdown grace and
+    cancel the task mid-sleep. The wait has to be stop-aware, not stop-checked."""
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_RETRY_MS", 30000)
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_POLL_MS", 5)
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    tracker.ops_issue_error = TrackerError("github down")
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: tracker.ops_issue_calls >= 1)   # now in the backoff
+    await orch.shutdown()
+
+    # Drained, not cancelled mid-sleep: the task is gone and the key released.
+    assert not orch._latch_notice_tasks
+    assert not orch._latch_notices
+
+
+async def test_the_notice_scopes_the_outage_to_the_latched_provider(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 4. Circuits are per-provider, so under a
+    mixed selector a latch on one does NOT stop the other — claiming a total
+    outage would prompt a restart that is not needed."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+    body = [b for t, b in tracker.comments if t == "ops-issue-node-id"][0]
+
+    # Single-provider project: the total-outage claim is TRUE here, and the
+    # notice still names which provider latched.
+    assert "stopped dispatching to `claude`" in body
+    assert "nothing will run" in body
+
+    # Mixed selector: the claim must narrow to the latched provider.
+    orch._runner_selector.provider_id = "mixed"
+    orch._latch_notices.clear()
+    circuit = orch._provider_circuit("claude")
+    transition = circuit._open_latched(FailureClass.PROVIDER_AUTHENTICATION)
+    entry = next(iter(orch.provider_waiting.values()))
+    await orch._notify_latched_circuit(
+        transition, entry, ("claude", circuit.generation))
+
+    mixed_body = [b for t, b in tracker.comments if t == "ops-issue-node-id"][-1]
+    assert "no issue assigned to `claude` will run" in mixed_body
+    assert "nothing will run" not in mixed_body
+
+
+async def test_a_recovered_circuit_withdraws_its_pending_notice(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 5. `record_success` closes a latched
+    circuit (`test_success_closes_latched_circuit_from_already_running_worker`),
+    so a worker still in flight when the latch opened can clear it while this
+    notice is backing off. Posting anyway hands the operator a stale outage and
+    buys the restart the notice exists to make unnecessary."""
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_RETRY_MS", 20)
+    monkeypatch.setattr(scheduler_mod, "LATCH_NOTICE_POLL_MS", 5)
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    # Fail the first post so the task enters the backoff, which is the window
+    # an in-flight success actually lands in.
+    tracker.ops_issue_failures_left = 1
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: tracker.ops_issue_calls >= 1)
+    orch._provider_circuit("claude").record_success()
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+    assert not orch._latch_notices
+
+
+async def test_two_providers_latching_together_share_one_ops_issue(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 5. Under `mixed` both providers can latch
+    in the same tick; two concurrent find-or-creates each miss the other's
+    create. No network failure needed — this is a plain race."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+    entry = next(iter(orch.provider_waiting.values()))
+
+    # Two providers latch together, both resolving the ops issue concurrently.
+    orch._latch_notices.clear()
+    tracker.comments.clear()
+    orch._ops_issue_id = None
+    tracker.ops_issue_calls = 0          # count only the concurrent pair below
+    claude = orch._provider_circuit("claude")
+    codex = orch._provider_circuit("codex")
+    t2 = codex._open_latched(FailureClass.PROVIDER_AUTHENTICATION)
+    await asyncio.gather(
+        orch._notify_latched_circuit(
+            replace_transition(claude), entry, ("claude", claude.generation)),
+        orch._notify_latched_circuit(t2, entry, ("codex", codex.generation)),
+    )
+
+    assert tracker.ops_issues_created == 1
+    assert tracker.ops_issue_calls == 1     # single-flighted, not re-resolved
+    assert len([c for c in tracker.comments if c[0] == "ops-issue-node-id"]) == 2
+
+
+def replace_transition(circuit):
+    """The latched transition `circuit` is already in, re-expressed for a
+    direct `_notify_latched_circuit` call."""
+    from orchestrator.provider_circuit import CircuitTransition
+    return CircuitTransition(
+        provider_id=circuit.provider_id,
+        previous_state=CircuitState.CLOSED,
+        state=CircuitState.OPEN_LATCHED,
+        generation=circuit.generation,
+        failure_class=FailureClass.PROVIDER_AUTHENTICATION,
+    )
+
+
+async def test_recovery_during_ops_issue_resolution_withdraws_the_notice(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 6. Resolution can block on the network or
+    on another provider's notice holding the lock; a worker still in flight can
+    close the latch during that await. The authoritative check has to sit after
+    resolution, immediately before the mutation."""
+    resolving = asyncio.Event()
+    release = asyncio.Event()
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    real_find = tracker.find_or_create_ops_issue
+
+    async def slow_find():
+        resolving.set()
+        await release.wait()
+        return await real_find()
+
+    tracker.find_or_create_ops_issue = slow_find
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+
+    await orch._tick()
+    await wait_for(lambda: resolving.is_set())   # past the fast-path check
+    orch._provider_circuit("claude").record_success()
+    release.set()
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+    assert not orch._latch_notices
+
+
+async def test_a_closed_ops_issue_is_replaced_not_reused(tmp_path, monkeypatch) -> None:
+    """Codex review on PR #166, round 8. The ops log's own body says "Closing it
+    is safe; the next notice opens a new one" — but the cache never expired, so
+    a later latch in the same process posted to the closed issue, where it may
+    never surface in the operator's open queue."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+    assert tracker.ops_issues_created == 1
+
+    # The operator closes the ops log, then the circuit recovers and re-latches.
+    tracker.close_ops_issue()
+    entry = next(iter(orch.provider_waiting.values()))
+    circuit = orch._provider_circuit("claude")
+    circuit.record_success()
+    transition = circuit._open_latched(FailureClass.PROVIDER_AUTHENTICATION)
+    orch._latch_notices.clear()
+    await orch._notify_latched_circuit(
+        transition, entry, ("claude", circuit.generation))
+
+    assert tracker.ops_issues_created == 2          # a replacement was opened
+    assert tracker.comments[-1][0] == "ops-issue-node-id-2"
+
+
+async def test_a_posted_notice_is_corrected_when_the_circuit_recovers(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 9. A same-provider worker still in flight
+    can succeed AFTER the notice is written, closing the circuit and leaving a
+    false "everything is stopped" standing. In a wave-operated system the
+    operator reads that days later and restarts for nothing."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    # A same-provider worker that was ALREADY RUNNING when the latch opened now
+    # finishes successfully. Driven through `_on_worker_done` rather than by
+    # calling the notice helper directly — the wiring is the thing under test.
+    other = make_issue(2)
+
+    async def _done():
+        return None
+
+    task = asyncio.create_task(_done())
+    await task
+    orch.running[other.id] = scheduler_mod.RunningEntry(
+        task=task, identifier=other.identifier, issue=other,
+        provider_id="claude", stall_timeout_ms=60000,
+        session_key=(other.id, "implement"),
+    )
+    orch._on_worker_done(other.id, task)
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    bodies = [b for t, b in tracker.comments if t == "ops-issue-node-id"]
+    assert len(bodies) == 2
+    assert "Recovered" in bodies[1] and "no restart is needed" in bodies[1]
+
+
+async def test_recovery_without_a_posted_notice_says_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    """A circuit that latched and recovered before its notice was ever posted
+    has nothing to correct — the correction must not be the first thing the
+    operator hears about an outage that never reached them."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    circuit = orch._provider_circuit("claude")
+    circuit._open_latched(FailureClass.PROVIDER_AUTHENTICATION)
+    issue = make_issue(2)
+
+    async def _done():
+        return None
+
+    task = asyncio.create_task(_done())
+    await task
+    orch.running[issue.id] = scheduler_mod.RunningEntry(
+        task=task, identifier=issue.identifier, issue=issue,
+        provider_id="claude", stall_timeout_ms=60000,
+        session_key=(issue.id, "implement"),
+    )
+    orch._on_worker_done(issue.id, task)
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    assert not [c for c in tracker.comments if c[0] == "ops-issue-node-id"]
+
+
+async def test_a_correction_goes_to_the_issue_its_notice_landed_in(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex review on PR #166, round 10. The ops issue rotates when an operator
+    closes it. A correction that trusted the CURRENT id would land in an issue
+    the outage notice it corrects never appeared in — leaving the stale warning
+    standing exactly where someone will read it."""
+    orch, tracker, _, _ = _build_harness(
+        tmp_path, monkeypatch,
+        runner=_latching_runner(FailureClass.PROVIDER_AUTHENTICATION),
+    )
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states[issue.id] = issue
+    await orch._tick()
+    await wait_for(lambda: any(c[0] == "ops-issue-node-id" for c in tracker.comments))
+
+    # Operator closes the log; a second provider latches into a fresh one.
+    tracker.close_ops_issue()
+    entry = next(iter(orch.provider_waiting.values()))
+    codex = orch._provider_circuit("codex")
+    t2 = codex._open_latched(FailureClass.PROVIDER_AUTHENTICATION)
+    await orch._notify_latched_circuit(t2, entry, ("codex", codex.generation))
+    assert tracker.ops_issues_created == 2
+
+    # Now the in-flight CLAUDE worker succeeds: its correction belongs in the
+    # ORIGINAL issue, where its outage notice is.
+    other = make_issue(2)
+
+    async def _done():
+        return None
+
+    task = asyncio.create_task(_done())
+    await task
+    orch.running[other.id] = scheduler_mod.RunningEntry(
+        task=task, identifier=other.identifier, issue=other,
+        provider_id="claude", stall_timeout_ms=60000,
+        session_key=(other.id, "implement"),
+    )
+    orch._on_worker_done(other.id, task)
+    await wait_for(lambda: not orch._latch_notice_tasks)
+
+    corrections = [t for t, b in tracker.comments if "Recovered" in b]
+    assert corrections == ["ops-issue-node-id"]

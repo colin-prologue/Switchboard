@@ -746,3 +746,26 @@ def test_selector_hands_the_guard_the_repo_the_scheduler_works():
 
     assert _gate_c_repo(_Cfg(agent)) == "colin-prologue/civ-life"
     assert _gate_c_repo(_Cfg(human)) == ""
+
+
+def test_cross_repo_denial_names_the_real_reason(tmp_path):
+    """Verified live through `claude -p` (#158): the guard denies correctly, but
+    told the agent "Gate C is Colin's" for a cross-repo merge on an AGENT-owned
+    gate — where the gate is NOT Colin's and the project's own merges ARE
+    permitted. A denial that misdescribes its cause sends a retrying session to
+    the wrong fix; that is how civ-life#4 burned a full budget."""
+    proc = _run_bash_gate_c_agent(
+        "gh pr merge -R colin-prologue/Switchboard 12", tmp_path, repo=OWN_REPO)
+    assert proc.returncode == 2
+    assert "another project's repo" in proc.stderr
+    assert "ITS OWN repo only" in proc.stderr
+    assert "Gate C is Colin's" not in proc.stderr, (
+        "the human-gate hint must not be reused for a cross-repo refusal")
+
+
+def test_human_gate_denial_keeps_the_handoff_hint(tmp_path):
+    """The original message is still right where the gate really is a human's."""
+    proc = _run_bash(("gh pr merge 12"), tmp_path)
+    assert proc.returncode == 2
+    assert "Gate C is Colin's" in proc.stderr
+    assert "another project's repo" not in proc.stderr

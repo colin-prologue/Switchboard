@@ -309,6 +309,34 @@ formality, because it is checkable against the PR and a false one is worse than
 an absent one. A merge carried out on the strength of a review must never imply
 provenance the review did not have.
 
+### If this is not the first round on this PR
+
+Read the verdict comments already on it. **Re-run every check regardless** — the
+diff changed, and taking a previous round's word for it is the failure this
+stance exists to avoid. What changes is what you WRITE, not what you verify.
+
+Report the **delta**:
+
+- findings from the last round that are now fixed, and what you ran to confirm it;
+- findings still outstanding;
+- anything new.
+
+For criteria a previous round already established and that have not changed,
+one line naming them and the round is enough — *"AC2, AC7 and AC9 re-verified,
+unchanged since round one."* Do not restate the evidence. Three rounds of the
+same inventory buries the part that is actually new, and the reader has to diff
+essays to find it.
+
+**Two things are never condensed.** A criterion that CHANGED state gets the full
+treatment, including one that regressed from met back to unmet — a shorter
+comment must never be how a criterion stops holding quietly. And the `## In
+brief` block above is written fresh every round: it carries your judgment of
+where the PR stands now, which is different information each time, not a summary
+of the change.
+
+Round one has no previous round, so the full inventory is the right output
+there.
+
 {% else %}
 ## Engineering mode — implement the ticket
 

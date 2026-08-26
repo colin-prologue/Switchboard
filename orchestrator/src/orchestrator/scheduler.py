@@ -75,6 +75,13 @@ from .workspace import WorkspaceManager
 CONTINUATION_DELAY_MS = 1000       # core §8.4 fixed continuation delay
 FAILURE_BASE_BACKOFF_MS = 10000    # core §8.4 failure backoff base
 SHUTDOWN_TEARDOWN_GRACE_MS = 5000  # shutdown: drain budget for worker finally
+# issue #165: the latch notice is the only signal that reaches an operator
+# who has walked away, and a latched circuit never re-fires it, so the
+# retry lives in the notice task itself. Bounded: this must not become a
+# background loop that outlives the condition it is reporting.
+LATCH_NOTICE_ATTEMPTS = 3
+LATCH_NOTICE_RETRY_MS = 30000
+LATCH_NOTICE_POLL_MS = 250         # backoff granularity, so SIGTERM lands fast
                                    # blocks (after_run hooks) before hard-cancel
 
 # Durable park marker (SPEC.md §4 owned extension). Written to the tracker at
@@ -312,6 +319,28 @@ class Orchestrator:
         self.provider_circuits: dict[str, ProviderCircuit] = {}
         self.provider_waiting: dict[str, ProviderWaitEntry] = {}
         self._circuit_refusals: set[tuple[str, str, int]] = set()
+        # issue #165: latch notices already posted, keyed by
+        # (provider, generation) — one notice per latch, never per tick.
+        self._latch_notices: set[tuple[str, int]] = set()
+        # Notices actually POSTED, mapped to the ops issue each one LANDED IN
+        # (codex review on PR #166, rounds 9 and 10). The id is stored per
+        # notice rather than read from `_ops_issue_id` at correction time: the
+        # ops issue rotates when an operator closes it, so a correction that
+        # trusted the current id could land in an issue the outage notice it
+        # corrects never appeared in — leaving the stale warning standing where
+        # someone will actually read it.
+        self._latch_notices_posted: dict[tuple[str, int], str] = {}
+        # Strong refs for the fire-and-forget notice tasks: `_on_worker_done`
+        # is a sync done-callback, so the post cannot be awaited inline, and
+        # a bare create_task may be garbage-collected mid-flight.
+        self._latch_notice_tasks: set[asyncio.Task] = set()
+        # Ops-issue resolution is SHARED and single-flighted across notice
+        # tasks (codex review on PR #166, round 5): in mixed mode two
+        # providers can latch in the same tick, and two concurrent
+        # find-or-create calls each miss the other's create — producing two
+        # ops logs with no network failure involved at all.
+        self._ops_issue_id: str | None = None
+        self._ops_issue_lock = asyncio.Lock()
 
         # owned extension state (SPEC.md §4 session cap / parking)
         # Keyed by (issue id, session role) — NOT by issue id alone (issue #35 /
@@ -558,7 +587,15 @@ class Orchestrator:
         # teardowns, bounded: a wedged hook must not hold SIGTERM hostage for
         # hooks.timeout_ms. Past the grace, a second cancel interrupts the hook
         # await, and _run_hook kills the hook's process group on the way out.
-        pending = {e.task for e in self.running.values()} | set(self.terminating.values())
+        # The latch notice is drained too (codex review on PR #166): an
+        # operator restarts BECAUSE of a latch, so the un-drained case loses
+        # precisely the message explaining why — during the very action it asks
+        # for. Same bounded grace: it must not hold SIGTERM open either.
+        pending = (
+            {e.task for e in self.running.values()}
+            | set(self.terminating.values())
+            | set(self._latch_notice_tasks)
+        )
         if pending:
             _, not_done = await asyncio.wait(
                 pending, timeout=SHUTDOWN_TEARDOWN_GRACE_MS / 1000)
@@ -1440,6 +1477,7 @@ class Orchestrator:
         exc = task.exception()
         if exc is None:
             transition = self._provider_circuit(entry.provider_id).record_success()
+            self._start_recovery_notice(transition)
             self._log_circuit_transition(transition, entry)
             self._schedule_retry(issue_id, entry.identifier, attempt=1,
                                  delay_ms=CONTINUATION_DELAY_MS)
@@ -1459,6 +1497,7 @@ class Orchestrator:
                 probe_token=entry.circuit_probe_token,
             )
             self._log_circuit_transition(transition, entry)
+            self._start_latch_notice(transition, entry)
             if circuit.is_circuit_failure(failure_class):
                 self._refund_issue_session(entry.session_key)
                 self.provider_waiting[issue_id] = ProviderWaitEntry(
@@ -1481,6 +1520,244 @@ class Orchestrator:
                 provider_id=entry.provider_id, session_id=entry.session_id,
                 outcome="failed", failure_class=failure_class.value,
                 error=str(exc))
+
+    def _start_latch_notice(
+        self, transition: CircuitTransition | None, entry: RunningEntry
+    ) -> None:
+        """Fire the latch notice without blocking worker teardown (issue #165).
+
+        The claim/refund/park bookkeeping below must not wait on a GitHub round
+        trip, and `_on_worker_done` is sync anyway. Marking the notice sent
+        happens HERE, before the task runs, so two workers failing into the same
+        latch in the same tick cannot both queue a post.
+        """
+        if transition is None or transition.state is not CircuitState.OPEN_LATCHED:
+            return
+        key = (transition.provider_id, transition.generation)
+        if key in self._latch_notices:
+            return
+        self._latch_notices.add(key)
+        task = asyncio.create_task(self._notify_latched_circuit(transition, entry, key))
+        self._latch_notice_tasks.add(task)
+        task.add_done_callback(self._latch_notice_tasks.discard)
+
+    def _start_recovery_notice(self, transition: CircuitTransition | None) -> None:
+        """Correct a POSTED latch notice once the circuit recovers (issue #165,
+        codex review on PR #166, round 9).
+
+        A same-provider worker still in flight can succeed after the notice has
+        already been written, closing the circuit. The notice then stands as a
+        false "everything is stopped" — and in a wave-operated system the
+        operator reads it days later and restarts for nothing.
+
+        Round five declined this on the grounds that a correction is "a second
+        message about a non-event". That was wrong for this operating model:
+        when the reader arrives long after the fact, "stopped" followed by
+        "recovered" is a materially different message from a bare "stopped",
+        and the restart it prevents is the exact cost this notice exists to
+        avoid. AgDR-046 records the reversal.
+        """
+        if (transition is None
+                or transition.state is not CircuitState.CLOSED
+                or transition.previous_state is not CircuitState.OPEN_LATCHED):
+            return
+        posted = [k for k in self._latch_notices_posted
+                  if k[0] == transition.provider_id]
+        if not posted:
+            return
+        # Correct the issue the notice actually landed in, not whichever one is
+        # current now (round 10).
+        target = self._latch_notices_posted[posted[-1]]
+        for key in posted:
+            del self._latch_notices_posted[key]
+        task = asyncio.create_task(
+            self._notify_circuit_recovered(transition.provider_id, target))
+        # Shares the notice task set, so shutdown drains it on the same grace.
+        self._latch_notice_tasks.add(task)
+        task.add_done_callback(self._latch_notice_tasks.discard)
+
+    async def _notify_circuit_recovered(
+        self, provider_id: str, ops_issue_id: str
+    ) -> None:
+        """Post the correction. Single attempt, and silent on failure.
+
+        Deliberately NOT retried like the latch notice: that notice is the only
+        signal a stopped system produces, so losing it strands the operator,
+        whereas losing a correction leaves them with a stale warning that at
+        worst costs one unnecessary restart. Retrying it would spend the
+        shutdown grace on the less important of the two messages.
+        """
+        body = (
+            f"**Recovered — `{provider_id}` is dispatching again.**\n\n"
+            f"A worker already in flight when the circuit latched completed "
+            f"successfully, which closed it. The outage notice above no longer "
+            f"applies and no restart is needed."
+        )
+        try:
+            tracker, _ = self._components()
+            await tracker.add_issue_comment(ops_issue_id, body)
+        except Exception as exc:  # noqa: BLE001 - never fail a turn on this
+            log("recovery notice failed", provider_id=provider_id,
+                outcome="failed", error=str(exc))
+
+    def _latch_still_open(self, transition: CircuitTransition) -> bool:
+        """Is the circuit still latched in the generation this notice is about?"""
+        circuit = self._provider_circuit(transition.provider_id)
+        return (circuit.state is CircuitState.OPEN_LATCHED
+                and circuit.generation == transition.generation)
+
+    async def _post_latch_notice(
+        self, tracker, body: str, transition: CircuitTransition
+    ) -> bool:
+        """Resolve the ops issue at most once per process, then comment.
+
+        The lock is the single-flight: two notice tasks latching in the same
+        tick would otherwise both query, both miss the other's create, and both
+        create an ops log. The cached id also removes the retry-side
+        re-resolution — `find_or_create_ops_issue` is not idempotent under a lost
+        response either. The residual (a create whose response is lost) stays
+        accepted; see AgDR-046.
+
+        The circuit is re-checked AFTER resolution and immediately before the
+        mutation (codex review on PR #166, round 6): resolution can block on the
+        network or on another provider's notice holding the lock, and a worker
+        still in flight can close the latch during that await. This is the last
+        point a check is possible — the comment round trip itself remains an
+        irreducible window, since GitHub offers no conditional write.
+        """
+        async with self._ops_issue_lock:
+            if self._ops_issue_id is not None:
+                # Validate the cache before reusing it (codex review on PR #166,
+                # round 8). `find_or_create_ops_issue` searches OPEN issues, but
+                # the cache does not expire — so an operator who closes the ops
+                # log without restarting would get every later notice posted to
+                # the closed issue, where it may never surface in their open
+                # queue. That also contradicts the promise in the log's own
+                # body: "Closing it is safe; the next notice opens a new one."
+                # One extra read per notice, and notices are per latch
+                # generation, so the cost is negligible.
+                states = await tracker.fetch_issue_states_by_ids([self._ops_issue_id])
+                if not states or states[0].state == "closed":
+                    self._ops_issue_id = None
+            if self._ops_issue_id is None:
+                self._ops_issue_id = await tracker.find_or_create_ops_issue()
+        if not self._latch_still_open(transition):
+            return False
+        await tracker.add_issue_comment(self._ops_issue_id, body)
+        self._latch_notices_posted[
+            (transition.provider_id, transition.generation)] = self._ops_issue_id
+        return True
+
+    async def _notify_latched_circuit(
+        self,
+        transition: CircuitTransition,
+        entry: RunningEntry,
+        key: tuple[str, int],
+    ) -> None:
+        """Post ONE operator notice when the circuit latches (issue #165).
+
+        Only the LATCHED classes reach here: auth, plan limit, credits. Each one
+        stops every project's work and none of them clears itself, so this is
+        the narrow set worth interrupting an operator for. Transient failures
+        (rate limit, 5xx) self-heal through the cooldown and are deliberately
+        silent — Switchboard runs in waves, and a channel that also carries
+        recoverable noise is one the operator learns to ignore.
+
+        Edge-triggered on (provider, generation): a latched circuit refuses
+        dispatch on every subsequent tick, and this must not narrate that.
+        """
+        failure_class = transition.failure_class
+        failure = failure_class.value if failure_class else "unknown"
+        # The hint is chosen from the CLASS, not hardcoded (codex review on PR
+        # #166): a credits or plan-limit latch, or an auth latch on a non-Claude
+        # provider, sent the operator to re-login to the wrong CLI while every
+        # project stayed stopped.
+        hints = {
+            FailureClass.PROVIDER_AUTHENTICATION:
+                f"the `{transition.provider_id}` CLI most likely needs a fresh login",
+            FailureClass.PROVIDER_PLAN_LIMIT:
+                "the plan's usage limit is reached — it clears when the window resets",
+            FailureClass.PROVIDER_CREDITS_EXHAUSTED:
+                "the account is out of credits",
+        }
+        hint = hints.get(failure_class) if failure_class else None
+        # Scoped to the LATCHED provider (codex review on PR #166, round 4):
+        # circuits are per-provider and `MixedRunnerSelector` assigns issues
+        # independently, so in mixed mode work on the healthy provider keeps
+        # running. Claiming a total outage there would prompt a restart that is
+        # not needed — the same wrong-operational-instruction defect the
+        # class-derived hint fixed one round earlier.
+        scope = (
+            f"no issue assigned to `{transition.provider_id}` will run"
+            if self._runner_selector.provider_id == "mixed"
+            else "nothing will run"
+        )
+        body = (
+            f"**Switchboard stopped dispatching to `{transition.provider_id}` "
+            f"— `{failure}`.**\n\n"
+            f"This class does not clear on its own; {scope} until you "
+            f"fix it and restart the orchestrator. No session budget was spent "
+            f"on it — the issue that hit it (`{entry.identifier}`) was refunded "
+            f"and is waiting, not parked."
+            + (f"\n\nLikely cause: {hint}." if hint else "")
+        )
+        # A LATCHED circuit produces no further transitions (`record_failure`
+        # returns None once latched) and refuses every dispatch, so nothing will
+        # call this again — un-marking the key retries nothing (codex review on
+        # PR #166). The retry has to happen here or the notice is lost for the
+        # life of the process, which is the silent drop this change removes.
+        for attempt in range(1, LATCH_NOTICE_ATTEMPTS + 1):
+            try:
+                # Resolved INSIDE the guard: `_components()` raises when the
+                # config is not loaded, and letting that escape would strand the
+                # notice as an unhandled task exception.
+                tracker, _ = self._components()
+                # Re-check the circuit before POSTING (codex review on PR #166,
+                # round 5). `record_success` closes a latched circuit
+                # (`test_success_closes_latched_circuit_from_already_running_worker`),
+                # so a worker still in flight when the latch opened can clear it
+                # while this task is queued or backing off. Posting anyway hands
+                # the operator a stale outage and buys the unnecessary restart
+                # this notice exists to make unnecessary.
+                # Cheap fast path: skip resolution entirely when the circuit
+                # has already recovered. The authoritative check is the one
+                # inside `_post_latch_notice`, after resolution.
+                if not self._latch_still_open(transition):
+                    log("latch notice withdrawn; circuit recovered",
+                        provider_id=transition.provider_id, outcome="skipped")
+                    self._latch_notices.discard(key)
+                    return
+                if not await self._post_latch_notice(tracker, body, transition):
+                    log("latch notice withdrawn; circuit recovered",
+                        provider_id=transition.provider_id, outcome="skipped")
+                    self._latch_notices.discard(key)
+                return
+            except Exception as exc:  # noqa: BLE001 - never fail a turn on this
+                log("latch notice failed", provider_id=transition.provider_id,
+                    outcome="failed", attempt=attempt, error=str(exc))
+                if attempt == LATCH_NOTICE_ATTEMPTS or self._stopping:
+                    # Give the key back so a LATER generation (after an operator
+                    # restart re-closes and re-opens the circuit) is not silenced
+                    # by this one's bookkeeping. `_stopping` short-circuits the
+                    # wait: the process is going down, so sleeping out the
+                    # backoff only spends the shutdown grace on a retry that
+                    # will never run.
+                    self._latch_notices.discard(key)
+                    return
+                # Stop-AWARE, not stop-checked (codex review on PR #166,
+                # round 3): checking `_stopping` before the wait leaves a
+                # SIGTERM arriving mid-backoff to expire the 5s shutdown grace
+                # and cancel the task mid-sleep — losing the notice during the
+                # restart it exists to explain. Polled rather than event-driven
+                # to avoid a second shutdown signal to keep in sync with
+                # `_stopping`.
+                waited = 0
+                while waited < LATCH_NOTICE_RETRY_MS and not self._stopping:
+                    await asyncio.sleep(LATCH_NOTICE_POLL_MS / 1000)
+                    waited += LATCH_NOTICE_POLL_MS
+                if self._stopping:
+                    self._latch_notices.discard(key)
+                    return
 
     def _refund_issue_session(self, session_key: tuple[str, str]) -> None:
         """Give back the session a provider-circuit failure burned. Refunds the

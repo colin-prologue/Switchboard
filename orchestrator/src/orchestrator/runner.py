@@ -34,6 +34,7 @@ from . import guard  # the flag STRING lives with the parser that reads it;
                      # a literal in both files is one rename from silently
                      # reverting every project to the human gate
 from .failure_classification import classify_claude_failure
+from .provider_circuit import CIRCUIT_FAILURE_CLASSES
 from .types import (
     AgentEvent,
     ClaudeConfig,
@@ -132,6 +133,31 @@ def _structured_error_text(msg: dict) -> str:
     if isinstance(value, dict) and isinstance(value.get("message"), str):
         return value["message"][:NOTIFICATION_TEXT_CHARS]
     return ""
+
+
+SYNTHETIC_MODEL = "<synthetic>"
+
+
+def _synthetic_error_code(msg: dict) -> str:
+    """Typed failure code off a CLI-AUTHORED synthetic assistant record (#165).
+
+    AgDR-032 rejected reading the assistant record's `"error":
+    "authentication_failed"` because "any assistant message could then latch the
+    provider". That objection is answered by the discriminator, not waived:
+    `message.model` is CLI-ASSIGNED, and only the CLI's own synthetic error
+    records carry `"<synthetic>"` (ground truth:
+    fixtures/claude_cli_auth_logged_out.jsonl, whose synthetic record carries
+    both the marker and the typed code). A real model turn keeps its real model
+    id, so model-authored content still cannot reach the circuit — pinned by
+    `test_a_non_synthetic_record_claiming_a_provider_code_is_ignored`.
+
+    Returns "" for anything that is not such a record.
+    """
+    message = msg.get("message")
+    if not isinstance(message, dict) or message.get("model") != SYNTHETIC_MODEL:
+        return ""
+    value = msg.get("error")
+    return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
 def _gated_error_text(msg: dict) -> str:
@@ -311,6 +337,8 @@ class ClaudeRunner:
         assert proc.stdout is not None
         first_line = True
         session_id: str | None = None
+        # issue #165: the standing CLI-authored failure code, if any.
+        synthetic_error_code = ""
         result: TurnResult | None = None
 
         try:
@@ -410,6 +438,18 @@ class ClaudeRunner:
                     usage = msg.get("usage") or {}
                     num_turns = msg.get("num_turns", 0) or 0
                     denials = msg.get("permission_denials") or []
+                    # issue #165: a standing CLI-authored provider failure. Held
+                    # separately from the `is_error` gate because which of the
+                    # two terminal shapes an OAuth-expiry run produces is
+                    # UNVERIFIED (fixtures/README.md) — this covers the shape
+                    # where `is_error` is absent and AgDR-032's gate never
+                    # fires, which would otherwise return `succeeded`, spend a
+                    # session, and RESET the circuit on a turn that did no work.
+                    standing_class: FailureClass | None = None
+                    if synthetic_error_code:
+                        candidate = classify_claude_failure(code=synthetic_error_code)
+                        if candidate in CIRCUIT_FAILURE_CLASSES:
+                            standing_class = candidate
 
                     if subtype == "error_max_turns" and session_id is not None:
                         # issue #47: `--max-turns` exhaustion is a benign early
@@ -438,6 +478,32 @@ class ClaudeRunner:
                             session_id=session_id,
                             error=subtype,
                             continuation=Continuation.RESUME_SESSION,
+                            cost_usd=cost_usd,
+                            usage=usage,
+                            num_turns=num_turns,
+                        )
+                    elif subtype == "success" and not is_error and standing_class:
+                        # ORDERED AFTER the `error_max_turns` branch, for
+                        # AgDR-027's reason: a resumable early stop must stay
+                        # resumable whatever else the stream carried.
+                        emit(
+                            "turn_failed",
+                            {
+                                "subtype": subtype,
+                                "is_error": False,
+                                "synthetic_error_code": synthetic_error_code,
+                                "total_cost_usd": cost_usd,
+                                "num_turns": num_turns,
+                                "permission_denials": denials,
+                            },
+                            pid,
+                            usage=usage,
+                        )
+                        result = TurnResult(
+                            status="failed",
+                            session_id=session_id,
+                            error=synthetic_error_code,
+                            failure_class=standing_class,
                             cost_usd=cost_usd,
                             usage=usage,
                             num_turns=num_turns,
@@ -491,7 +557,11 @@ class ClaudeRunner:
                             # never None: WorkerFailure(result.error or ...)
                             error=terminal_reason or subtype or "failed",
                             failure_class=classify_claude_failure(
-                                code=terminal_reason,
+                                # issue #165: the synthetic record's typed code
+                                # first — `terminal_reason` is coarse
+                                # ("api_error", absent from `_CLAUDE_CODES`), so
+                                # on its own it always fell through to text.
+                                code=synthetic_error_code or terminal_reason,
                                 detail=_gated_error_text(msg),
                             ),
                             cost_usd=cost_usd,
@@ -514,7 +584,17 @@ class ClaudeRunner:
                             status="failed",
                             session_id=session_id,
                             error=subtype,
-                            failure_class=classify_claude_failure(
+                            # issue #165 (codex review on PR #166): the standing
+                            # code applies here too. A synthetic provider error
+                            # followed by a terminal record with a FAILURE
+                            # subtype would otherwise classify on the subtype
+                            # alone, stay WORKER_FAILURE, and spend the issue's
+                            # budget — the same defect this ticket fixes, just
+                            # on the branch it had not reached. Safe against
+                            # `error_max_turns_no_session`: reaching a turn cap
+                            # requires real model turns, and any one of them
+                            # clears the standing code.
+                            failure_class=standing_class or classify_claude_failure(
                                 code=subtype,
                                 detail=_structured_error_text(msg),
                             ),
@@ -523,6 +603,16 @@ class ClaudeRunner:
                             num_turns=num_turns,
                         )
                     break
+
+                if msg_type == "assistant":
+                    # issue #165: remember the LAST standing synthetic error.
+                    # A real model turn after one means the CLI retried and got
+                    # through, so the error is cleared rather than held — a blip
+                    # must not fail a turn whose work actually landed.
+                    if code := _synthetic_error_code(msg):
+                        synthetic_error_code = code
+                    elif isinstance(msg.get("message"), dict):
+                        synthetic_error_code = ""
 
                 # assistant / user / any other message type: short summary only.
                 emit("notification", _summarize_message(msg), pid)
@@ -554,6 +644,32 @@ class ClaudeRunner:
                 error="claude_not_found",
                 failure_class=FailureClass.RUNNER_STARTUP,
             )
+
+        # issue #165 (codex review on PR #166, round 7): a stream that carried a
+        # trusted synthetic provider error and then closed WITHOUT a terminal
+        # result is the most likely shape of an abrupt transport failure — which
+        # is one of the two conditions this ticket exists for. Classifying it
+        # `RUNNER_PROTOCOL` (not a circuit class) would charge the issue's
+        # budget and leave the circuit closed: the production failure, recreated
+        # on the one path that had no terminal record to read.
+        if synthetic_error_code:
+            eof_class = classify_claude_failure(code=synthetic_error_code)
+            if eof_class in CIRCUIT_FAILURE_CLASSES:
+                emit(
+                    "turn_failed",
+                    {
+                        "error": synthetic_error_code,
+                        "synthetic_error_code": synthetic_error_code,
+                        "stderr": _stderr_tail(stderr_chunks),
+                    },
+                    pid,
+                )
+                return TurnResult(
+                    status="failed",
+                    session_id=session_id,
+                    error=synthetic_error_code,
+                    failure_class=eof_class,
+                )
 
         emit("turn_failed", {"error": "port_exit", "stderr": _stderr_tail(stderr_chunks)}, pid)
         return TurnResult(

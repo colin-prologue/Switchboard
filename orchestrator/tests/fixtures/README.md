@@ -53,10 +53,11 @@ covered by hand-written "real-looking" fixtures.
   (isolated config — the CLI sees no auth; the operator's real login untouched)
 - **Exit code:** 1
 
-What it proves (issue #116): the logged-out CLI emits an event with
-`"error": "authentication_failed"` (`is_api_error_message: true`) — a code
-present in NEITHER `_CLAUDE_CODES` entry (`authentication_expired` /
-`authentication_required`) — on the ASSISTANT record, while its TERMINAL
+What it proves (issues #116, #165): the logged-out CLI emits an event with
+`"error": "authentication_failed"` (`is_api_error_message: true`, and
+`message.model: "<synthetic>"`) — a code present in neither `_CLAUDE_CODES`
+entry as of #116 (`authentication_expired` / `authentication_required`), and
+added by #165 — on the ASSISTANT record, while its TERMINAL
 record carries `subtype: "success"` with `is_error: true`,
 `terminal_reason: "api_error"`, and `result: "Not logged in · Please run
 /login"`. Pre-#116 the runner branched on `subtype` alone, so the run returned
@@ -71,9 +72,41 @@ not probe fixtures — #109 precedent).
 | Condition (claude) | Status |
 |---|---|
 | authentication (logged out) | **verified** — this fixture |
-| usage/plan limit, credits, rate limit, unavailable | UNVERIFIED — not safely reproducible on demand |
+| authentication (OAuth session EXPIRED) | OBSERVED — see below, no probe capture |
+| transport drop mid-response (`server_error`) | OBSERVED — see below, no probe capture |
+| usage/plan limit, credits, rate limit | UNVERIFIED — not safely reproducible on demand |
 
-The `is_error` outcome gate (issue #116) catches all four unverified
+The `is_error` outcome gate (issue #116) catches the remaining unverified
 conditions regardless of their per-condition strings — they fail the turn as
 `WORKER_FAILURE` (retry with backoff) until real text is captured and a
 matching pattern is added.
+
+## OBSERVED-but-not-captured claude conditions (issue #165)
+
+Two conditions were seen in **production session transcripts**, not in an
+isolated probe. They get no fixture file: this directory holds probe captures
+that can be replayed byte-for-byte, and hand-authoring a "real-looking" one is
+the defect class #109 exists to remove. Recorded here instead, per the same
+precedent that governs the UNVERIFIED rows above.
+
+Source: `switchboard-workspaces/civ-life/8/.run/transcripts/`, five consecutive
+verify sessions on civ-life #8 (2026-08-16 → 08-19), every one of which failed
+on infrastructure and was charged to the ticket's session budget until it
+parked at 5/5.
+
+| Seen on the synthetic assistant record | `error` code | Text |
+|---|---|---|
+| 2026-08-17, -18, -19 | `authentication_failed` | `Failed to authenticate: OAuth session expired and could not be refreshed` |
+| 2026-08-16 (×2) | `server_error` | `API Error: Connection closed mid-response. The response above may be incomplete.` |
+
+Both carry `message.model: "<synthetic>"`, the same marker the logged-out
+fixture shows — which is what lets #165 read the typed code without letting
+model-authored content reach the circuit.
+
+**What is NOT established:** whether either run's TERMINAL record sets
+`is_error`. The session transcript format does not contain the `result` record,
+and neither condition is reproducible on demand. #165 therefore handles BOTH
+shapes — the gated one and the `is_error`-absent one — rather than assuming the
+shape the logged-out probe happens to show. If a real capture of either is ever
+taken, it belongs here as a proper fixture and the corresponding branch in
+`runner.py` can be narrowed.

@@ -58,6 +58,8 @@ WORKFLOW_BASE_PATH = (
     Path(__file__).resolve().parents[3] / "workflow" / "WORKFLOW.base.md"
 )
 
+PROJECTS_DIR = Path(__file__).resolve().parents[3] / "projects"
+
 _ACTIVE_STATES_RE = re.compile(r"^\s*active_states:\s*(\[.*\])\s*$")
 
 # The Status field's option per DERIVED STATE (spaces, not dashes — the
@@ -121,6 +123,42 @@ def status_labels(labels: Iterable[str]) -> list[str]:
     return sorted(l for l in labels if l.startswith(STATUS_PREFIX))
 
 
+def workflow_for_repo(repo: str, projects_dir: Path = PROJECTS_DIR) -> Path | None:
+    """The COMPOSED workflow of the project bound to `repo`, or None.
+
+    `active_states` became a per-project stance property in `AgDR-039`, so
+    deriving the honored-drag set from a fixed template applies one project's
+    state machine to every board — `base` has `triage` and no `review`,
+    `prototype` the reverse. The board would then arbitrate a project's
+    legitimate transitions using another project's rules (issue #156).
+
+    Resolution goes through the same binding the orchestrator dispatches from:
+    match `SB_GITHUB_REPO` in each `projects/<slug>/project.env`, then read that
+    project's `WORKFLOW.md`. Deriving it rather than declaring a second copy is
+    what keeps the board and the scheduler from disagreeing, which is the
+    failure `AgDR-043` was written about.
+    """
+    target = (repo or "").strip().lower()
+    if not target:
+        return None
+    try:
+        bindings = sorted(projects_dir.glob("*/project.env"))
+    except OSError:
+        return None
+    for env_file in bindings:
+        try:
+            text = env_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.startswith("SB_GITHUB_REPO="):
+                if line.split("=", 1)[1].strip().lower() == target:
+                    workflow = env_file.parent / "WORKFLOW.md"
+                    return workflow if workflow.is_file() else None
+                break
+    return None
+
+
 def load_active_states(path: Path = WORKFLOW_BASE_PATH) -> frozenset[str]:
     """`tracker.active_states` read from the committed workflow front matter.
 
@@ -145,8 +183,16 @@ def load_active_states(path: Path = WORKFLOW_BASE_PATH) -> frozenset[str]:
 def honored_drags(
     edges: Sequence[dict] | None = None,
     active_states: frozenset[str] | None = None,
+    repo: str = "",
 ) -> frozenset[tuple[str, str]]:
     """The (from, to) pairs a board drag is allowed to write a label for.
+
+    `repo` names the repository being synced; its project's `active_states`
+    decide which targets are orchestrator-owned. When the project cannot be
+    resolved the honored set is EMPTY — every drag snaps back. That direction is
+    deliberate: honoring a drag writes a `status:*` label the orchestrator
+    dispatches on, while refusing one only annoys a human, so an unknown project
+    must never become the permissive case (issue #156).
 
     Derived from `workflow/transitions.yml`, never hand-listed: an edge with
     that pair must EXIST (the table carries duplicate `(from, to)` rows, so this
@@ -160,8 +206,12 @@ def honored_drags(
     orchestrator territory (`parked -> todo`, `human-review -> todo`).
     """
     rows = load_edges() if edges is None else edges
-    active = load_active_states() if active_states is None else active_states
-    excluded_to = active | EXCLUDED_TO_EXTRA
+    if active_states is None:
+        workflow = workflow_for_repo(repo)
+        if workflow is None:
+            return frozenset()
+        active_states = load_active_states(workflow)
+    excluded_to = active_states | EXCLUDED_TO_EXTRA
 
     out: set[tuple[str, str]] = set()
     for edge in rows:
@@ -182,8 +232,9 @@ def is_honored_drag(
     to_state: str,
     *,
     allowlist: frozenset[tuple[str, str]] | None = None,
+    repo: str = "",
 ) -> bool:
-    pairs = honored_drags() if allowlist is None else allowlist
+    pairs = honored_drags(repo=repo) if allowlist is None else allowlist
     return (normalize_state(from_state), normalize_state(to_state)) in pairs
 
 
@@ -296,6 +347,7 @@ def poll_decision(
     field_updated_at: str | None,
     last_label_event_at: str | None,
     allowlist: frozenset[tuple[str, str]] | None = None,
+    repo: str = "",
 ) -> Decision:
     """One project ITEM's arbitration on the scheduled poll.
 
@@ -369,7 +421,7 @@ def poll_decision(
             to_state=label_state,
         )
 
-    if is_honored_drag(label_state, field_state, allowlist=allowlist):
+    if is_honored_drag(label_state, field_state, allowlist=allowlist, repo=repo):
         return Decision(
             LABEL_WRITE,
             f"honored drag {label_state!r} -> {field_state!r}",
@@ -817,9 +869,10 @@ def run_mirror(
     return decision
 
 
-def run_poll(client: ProjectClient, *, dry_run: bool = False) -> list[Decision]:
+def run_poll(client: ProjectClient, *, dry_run: bool = False,
+             repo: str = "") -> list[Decision]:
     """field -> label arbitration across every project item (the schedule path)."""
-    allowlist = honored_drags()
+    allowlist = honored_drags(repo=repo)
     out: list[Decision] = []
     for item in client.items():
         if item.get("field_page_truncated") or item.get("labels_truncated"):
@@ -902,7 +955,7 @@ def main(argv: Sequence[str] | None = None, *, client: ProjectClient | None = No
     elif args.mode == "backfill":
         run_backfill(client, dry_run=args.dry_run)
     else:
-        run_poll(client, dry_run=args.dry_run)
+        run_poll(client, dry_run=args.dry_run, repo=args.repo)
     return 0
 
 

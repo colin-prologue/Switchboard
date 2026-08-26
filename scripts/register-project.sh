@@ -37,13 +37,23 @@
 #                          instead of the repo root. Used for dogfooding so this repo
 #                          can manage itself without polluting the general-purpose root.
 # --self                   Convenience: convention-root=self, slug defaults to
-#                          'switchboard-self'. Still pass --repo <you>/switchboard.
+#                          'switchboard-self', and --stance defaults to 'base'
+#                          rather than 'prototype' (issue #153) — this is the repo
+#                          that governs every other project's merge rights, so it
+#                          is the one place the loose end of the ladder does not
+#                          belong. An explicit --stance still wins.
+#                          Still pass --repo <you>/switchboard.
 set -euo pipefail
 
 SB_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SLUG="" REPO="" BASE="main" MAX_AGENTS="4" CONVENTION_ROOT="" IS_SELF=0
 STANCE="prototype" VERIFY_CMD="" VERIFY_TOOLS="" REVIEW_BOT=""
+# Whether --stance was given EXPLICITLY. `--self` lowers the default to `base`
+# (see below), and an operator who deliberately asks for a loose self-stance
+# must still get one — so this distinguishes "not specified" from "specified as
+# prototype", which a bare value comparison cannot.
+STANCE_EXPLICIT=0
 WORKSPACE_BASE="${SB_WORKSPACE_BASE:-$HOME/Developer/switchboard-workspaces}"
 
 while [ $# -gt 0 ]; do
@@ -51,7 +61,7 @@ while [ $# -gt 0 ]; do
     --slug)            SLUG="$2"; shift 2;;
     --repo)            REPO="$2"; shift 2;;
     --base)            BASE="$2"; shift 2;;
-    --stance)          STANCE="$2"; shift 2;;
+    --stance)          STANCE="$2"; STANCE_EXPLICIT=1; shift 2;;
     --verify-cmd)      VERIFY_CMD="$2"; shift 2;;
     --verify-tools)    VERIFY_TOOLS="$2"; shift 2;;
     --review-bot)      REVIEW_BOT="$2"; shift 2;;
@@ -62,6 +72,21 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
+
+# --self defaults to `base`, not to the general `prototype` default (issue #153).
+# Resolved AFTER the parse loop so flag ORDER does not matter — `--self --stance
+# prototype` and `--stance prototype --self` must agree.
+#
+# The general default is right for its purpose: a new throwaway project should
+# start fast, and AgDR-039 chose `prototype` deliberately. `--self` is the one
+# case where it is wrong. Since AgDR-043 the stance decides whether an agent may
+# merge that project's own PRs, so a fresh Stage 4 would grant Switchboard's own
+# workers the right to merge changes to Switchboard — including changes to
+# guard.py, the file deciding who may merge. The repository governing merge
+# rights would be the one governing them loosest.
+if [ "$IS_SELF" = "1" ] && [ "$STANCE_EXPLICIT" = "0" ]; then
+  STANCE="base"
+fi
 
 [ -n "$SLUG" ] || { echo "ERROR --slug required" >&2; exit 2; }
 [ -n "$REPO" ] || { echo "ERROR --repo owner/name required" >&2; exit 2; }

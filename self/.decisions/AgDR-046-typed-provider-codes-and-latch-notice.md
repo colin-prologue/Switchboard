@@ -1,0 +1,316 @@
+# AgDR-046: CLI-authored typed codes classify the failure; a latched circuit tells the operator
+
+- **Status:** proposed (2026-08-23). Issue #165. **Amends AgDR-032**, which
+  rejected reading the assistant record's typed code; that rejection is answered
+  by a discriminator it did not consider, not waived.
+- **Surfaces:** `runner.py` (stream harvest + both terminal branches),
+  `failure_classification._CLAUDE_CODES` / `_TEXT_PATTERNS`,
+  `scheduler._on_worker_done`, `tracker.find_or_create_ops_issue`,
+  `tests/fixtures/README.md`
+
+## Context
+
+Five consecutive verify sessions on civ-life #8 (2026-08-16 → 08-19) failed on
+infrastructure — two `API Error: Connection closed mid-response`, three
+`Failed to authenticate: OAuth session expired and could not be refreshed` —
+and Switchboard charged **all five** to the ticket's verify budget, then parked
+it as though the review had failed. PR #16 carries zero review comments: not one
+of those sessions reviewed anything.
+
+Every mechanism needed to prevent that already existed and was correct.
+AgDR-025/026 built the taxonomy, the latch/cooldown split, and
+`_refund_issue_session` ("give back the session a provider-circuit failure
+burned"). `_circuit_refusals` even dedupes the refusal notice per circuit
+generation. None of it ran, because `classify_claude_failure` returned
+`WORKER_FAILURE` for both strings.
+
+Two gaps behind that:
+
+1. **The typed code was excluded by decision.** AgDR-032 saw
+   `"error": "authentication_failed"` on the assistant record and rejected using
+   it: *"it makes model-adjacent stream content a circuit input: any assistant
+   message could then latch the provider."* It classified on the terminal
+   record's `result` prose instead, which worked for the one captured condition
+   because that prose says "Not logged in". OAuth expiry says something else.
+2. **`_CLAUDE_CODES` has never matched real output.** The only captured
+   `terminal_reason` is `api_error`, absent from the map — so every real Claude
+   classification to date ran on `_TEXT_PATTERNS` alone. The map carried the
+   same "forward-compatible only" property documented for `_CODEX_CODES`,
+   undocumented here.
+
+Separately: the latch is the one condition that stops all work and cannot clear
+itself, and its only output was a log line. Switchboard is operated in **waves**
+— queue work, walk away for a week — so a terminal is not a channel.
+
+## Decision
+
+**1. `message.model == "<synthetic>"` is the trust boundary, and it is what
+makes the typed code readable.** AgDR-032's objection is about *authorship*, not
+about the field. `model` is CLI-assigned; only the CLI's own synthetic error
+records carry `"<synthetic>"`, and the logged-out fixture shows the marker and
+the typed code on the same record. A real model turn keeps its real model id, so
+model-authored content still cannot reach the circuit. `_synthetic_error_code`
+returns "" for everything else, and
+`test_a_non_synthetic_record_claiming_a_provider_code_is_ignored` pins a record
+carrying `error: "authentication_failed"` under a real model id as a success.
+
+**2. A standing synthetic error is cleared by any subsequent real model turn.**
+The code is held, not applied on sight. If the CLI retried and got through, work
+landed and the turn is a success — failing it would be a new bug of the same
+family as the one being fixed.
+
+**3. Both terminal shapes are handled, because only one is captured.** On a
+gated record the typed code takes precedence over `terminal_reason`. On an
+`is_error`-absent record a standing code that classifies into
+`CIRCUIT_FAILURE_CLASSES` fails the turn on its own. The second branch exists
+because the transcripts do not contain a `result` record and neither condition
+is reproducible on demand — the shape is genuinely unknown, and guessing it the
+way #116's single capture suggests is what produced this ticket. Ordered AFTER
+the `error_max_turns` branch, for AgDR-027's reason.
+
+**4. `server_error` maps to `PROVIDER_UNAVAILABLE`, not an auth-shaped latch.**
+AgDR-032 rejected a blanket `is_error ⇒ PROVIDER_AUTHENTICATION` rule precisely
+because latching a 5xx is a worse outage than the bug it fixed. That reasoning
+is adopted, not overturned: transports drop, and the cooldown heals them.
+
+**5. A latched circuit posts one comment to a per-project ops issue.** Latched
+classes only — auth, plan limit, credits. Edge-triggered on
+`(provider, generation)`, mirroring `_circuit_refusals`, so a standing latch
+never becomes a heartbeat. Transient failures are deliberately silent: a channel
+that also carries recoverable noise is one the operator learns to ignore, and
+that would cost more than it buys in a wave-operated system.
+
+The ops issue is found-or-created by **title**, carries no `status:*` label
+(`normalize_status_state` → `"none"`, in no stance's active set, so it is never
+dispatched to an agent), and needs no per-project setup. A notice that silently
+goes nowhere because a project skipped its configuration is the failure mode
+this whole change removes. A failed post un-marks the notice so a later latch
+retries rather than inheriting the silence.
+
+## Rejected options
+
+- **Add the two prose strings to `_TEXT_PATTERNS` and stop.** Steelman: one
+  line, no trust-boundary argument, ships in ten minutes. Rejected as the
+  primary mechanism because it is the same bet #116 made — that the next wording
+  will resemble the captured one. The patterns are still added, as the fallback
+  for a CLI that drops the typed code; they are just not what the fix rests on.
+- **Presume any zero-artifact session is an infrastructure failure and refund
+  it.** Steelman: covers wordings and codes nobody has seen, which is the real
+  shape of this problem. Rejected *for now*: with no attempt cap and no
+  wall-clock bound anywhere, a genuinely stuck agent would retry forever. It
+  becomes viable once a session timeout exists, and is the honest long-term
+  answer to the residual risk below.
+- **Notify on the transient classes too.** Rejected: they self-heal, so the
+  notice would arrive after the problem is gone and train the operator to ignore
+  the channel that carries the latch.
+- **Configure the ops issue per project (`SB_OPS_ISSUE`).** Steelman: no new
+  tracker write surface, no `createIssue` mutation. Rejected: it fails silent
+  when unset, on exactly the projects whose operator is not watching.
+- **Post the notice on the refused issue.** Steelman: zero new concepts, the
+  path `add_issue_comment` already serves. Rejected on the operator's side of
+  the trade: notices scatter across whichever tickets happened to be dispatched,
+  land on tickets that are not at fault, and give no single place to check after
+  a wave.
+
+## Revisions from review (codex, PR #166)
+
+Three findings, all adopted; two changed the decision rather than the code.
+
+- **The standing code now reaches the general failure branch.** The first pass
+  wired it into the `is_error` gate and the success branch only, so a synthetic
+  provider error followed by a terminal record with a *failure* subtype still
+  classified on the subtype alone. That is the same defect this record exists to
+  fix, on the branch it had not reached — an instance of the bet decision 3
+  explicitly refuses to make. Safe against `error_max_turns_no_session`, because
+  reaching a turn cap requires real model turns and any one of them clears the
+  standing code.
+- **The notice retries for real.** The first pass un-marked the key on failure
+  and called that a retry. It is not: `record_failure` returns `None` once the
+  circuit is latched, and a latched circuit refuses every dispatch, so nothing
+  re-enters `_start_latch_notice` — the notice was lost for the life of the
+  process. Retry is now bounded (3 attempts, 30s apart) inside the notice task,
+  where the only remaining trigger is. The key is still released afterwards so a
+  later generation is not silenced by this one's bookkeeping. The test that
+  claimed to cover this passed vacuously and leaked a pending task; it now waits
+  on the observable rather than on a task set that is empty both before the task
+  is created and after it ends.
+- **The recovery hint is derived from the failure class**, not hardcoded. A
+  credits or plan-limit latch, and any auth latch on a non-Claude provider, was
+  being told the Claude CLI needed a fresh login — an operational instruction
+  pointing at the wrong credential while every project stayed stopped.
+
+### Second round (codex, PR #166)
+
+- **Shutdown drains the notice task.** An operator restarts *because* of a
+  latch, so an un-drained task loses the message explaining why — during the
+  very action the message asks for. Added to the same bounded grace as workers
+  and teardowns, and the retry backoff short-circuits on `_stopping` rather than
+  sleeping out a wait that will never complete.
+- **The ops issue is resolved once and reused across retries.**
+  `find_or_create_ops_issue` is not idempotent under a lost response, so
+  re-resolving per attempt risked a second *ops issue* — duplicating the durable
+  thing, not just a comment.
+
+### Third round (codex, PR #166)
+
+- **The backoff is stop-AWARE, not stop-checked.** Round two checked `_stopping`
+  *before* the wait, which leaves a SIGTERM arriving mid-backoff to expire the
+  5s shutdown grace and cancel the task mid-sleep — losing the notice during the
+  restart it exists to explain, which is exactly what round two set out to fix.
+  The wait now polls at 250ms granularity. Polled rather than event-driven so
+  there is no second shutdown signal to keep in sync with `_stopping`.
+
+### Fourth round (codex, PR #166)
+
+- **The notice scopes the outage to the latched provider.** Circuits are
+  per-provider and `MixedRunnerSelector` assigns issues independently, so under
+  a mixed selector a latch on one provider leaves the other working. Claiming
+  "nothing will run" there would prompt a restart that is not needed — the same
+  wrong-operational-instruction defect the class-derived hint fixed one round
+  earlier, in the sentence next to it. The claim is now exact in both modes:
+  total for a single-provider project, scoped to the provider under `mixed`.
+
+### Fifth round (codex, PR #166)
+
+- **The circuit is re-checked immediately before posting.** `record_success`
+  closes a latched circuit, so a worker still in flight when the latch opened
+  can clear it while the notice is queued or backing off. The notice is
+  withdrawn (and the key released) rather than posted, because a stale outage
+  buys exactly the unnecessary restart this notice exists to prevent.
+- **Ops-issue resolution is single-flighted and shared across notice tasks.**
+  Under `mixed`, two providers can latch in the same tick; two concurrent
+  find-or-creates each miss the other's create and make two ops logs. This race
+  needs no network failure, which is what distinguishes it from the accepted
+  residual below. Resolution now happens at most once per process, behind a
+  lock, and the cached id also removes the retry-side re-resolution.
+
+### Sixth round (codex, PR #166)
+
+- **The circuit re-check moved to the last point one is possible** — after
+  ops-issue resolution, immediately before `add_issue_comment`. Round five put
+  it before resolution, and resolution can block on the network or on another
+  provider's notice holding the single-flight lock, leaving the same window it
+  was meant to close. The pre-resolution check is kept as a cheap fast path that
+  skips resolution entirely when the circuit has already recovered.
+
+### Seventh round (codex, PR #166)
+
+- **A standing provider error now survives a stream that never finishes.** The
+  EOF fallback returned `RUNNER_PROTOCOL`/`port_exit` and ignored the harvested
+  code. `RUNNER_PROTOCOL` is not a circuit class, so the issue's budget was
+  charged and the circuit stayed closed — this ticket's production failure,
+  reproduced on the one path with no terminal record to read. It is also the
+  *likeliest* shape of an abrupt transport failure, which is one of the two
+  conditions the ticket exists for, so the gap sat directly under the headline
+  case. Decision 3 said both terminal shapes are handled because only one is
+  captured; there was a third shape — no terminal record at all — and it was
+  missed. The fallback is narrowed, not replaced: a stream ending with no result
+  and no standing provider error is still `port_exit`.
+
+### Eighth round (codex, PR #166)
+
+- **The cached ops issue is validated before reuse.** `find_or_create_ops_issue`
+  searches OPEN issues, but the cache round five added never expired — so an
+  operator who closed the ops log without restarting would get every later
+  notice posted to the closed issue, where it may never surface in their open
+  queue. The log's own body says *"Closing it is safe; the next notice opens a
+  new one"*, so this was the code contradicting a promise made in the artifact
+  it creates — the same defect class as the round-1 hint and the round-4 outage
+  scope, for the third time. Resolution now reads the cached issue's state
+  first, at one extra read per latch generation.
+
+### Ninth round (codex, PR #166) — a reversal
+
+- **A posted notice is corrected when the circuit recovers.** Round five
+  declined exactly this, on the grounds that a correction is "a second message
+  about a non-event". **That reasoning was wrong for this operating model**, and
+  the record corrects itself rather than defending the earlier call. Switchboard
+  runs in waves: the operator reads the ops log days later, so a standing
+  "everything is stopped" that was falsified minutes after it was written buys
+  precisely the unnecessary restart this notice exists to prevent. "Stopped"
+  followed by "recovered" is materially different information from a bare
+  "stopped" — it is not a second message about a non-event, it is the second
+  half of the first message.
+
+  The correction is single-attempt and silent on failure, deliberately unlike
+  the latch notice: the latch notice is the only signal a stopped system emits,
+  so losing it strands the operator, whereas losing a correction leaves a stale
+  warning costing at most one restart. Retrying it would spend the shutdown
+  grace on the less important of the two.
+
+  It fires only for notices actually POSTED — a latch that recovered before its
+  notice went out has nothing to correct, and the correction must never be the
+  first the operator hears of an outage that never reached them.
+
+### Tenth round (codex, PR #166)
+
+- **A correction goes to the issue its notice landed in.** Round nine read
+  `_ops_issue_id` at correction time, but round eight made that id rotate when
+  an operator closes the log — so under `mixed`, a correction for provider A
+  could land in the replacement issue opened for provider B, while A's stale
+  warning stood in the original. The ops issue id is now stored per posted
+  notice. Two independently-correct changes composing into a wrong result, one
+  round apart.
+
+**This is where the TOCTOU narrowing stops** *for the pre-post window.* The
+recovery correction above closes the post-post case that the irreducible window
+leaves behind, which is a different mechanism, not a further narrowing. The comment round trip itself is
+an irreducible window: GitHub offers no conditional write, so a latch that
+recovers while the mutation is in flight will always be able to produce one
+stale notice. Six rounds of review moved the check from "not present" to "the
+last instruction before the write"; the seventh has nowhere left to move it. A
+stale notice costs the operator one unnecessary restart, which is the failure
+this whole notice exists to prevent — so the trade is real, and it is bounded at
+one message.
+
+**Accepted residual: a latch notice can post twice, and can leave a second ops
+issue behind.** Neither `addComment` nor `createIssue` is idempotent, and GitHub
+offers no client key for either. A lost response followed by a retry can
+therefore produce two identical notices; and because resolution caches only a
+*successful* create, a create whose response is lost can be re-run and — if the
+first write is not yet visible to the finder — make a second ops log. Round
+two's reply overstated its own fix on this second point; this record is the
+correction. Round five removed the concurrent case (which needed no failure at
+all); what remains is strictly the ambiguous-response one.
+
+Codex proposed a durable marker plus read-before-retry. Rejected as
+disproportionate, and as not actually closing the race: with no idempotency key
+the read-before-retry is itself subject to the same visibility lag, so it
+narrows the window rather than removing it. The ops log is read by one operator
+after a wave, where a duplicated notice costs a second of confusion, a duplicate
+ops issue self-corrects on the next latch (the finder returns the first title
+match), and a *lost* notice costs the whole wave — which is the failure this
+record exists to remove.
+
+The one-notice contract is therefore narrowed, on purpose, to "exactly one
+notice per circuit generation **when GitHub answers**". If the ops log ever
+grows a consumer that counts notices, or the tracker gains an idempotency key,
+this trade has to be revisited before that consumer ships.
+
+## Blast radius
+
+Claude runner only; codex untouched. `_CLAUDE_CODES` gains two entries that
+previously matched nothing, so no existing classification changes. Turns that
+previously returned `succeeded` while a standing synthetic provider error was
+outstanding now fail — which is the point: pre-#165 they spent a session and
+called `record_success()`, resetting the circuit on a turn that did no work.
+One net-new tracker write surface (`createIssue`), a sanctioned §11.5 exception
+on the same grounds as `add_issue_comment`.
+
+## Weakest point
+
+The code values are **transcript-derived, not probe-captured** — the honest gap
+is recorded in `fixtures/README.md` rather than papered over with a
+hand-authored fixture, per #109's rule. Neither condition is reproducible on
+demand, so the `is_error`-absent branch is written against a shape nobody has
+observed end to end. It is defensive, and defensive code that never fires is
+code that rots.
+
+The larger residual is unbounded retry. Refunding transient failures means
+`max_sessions_per_issue` no longer bounds them, and nothing else does: there is
+no attempt cap and no wall-clock ceiling in the codebase. Two of civ-life #8's
+sessions hung ~5 hours each. The cooldown paces retries to roughly one per five
+minutes, so this degrades into slow spend rather than a hot loop — but it is
+genuinely unbounded, and it is the reason the zero-artifact rule above is
+deferred rather than adopted. A session timeout should land before this system
+is left running unattended for a long wave.

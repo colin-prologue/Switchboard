@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+SELF_REPO = "colin-prologue/Switchboard"
+
 from orchestrator.status_board import (
     CLEAR,
     LABEL_WRITE,
@@ -213,12 +215,12 @@ def test_option_names_round_trip_through_the_derived_state():
 
 
 def test_honored_set_is_exactly_three_edges():
-    assert honored_drags() == HONORED
+    assert honored_drags(repo=SELF_REPO) == HONORED
 
 
 def test_honored_edges_satisfy_the_three_safety_claims():
     active = load_active_states()
-    for src, dst in honored_drags():
+    for src, dst in honored_drags(repo=SELF_REPO):
         assert dst not in active, f"{src}->{dst} lands in an active state"
         assert dst not in {"parked", "closed", "human review"}, f"{src}->{dst}"
         assert "in progress" not in (src, dst), f"{src}->{dst} touches in-progress"
@@ -228,8 +230,8 @@ def test_honored_edges_satisfy_the_three_safety_claims():
 def test_degraded_edge_is_not_honored():
     # todo -> human-review is a degraded-path bookkeeping edge encoding a
     # FAILURE mode, never a human intent.
-    assert ("todo", "human review") not in honored_drags()
-    assert not is_honored_drag("todo", "human-review")
+    assert ("todo", "human review") not in honored_drags(repo=SELF_REPO)
+    assert not is_honored_drag("todo", "human-review", repo=SELF_REPO)
 
 
 def test_inactive_phase_two_edges_are_not_honored():
@@ -239,20 +241,20 @@ def test_inactive_phase_two_edges_are_not_honored():
         if e.get("active", True) is False
     }
     assert inactive, "expected phase-2 rows to exist"
-    assert not (inactive & honored_drags())
+    assert not (inactive & honored_drags(repo=SELF_REPO))
 
 
 def test_human_gate_exits_into_orchestrator_territory_are_not_honored():
     # The `actor: human` column is the WRONG predicate for drag safety.
-    assert not is_honored_drag("parked", "todo")
-    assert not is_honored_drag("human-review", "todo")
-    assert not is_honored_drag("plan-review", "in-progress")
+    assert not is_honored_drag("parked", "todo", repo=SELF_REPO)
+    assert not is_honored_drag("human-review", "todo", repo=SELF_REPO)
+    assert not is_honored_drag("plan-review", "in-progress", repo=SELF_REPO)
 
 
 def test_dashed_and_spaced_spellings_agree():
     assert normalize_state("in-progress") == "in progress"
-    assert is_honored_drag("plan-review", "drafting")
-    assert is_honored_drag("plan review", "drafting")
+    assert is_honored_drag("plan-review", "drafting", repo=SELF_REPO)
+    assert is_honored_drag("plan review", "drafting", repo=SELF_REPO)
 
 
 # --- label -> field (the unconditional mirror) -------------------------------
@@ -307,7 +309,7 @@ def _poll(labels, option, field_ts, label_ts, **kw):
         current_option=option,
         field_updated_at=field_ts,
         last_label_event_at=label_ts,
-        **kw,
+        **{"repo": SELF_REPO, **kw},
     )
 
 
@@ -355,9 +357,9 @@ def test_honored_edges_read_backwards_preserve_the_label(old_state, new_state):
         )
     ])
     # Sanity: the pair, read as a drag, WOULD be honored.
-    assert is_honored_drag(new_state, old_state)
+    assert is_honored_drag(new_state, old_state, repo=SELF_REPO)
 
-    [decision] = run_poll(fake)
+    [decision] = run_poll(fake, repo=SELF_REPO)
 
     assert decision.action == MIRROR
     assert fake.label_writes == []
@@ -373,7 +375,7 @@ def test_item_with_no_status_value_is_a_mirror_not_a_drag():
     assert decision.option == "Todo"
 
     fake = FakeProject([_item(1, ["status:todo"], label_events=["2026-08-13T10:00:00Z"])])
-    assert run_poll(fake)[0].action == MIRROR
+    assert run_poll(fake, repo=SELF_REPO)[0].action == MIRROR
     assert fake.items()[0]["option"] == "Todo"
 
 
@@ -415,7 +417,7 @@ def test_snap_back_is_applied_as_a_field_write_only():
             label_events=["2026-08-13T10:01:00Z"],
         )
     ])
-    [decision] = run_poll(fake)
+    [decision] = run_poll(fake, repo=SELF_REPO)
     assert decision.action == SNAP_BACK
     assert fake.label_writes == []
     assert fake.items()[0]["option"] == "Drafting"
@@ -431,7 +433,7 @@ def test_honored_drag_applied_end_to_end_swaps_the_label():
             label_events=["2026-08-13T10:01:00Z"],
         )
     ])
-    [decision] = run_poll(fake)
+    [decision] = run_poll(fake, repo=SELF_REPO)
     assert decision.action == LABEL_WRITE
     assert fake.label_writes == [(1, "status:plan-review", ("status:todo",))]
     labels = fake.items()[0]["labels"]
@@ -519,7 +521,7 @@ def _dry_run_fixture() -> FakeProject:
 
 def test_main_dry_run_poll_decides_but_writes_nothing(capsys):
     fake = _dry_run_fixture()
-    assert main(["--mode", "poll", "--dry-run"], client=fake) == 0
+    assert main(["--mode", "poll", "--dry-run", "--repo", SELF_REPO], client=fake) == 0
     out = capsys.readouterr().out
     assert "[dry-run]" in out and "action=label_write" in out
     assert fake.label_writes == [] and fake.option_writes == []
@@ -539,7 +541,7 @@ def test_main_mirror_requires_an_issue_number():
 
 def test_main_without_dry_run_applies_writes():
     fake = _dry_run_fixture()
-    assert main(["--mode", "poll"], client=fake) == 0
+    assert main(["--mode", "poll", "--repo", SELF_REPO], client=fake) == 0
     assert fake.label_writes == [(1, "status:plan-review", ("status:todo",))]
 
 
@@ -669,7 +671,7 @@ def test_poll_skips_indeterminate_items():
         _item(9, ["status:todo"], is_issue=True, closed=False, option=None,
               field_updated_at=None, field_page_truncated=True),
     ])
-    decisions = run_poll(fake, dry_run=False)
+    decisions = run_poll(fake, dry_run=False, repo=SELF_REPO)
     assert decisions[0].action == SKIP
     assert "indeterminate" in decisions[0].reason
     assert fake.option_writes == []
@@ -689,7 +691,7 @@ def test_honored_drag_applies_edge_marker_effects():
               field_updated_at="2026-08-13T09:00:00Z",
               label_events=["2026-08-13T08:00:00Z"]),
     ])
-    run_poll(fake, dry_run=False)
+    run_poll(fake, dry_run=False, repo=SELF_REPO)
     (write,) = fake.label_writes
     assert write[1] == "status:drafting"
     assert "gate:triage-passed" in write[2]
@@ -704,7 +706,7 @@ def test_label_write_skips_when_labels_changed_mid_poll(capsys):
               field_updated_at="2026-08-13T09:00:00Z",
               label_events=["2026-08-13T08:00:00Z"]),
     ])
-    run_poll(fake, dry_run=False)
+    run_poll(fake, dry_run=False, repo=SELF_REPO)
     assert fake.label_writes == []
     assert "changed mid-poll" in capsys.readouterr().out
 
@@ -717,7 +719,7 @@ def test_write_skips_when_field_changed_mid_poll(capsys):
         _item(6, ["status:todo"], is_issue=True, option=None,
               field_updated_at=None),
     ])
-    run_poll(fake, dry_run=False)
+    run_poll(fake, dry_run=False, repo=SELF_REPO)
     assert fake.option_writes == []
     assert "field changed mid-poll" in capsys.readouterr().out
 
@@ -727,7 +729,7 @@ def test_truncated_label_page_is_indeterminate():
         _item(7, ["status:todo"], is_issue=True, option=None,
               field_updated_at=None, labels_truncated=True),
     ])
-    decisions = run_poll(fake, dry_run=False)
+    decisions = run_poll(fake, dry_run=False, repo=SELF_REPO)
     assert decisions[0].action == SKIP
     assert fake.option_writes == [] and fake.label_writes == []
     fake2 = FakeProject([
@@ -736,3 +738,81 @@ def test_truncated_label_page_is_indeterminate():
     ])
     d = run_mirror(fake2, 7, dry_run=False)
     assert d.action == SKIP
+
+
+# --- the honored set is a PER-PROJECT question (issue #156) -------------------
+#
+# `active_states` became a stance property in AgDR-039. Deriving the exclusion
+# set from a fixed template applies one project's state machine to every board:
+# `base` has `triage` and no `review`, `prototype` the reverse. These pin that
+# the board asks the project it is actually syncing.
+
+def _binding(tmp_path, slug, repo, active, handoff="status:human-review"):
+    proj = tmp_path / "projects" / slug
+    proj.mkdir(parents=True)
+    (proj / "project.env").write_text(
+        f"SB_PROJECT_SLUG={slug}\nSB_GITHUB_REPO={repo}\nSB_BASE_BRANCH=main\n")
+    states = ", ".join(f'"{s}"' for s in active)
+    (proj / "WORKFLOW.md").write_text(
+        "---\ntracker:\n"
+        f"  active_states: [{states}]\n"
+        f'  handoff_label: "{handoff}"\n'
+        "---\nbody\n")
+    return proj
+
+
+def test_workflow_is_resolved_from_the_repo_binding(tmp_path):
+    from orchestrator.status_board import workflow_for_repo
+
+    _binding(tmp_path, "alpha", "acme/alpha", ["triage", "todo", "in progress"])
+    _binding(tmp_path, "beta", "acme/beta", ["todo", "in progress", "review"])
+
+    assert workflow_for_repo("acme/beta", tmp_path / "projects").parent.name == "beta"
+    # GitHub repo names are case-insensitive; a case-sensitive match would send a
+    # real project down the unresolved (snap-back-everything) path.
+    assert workflow_for_repo("ACME/Beta", tmp_path / "projects").parent.name == "beta"
+    assert workflow_for_repo("acme/never-registered", tmp_path / "projects") is None
+    assert workflow_for_repo("", tmp_path / "projects") is None
+
+
+def test_two_stances_produce_different_exclusion_sets(tmp_path):
+    """The bug in one assertion: a base-shaped and a prototype-shaped project
+    must not be arbitrated against the same set of orchestrator-owned states."""
+    from orchestrator.status_board import load_active_states
+
+    base = _binding(tmp_path, "alpha", "acme/alpha", ["triage", "todo", "in progress"])
+    proto = _binding(tmp_path, "beta", "acme/beta", ["todo", "in progress", "review"],
+                     handoff="status:review")
+
+    base_states = load_active_states(base / "WORKFLOW.md")
+    proto_states = load_active_states(proto / "WORKFLOW.md")
+    assert base_states != proto_states
+    assert "triage" in base_states and "triage" not in proto_states
+    assert "review" in proto_states and "review" not in base_states
+
+
+def test_unresolved_project_snaps_back_everything(tmp_path, monkeypatch):
+    """Fail CLOSED. Honoring a drag writes a `status:*` label the orchestrator
+    dispatches on; refusing one only annoys a human. An unknown project must
+    never become the permissive case."""
+    import orchestrator.status_board as sb
+
+    monkeypatch.setattr(sb, "PROJECTS_DIR", tmp_path / "projects")
+    assert sb.honored_drags(repo="acme/never-registered") == frozenset()
+    assert sb.honored_drags(repo="") == frozenset()
+    assert not sb.is_honored_drag("todo", "plan review", repo="acme/never-registered")
+
+
+def test_a_projects_own_active_state_is_never_an_honored_target(tmp_path, monkeypatch):
+    """The property the exclusion set exists for, asserted per stance rather
+    than against a fixed template: nothing may drag an issue INTO a state that
+    project's orchestrator dispatches."""
+    import orchestrator.status_board as sb
+
+    monkeypatch.setattr(sb, "PROJECTS_DIR", tmp_path / "projects")
+    _binding(tmp_path, "beta", "acme/beta", ["todo", "in progress", "review"],
+             handoff="status:review")
+
+    for _, dst in sb.honored_drags(repo="acme/beta"):
+        assert dst not in {"todo", "in progress", "review"}, (
+            f"a drag into {dst!r} was honored on a project that dispatches it")
