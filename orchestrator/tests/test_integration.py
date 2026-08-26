@@ -120,6 +120,9 @@ class FakeTracker:
 
     def __init__(self):
         self.candidates: list[Issue] = []
+        # issue #52: when set, `select_candidates` filters on it the way the
+        # real tracker filters on cfg.active_states.
+        self.active_states: set[str] | None = None
         self.states: dict[str, Issue] = {}
         self.terminal: list[Issue] = []
         self.comments: list[tuple[str, str]] = []
@@ -165,8 +168,24 @@ class FakeTracker:
         self.states_calls = 0
         self.states_error_at_ordinal: int | None = None
 
-    async def fetch_candidate_issues(self):
+    async def fetch_open_issues(self):
+        # issue #52: the real tracker's ONE open-issue query, unfiltered. The
+        # `candidates` list is the fake's open-issue store; `select_candidates`
+        # below is what makes it a candidate set.
         return list(self.candidates)
+
+    def select_candidates(self, issues):
+        # Fake fidelity (OBS-023): the real method filters on the SAME derived
+        # `issue.state` against `active_states`. `active_states = None` means
+        # "this test feeds pre-filtered issues" — the pre-#52 shape, kept so a
+        # test that only ever put dispatchable issues in `candidates` still
+        # reads the same.
+        if self.active_states is None:
+            return list(issues)
+        return [i for i in issues if i.state in self.active_states]
+
+    async def fetch_candidate_issues(self):
+        return self.select_candidates(await self.fetch_open_issues())
 
     async def fetch_issues_by_states(self, state_names):
         return list(self.terminal) if state_names else []

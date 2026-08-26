@@ -29,6 +29,13 @@ tracker:
   # todo -> in progress -> review, all active. No state parks for a human.
   active_states: ["todo", "in progress", "review"]
   terminal_states: ["closed"]
+  # Declared but never dispatched — the gates (issue #52). This stance has one:
+  # the QA role escalates to `status:human-review` off its escalation list, and
+  # a ticket sitting there is waiting for a human, not stranded. The states this
+  # stance leaves unused (drafting/triage/plan-review/decision) are deliberately
+  # absent: under this recipe nothing routes a ticket to them, so one appearing
+  # IS the finding the sanity check exists to report.
+  gate_states: ["human review"]
   # Where a validated handoff lands. `review` is an ACTIVE state here, so the
   # orchestrator's terminal handoff feeds the QA role instead of a human queue.
   # Gated stances leave this at its default (status:human-review).
