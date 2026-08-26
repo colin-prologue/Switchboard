@@ -234,14 +234,30 @@ def test_degraded_edge_is_not_honored():
     assert not is_honored_drag("todo", "human-review", repo=SELF_REPO)
 
 
-def test_inactive_phase_two_edges_are_not_honored():
+def test_inactive_edges_are_not_honored():
+    """#31 activated the last of #29's phase-2 rows, so the table may now carry
+    no inactive edge at all — the invariant is conditional, not the population.
+    (Was `test_inactive_phase_two_edges_are_not_honored`, which pinned the
+    population and would have failed for the right reason.)"""
     inactive = {
         (normalize_state(e["from"]), normalize_state(e["to"]))
         for e in load_edges()
         if e.get("active", True) is False
     }
-    assert inactive, "expected phase-2 rows to exist"
     assert not (inactive & honored_drags(repo=SELF_REPO))
+
+
+def test_fail_review_drags_are_never_honored():
+    """`fail review` is a state a SESSION RUNS IN. Dragging a card out of it
+    would end the diagnosing session at the next turn boundary and land the
+    ticket somewhere with no verdict — the one outcome the feature exists to
+    prevent. The generic filter would otherwise honor `fail review -> drafting`,
+    since drafting is neither active nor otherwise excluded (issue #31)."""
+    for target in ("todo", "drafting", "parked"):
+        assert not is_honored_drag("fail review", target, repo=SELF_REPO)
+        assert not is_honored_drag("fail-review", target, repo=SELF_REPO)
+    # ...and nothing on the board may make an issue enter the diagnosis either.
+    assert not is_honored_drag("todo", "fail review", repo=SELF_REPO)
 
 
 def test_human_gate_exits_into_orchestrator_territory_are_not_honored():

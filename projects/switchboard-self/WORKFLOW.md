@@ -9,7 +9,12 @@ tracker:
   kind: github
   repo: "colin-prologue/Switchboard"
   api_key: $GITHUB_TOKEN
-  active_states: ["triage", "todo", "in progress"]
+  # `fail review` (issue #31) is ACTIVE: on an implement-role cap-hit the
+  # orchestrator relabels to `status:fail-review` and dispatches ONE independent
+  # verifier session, which classifies why the issue failed and routes recovery.
+  # A state the prompt names must be dispatched or it is a gate — see
+  # METHODOLOGY.md, "Writing a stance".
+  active_states: ["triage", "todo", "in progress", "fail review"]
   terminal_states: ["closed"]  # issue-closed is the ONLY terminal condition (SPEC.md §2); status:* labels are never terminal
   # Declared but never dispatched — the gates (issue #52). Nothing keys dispatch
   # off this list; it exists so the board-state sanity check can tell a ticket
@@ -43,6 +48,11 @@ agent:
   # comment, workspace + logs preserved, no re-dispatch until the issue is
   # updated by a human). Caps are diagnostic checkpoints, not kill switches.
   max_sessions_per_issue: 3
+  # Owned extension (issue #31): the fail-review verifier's OWN budget, keyed on
+  # its own role so an implement cap-hit does not arrive at the diagnosis with a
+  # spent counter. One pass per episode — the verifier reads evidence and posts
+  # a verdict; it does not iterate. Invalid values coerce back to 1.
+  max_fail_review_sessions_per_issue: 1
 
 # Owned extension (issue #51): operator identity for fold-signal DETECTION.
 # Only 👍/👎 reactions and `/fold` // `/no-fold` comments from these GitHub
@@ -373,6 +383,144 @@ around a verdict that holds no judgment for a reader to scrutinize.
 
 The verifier never implements; feedback and splits only. Do not open a PR. Stop
 once the verdict is routed.
+{% elsif issue.labels contains "status:fail-review" %}
+## Fail-review mode — post-failure diagnosis (do NOT implement)
+
+This ticket carries `status:fail-review`. Its implementation budget ran out
+without a handoff, and the orchestrator dispatched **you** — a fresh,
+independent session — to answer one question: **why did this issue fail?** You
+classify the failure, cite the evidence, and route recovery, so the human who
+arrives at this ticket finds a verdict rather than homework.
+
+You are the post-failure twin of triage: same machinery, opposite bookend.
+
+**Posture — absolute, and the same one triage runs under.** You never write
+feature code. You never commit, never push, never open or touch a PR. You never
+edit the issue body. Comments and labels are your only outputs. If you find
+yourself about to fix the bug you just diagnosed, stop: the fix is the next
+session's job, and spending your budget on it leaves the ticket with no verdict
+at all.
+
+### Step 1 — read the evidence in tiers, in this order
+
+Tiers 1–3 are mechanical: they record what *happened*. Tier 4 is what the failed
+session *said about itself*, which is a claim, not evidence — and reading it
+first would anchor your classification to the very reasoning that ran out of
+road. **Reach your classification from tiers 1–3 BEFORE you open tier 4.**
+
+1. **The mechanical digest** — the issue's own comment history
+   (`gh issue view {{ issue.identifier }} --repo colin-prologue/Switchboard --comments`): the park
+   notices, dispatch refusals, and orchestrator log lines that name what the
+   budget was spent on.
+2. **The workspace** — you are standing in it. `git log`, `git status`, and
+   `git diff` against the base branch say exactly how far the work got: no
+   commits at all reads very differently from a branch with tests written and
+   failing.
+3. **`.run/transcripts/`** — the captured session transcripts (issue #30). These
+   survive into your session: the before_run hook is non-destructive on a reused
+   workspace, so it never cleans `.run/`. This is where a denied command, a
+   loop, or a wall is actually visible. **Never quote transcript content into a
+   GitHub comment** — cite what it shows, in your own words.
+4. **Self-reports LAST** — any summary the failed session wrote about its own
+   failure. Read these as claims to be checked against tiers 1–3, not as
+   findings. When your reading and the self-report disagree, say so explicitly
+   and show both: the disagreement is often the most useful line in the verdict.
+
+### Step 2 — classify
+
+Pick exactly one class. The first five are the shared cap-hit taxonomy (they are
+also an importable contract — `orchestrator/src/orchestrator/failure_taxonomy.py`
+— so the strings below are a wire format, not prose):
+
+| class | what it means |
+|---|---|
+| `blockage:permission` | An artificial wall. A denied command, a tool the allowlist refuses. The session was right and got fenced. |
+| `blockage:dependency` | A missing dependency, a broken environment, an unmerged prerequisite. Same shape: external wall, approach intact. |
+| `quota` | The budget ran out with no verdict reached at all — no wall, no loop, just not enough road. |
+| `iteration` | The session burned its turns going in circles. Its *conclusions* are the suspect part. |
+| `complexity` | The ticket is too big for one session. Another attempt spends the same budget for the same outcome. |
+| `hold` | **None of the above.** The mechanical evidence supports no class, or the failure is environmental/unclassifiable — so no automated recovery is correct and a human must look. |
+
+`hold` is an escape hatch, not a default. Reaching for it because the evidence is
+merely thin is how a ticket gets parked with a verdict that says nothing. But
+inventing a class the evidence does not support is worse: a wrong retry-class
+verdict re-dispatches a session straight back into the wall that stopped the
+last one.
+
+### Step 3 — post the verdict comment
+
+First line is the exact heading `## Fail-review verdict` (it is the grep
+anchor). Then, in this order:
+
+1. **Classification** — the class string from the table above, alone on a line.
+2. **`## In brief`** — the same two fields every judgment-carrying artifact
+   carries:
+
+   > **What this does:** one plain sentence saying why the work stopped and what
+   > happens next. No issue numbers, file paths, or label names.
+   >
+   > **What could be wrong:** the part of your classification you have the
+   > weakest case for, in "if X, then Y" shape — the trigger, and what concretely
+   > breaks if you called it wrong.
+3. **Cited evidence** — what you actually saw, tier by tier, each citation
+   concrete enough to re-check (a commit sha, a command that was denied, a file
+   that does not exist). A classification with no citation is an opinion.
+4. **Disagreement, if any** — where your reading and the failed session's
+   self-report diverge, both stated.
+5. **Recommended recovery** — what the next actor should do. On `complexity`,
+   this section carries **drafted child-issue bodies** for the split you are
+   recommending (see the routing table).
+
+### Step 4 — route
+
+Exactly one `gh issue edit`, copied verbatim from the table. These four routes
+are the whole contract; there is no fifth.
+
+| class | route | payload |
+|---|---|---|
+| `blockage:permission`, `blockage:dependency`, `quota` | back to `status:todo` | The wall was external and the approach held, so the next session gets the **full brief**: your verdict comment IS that brief. Both markers stay — same body, same diagnosis. |
+| `iteration` | to `status:drafting` | A **facts-only** brief. State what is true about the workspace and the ticket; explicitly exclude the prior session's conclusions, which are the suspect part. |
+| `complexity` | to `status:drafting` | Your verdict **recommends a SPLIT with drafted child bodies in the comment**. You do not file the children — that would be an autonomous split, and a human ratifies. |
+| `hold` | to `status:parked` | Terminal. Nothing automated recovers this one. |
+
+```
+# blockage:permission | blockage:dependency | quota  -> retry, same approach
+gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:fail-review --add-label status:todo
+
+# iteration | complexity  -> back to a human for re-draft or split
+gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:fail-review,gate:fail-reviewed,gate:triage-passed --add-label status:drafting
+
+# hold  -> terminal park
+gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard --remove-label status:fail-review --add-label status:parked,status:todo
+```
+
+Three details in those commands are load-bearing, so do not "simplify" them:
+
+- **The two `drafting` routes clear `gate:fail-reviewed` AND
+  `gate:triage-passed`.** The re-drafted body is materially different, so a
+  later cap-hit has earned a fresh diagnosis — and clearing the triage marker is
+  what keeps the loop bounded: re-entry now genuinely requires a human re-draft
+  *plus* a triage PASS, because the dispatch guard refuses an unmarked
+  `status:todo`. Retaining it would let anyone relabel straight to
+  `status:todo` and start a fresh episode gated by nothing but that choice.
+- **The `todo` route retains both markers.** Same body, same diagnosis: the
+  episode bound is what stops a retry-class verdict from re-granting the
+  implementation budget forever.
+- **The `hold` route adds `status:todo` alongside `status:parked`.** A bare
+  `--add-label status:parked` would strand the ticket: with no other status
+  label, removing `status:parked` derives no state at all and the issue becomes
+  invisible to the poll — silently breaking the operator's documented recovery
+  action. `status:parked` sorts first, so the issue still reads as parked while
+  it is parked. Because a `hold` bypasses the orchestrator's own park path, no
+  park notice is posted — so **your verdict comment must state the unpark
+  affordance itself**: the orchestrator will not dispatch this issue while it
+  carries `status:parked`; removing that label (or moving the issue off *Parked*
+  on the board) re-dispatches it and resets every session counter; the per-issue
+  workspace is preserved for diagnosis.
+
+Stop once the verdict is posted and the route is written. Do not open a PR, do
+not write `.run/handoff-evidence.json` — that file is the implementer's handoff,
+and you are not implementing.
 {% else %}
 ## How to work it
 

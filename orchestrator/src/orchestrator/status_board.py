@@ -81,11 +81,19 @@ STATE_TO_OPTION: dict[str, str] = {
 
 OPTION_TO_STATE: dict[str, str] = {o: s for s, o in STATE_TO_OPTION.items()}
 
-# A drag out of these states is never honored: `triage`/`in progress` are the
-# two states sessions RUN in (a state change ends a role-pinned session at the
-# next turn boundary), and leaving `parked` is an unpark, which must stay a
-# deliberate label action.
-EXCLUDED_FROM_STATES = frozenset({"triage", "in progress", "parked"})
+# A drag out of these states is never honored: `triage`/`in progress`/`fail
+# review` are the three states sessions RUN in (a state change ends a role-pinned
+# session at the next turn boundary), and leaving `parked` is an unpark, which
+# must stay a deliberate label action.
+#
+# `fail review` joined the list with the state itself (issue #31), and it is the
+# same argument, not a new one: dragging a card out of *Fail review* would end
+# the diagnosing session mid-run and land the ticket in drafting with no verdict
+# — the one outcome the feature exists to prevent. The exclusion is needed
+# because the generic filter would otherwise honor `fail review -> drafting`
+# (drafting is neither active nor otherwise excluded); the other two routes out
+# are already covered, since `todo` is active and `parked` is excluded.
+EXCLUDED_FROM_STATES = frozenset({"triage", "in progress", "fail review", "parked"})
 
 # A drag INTO these is never honored: nothing on the board may make an issue
 # dispatchable, touch the orchestrator's claim state, park, hand an issue to

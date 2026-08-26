@@ -56,20 +56,35 @@ def _edges() -> list[dict]:
     return _raw_table()["edges"]
 
 
-def test_active_cap_hit_edge_targets_parked():
+def test_active_cap_hit_edges_are_the_five_issue_31_routes():
+    """Pre-#31 there was exactly one active cap-hit edge (in-progress -> parked).
+    #31 added the fail-review entry edges and the two park edges the fallback and
+    the verify-role cap-out actually produce, so the pin becomes a set."""
     caphit = [e for e in _edges() if e.get("trigger") == "cap-hit"]
-    active = [e for e in caphit if e.get("active", True)]
-    assert active, "expected an active cap-hit edge"
-    assert all(e["from"] == "in-progress" and e["to"] == "parked" for e in active)
+    active = {(e["from"], e["to"]) for e in caphit if e.get("active", True)}
+    assert active == {
+        # implement cap-hit -> diagnosis (todo is the DOMINANT entry)
+        ("todo", "fail-review"),
+        ("in-progress", "fail-review"),
+        # implement cap-hit -> park: unprovisioned-label fallback, episode cap
+        ("todo", "parked"),
+        ("in-progress", "parked"),
+        # verify-role cap-out: unchanged by #31
+        ("triage", "parked"),
+        # the fail-review session itself capping out
+        ("fail-review", "parked"),
+    }
 
 
-def test_fail_review_edges_are_inactive_and_gated_on_20b():
+def test_fail_review_edges_are_active_and_ungated():
+    """#29 pre-encoded these as `active: false` / `requires: "#20b"`; #31 shipped
+    the verifier, so nothing may still be gated on the parent ticket."""
     fail_edges = [e for e in _edges()
                   if e["from"] == "fail-review" or e["to"] == "fail-review"]
-    assert fail_edges, "expected fail-review edges to be present (annotated)"
+    assert fail_edges, "expected fail-review edges to be present"
     for e in fail_edges:
-        assert e.get("active", True) is False, f"fail-review edge active: {e}"
-        assert e.get("requires") == "#20b", f"fail-review edge not gated on #20b: {e}"
+        assert e.get("active", True) is True, f"fail-review edge inactive: {e}"
+        assert "requires" not in e, f"fail-review edge still gated: {e}"
 
 
 # --- NEEDS DECISION: the two decision edges (issue #55) -----------------------

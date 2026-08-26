@@ -541,12 +541,19 @@ class Config:
         if isinstance(max_sessions_per_issue, bool) or not isinstance(max_sessions_per_issue, int) or max_sessions_per_issue <= 0:
             max_sessions_per_issue = 3
 
+        # issue #31: the fail-review verifier's own cap, same always-on
+        # coercion, different default (1 — one diagnosis per episode).
+        max_fail_review = raw.get("max_fail_review_sessions_per_issue", 1)
+        if isinstance(max_fail_review, bool) or not isinstance(max_fail_review, int) or max_fail_review <= 0:
+            max_fail_review = 1
+
         return AgentConfig(
             max_concurrent_agents=max_concurrent_agents,
             max_turns=max_turns,
             max_retry_backoff_ms=max_retry_backoff_ms,
             max_concurrent_agents_by_state=by_state,
             max_sessions_per_issue=max_sessions_per_issue,
+            max_fail_review_sessions_per_issue=max_fail_review,
         )
 
     # -- execution providers (SPEC.md §1; AgDR-017 dual-read migration) ---------

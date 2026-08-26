@@ -97,6 +97,26 @@ edges:
     actor: orchestrator
     note: "orchestrator claim (AgDR-010, in-progress-claim-visibility)"
   - from: todo
+    to: fail-review
+    actor: orchestrator
+    trigger: cap-hit
+    note: >-
+      the DOMINANT cap-hit entry, not an edge case: the cap check runs before
+      the in-progress claim write, and the claim label is reverted to
+      status:todo between sessions, so the dispatch attempt that trips the cap
+      almost always sees status:todo (issue #31)
+  - from: todo
+    to: parked
+    actor: orchestrator
+    trigger: cap-hit
+    note: >-
+      cap-hit park from todo, TWO producers (issue #31): (1) the
+      unprovisioned-status:fail-review fallback — a project registered before
+      #31 shipped has no such label, so the relabel raises
+      github_label_not_found and the cap branch falls back to _park(); (2) the
+      episode cap — a later implement cap-hit with gate:fail-reviewed already
+      present parks instead of opening a second fail-review episode
+  - from: todo
     to: plan-review
     actor: human
     note: "Symphony Gate B (architecture-touching work)"
@@ -135,7 +155,24 @@ edges:
     to: parked
     actor: orchestrator
     trigger: cap-hit
-    note: "session cap reached -> durable park (phase-1 active routing, AgDR-002/008)"
+    note: >-
+      cap-hit park from in-progress (AgDR-002/008). KEPT, not retired by #31,
+      and with TWO producers: (1) the unprovisioned-status:fail-review fallback
+      — an always-on path for every project registered before #31, whose
+      relabel raises github_label_not_found and falls back to _park(); (2) the
+      episode cap — a later implement cap-hit with gate:fail-reviewed present
+      parks instead of relabelling
+
+  # --- triage: the verify-role cap-out ---------------------------------------
+  # #31 changed the routing for IMPLEMENT-role cap-hits only. A triage cap-out
+  # still parks: relabelling it to fail-review would raise handoff_preempted
+  # (status:triage is in neither entry of set_sole_status_label's default
+  # expected_status), so the cap branch gates the relabel on the implement role.
+  - from: triage
+    to: parked
+    actor: orchestrator
+    trigger: cap-hit
+    note: "verify budget exhausted -> durable park; unchanged by #31"
 
   # --- parked: cap-halt awaiting human ---------------------------------------
   - from: parked
@@ -147,6 +184,14 @@ edges:
     to: todo
     actor: human
     note: "human accepts with a verdict in hand (no re-triage; marker survives)"
+  - from: parked
+    to: triage
+    actor: human
+    note: >-
+      unpark of a verify-role cap-out. _park retains status:triage through the
+      park (it sorts after status:parked, so derivation stays `parked`), which
+      means removing status:parked derives `triage` and the issue resumes
+      verification; marker untouched (issue #31)
 
   # --- Gate C: final review --------------------------------------------------
   - from: human-review
@@ -169,37 +214,60 @@ edges:
       per-PR round marker (2 rounds); at the cap the orchestrator stops
       relabeling and comments instead of parking.
 
-  # === Phase 2 — INACTIVE until #20b (fail-review hub) lands ==================
-  # Annotated, NOT enforced. Today a cap-hit parks (the active in-progress->parked
-  # edge above); no component performs fail-review routing, so the table must not
-  # encode it as live (verdict 2026-07-06 finding 3). #16's taxonomy is the
-  # authority for the retry/re-scope/hold classes below.
+  # === fail-review: post-failure diagnosis (ACTIVE since #31) =================
+  # Pre-encoded by #29 as `active: false` / `requires: "#20b"`; #31 shipped the
+  # verifier, so these are live. The `actor:` annotations were also corrected:
+  # #29 guessed `human` on all three routes out, but the ratified routing model
+  # is an AUTO-route written by the verifier SESSION. The taxonomy behind the
+  # classes is an importable contract (failure_taxonomy.py, issue #169 from #16).
+  #
+  # The routes OUT are `gh issue edit` calls made by the verifier session, not
+  # tracker-layer writes — exactly how triage routes today, and therefore with
+  # no preemption guard and no expected_status.
   - from: in-progress
     to: fail-review
     actor: orchestrator
     trigger: cap-hit
-    active: false
-    requires: "#20b"
-    note: "phase 2: cap-hit routes to fail-review instead of parked"
+    note: >-
+      implement-role cap-hit routes to a fail-review diagnosis instead of
+      parking. Reached when the cap trips on an issue still carrying the claim
+      label; the todo -> fail-review edge above is the commoner path
   - from: fail-review
     to: todo
-    actor: human
+    actor: fail-review-verifier
     verdict: retry
-    active: false
-    requires: "#20b"
-    note: "retry + #16 brief"
+    note: >-
+      retry-class verdict (blockage:permission, blockage:dependency, quota):
+      the wall was external and the approach held, so the verdict comment is
+      the full brief. BOTH markers deliberately survive — same body, same
+      diagnosis, so the episode bound still holds
   - from: fail-review
     to: drafting
-    actor: human
+    actor: fail-review-verifier
     verdict: re-scope
-    active: false
-    requires: "#20b"
+    remove_marker: gate:triage-passed   # re-scope re-enters triage, so clear it
+    note: >-
+      `iteration` (facts-only brief, prior conclusions excluded) and
+      `complexity` (verdict recommends a SPLIT with drafted child bodies; the
+      human files them — no autonomous split). Byte-identical flags for both.
+      gate:fail-reviewed is cleared too: a materially different body has earned
+      a fresh diagnosis, and clearing the triage marker is what keeps re-entry
+      gated on a human re-draft PLUS a triage PASS
   - from: fail-review
     to: parked
-    actor: human
+    actor: [fail-review-verifier, orchestrator]
     verdict: hold
-    active: false
-    requires: "#20b"
+    trigger: cap-hit
+    note: >-
+      FOUR producers, ONE edge (on the human-review -> todo precedent). The
+      verifier path is the `hold` verdict — no automated recovery is correct —
+      written as `--add-label status:parked,status:todo` so the hold-parked
+      label set matches _park's invariant and the operator's unpark derives an
+      active state. The three orchestrator paths all run through _park(): the
+      fail-review session itself exhausting its budget (the cap branch
+      discriminates on nothing but the spent counter), a gate:fail-reviewed
+      marker write that fails after the status write already landed, and a
+      handoff_label_rollback_failed leaving a dual-status state
 
 # --- requires_marker: the ONLY section the orchestrator dispatch guard reads ---
 # Per-state provenance markers that must be present on an issue before the guard

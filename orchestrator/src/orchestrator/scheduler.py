@@ -102,6 +102,14 @@ FRESHNESS_SCRIPT_RELPATH = ("scripts", "freshness-preflight.sh")
 # #15, #57). The cap VALUE is unchanged — each role gets the full budget.
 VERIFY_ROLE = "verify"
 IMPLEMENT_ROLE = "implement"
+# The post-failure verifier (issue #31). A THIRD role, deliberately not a member
+# of VERIFY_STATES: sharing triage's counter would arrive at fail-review with the
+# verify budget already spent whenever triage used its cap. The literal carries a
+# SPACE because the park reason interpolates the role into operator-facing prose
+# ("fail review budget exhausted (1/1 fail review sessions)") and because it is
+# also the derived state string for `status:fail-review` (tracker.py strips
+# `status:` and maps `-` -> ` `), so one value serves both lookups.
+FAIL_REVIEW_ROLE = "fail review"
 # States dispatched as VERIFICATION rather than implementation. The union across
 # every stance, not one stance's set: a state absent from a stance's
 # `active_states` simply never reaches here, so listing both costs nothing and
@@ -139,6 +147,9 @@ def session_role(state: str, tracker: TrackerConfig | None = None) -> str:
     literal floor above still applies when it is absent.
     """
     normalized = state.lower()
+    if normalized == FAIL_REVIEW_ROLE:
+        # issue #31. NOT folded into VERIFY_STATES on purpose — see the constant.
+        return FAIL_REVIEW_ROLE
     if normalized in VERIFY_STATES:
         return VERIFY_ROLE
     if tracker is not None and tracker.agent_owns_gate_c():
@@ -178,6 +189,31 @@ TODO_LABEL = "status:todo"
 IN_PROGRESS_LABEL = "status:in-progress"
 HUMAN_REVIEW_LABEL = "status:human-review"
 
+# Fail-review routing (issue #31). `FAIL_REVIEW_LABEL` derives the state
+# `fail review` (== FAIL_REVIEW_ROLE); `FAIL_REVIEW_MARKER` is the DURABLE
+# per-issue episode bound. In-memory state cannot carry that bound — a restart
+# empties `sessions_per_issue`, which is the same argument PARK_LABEL exists for
+# — so the marker rides on the tracker beside the status label. Its presence at
+# a later implement cap-hit means "this issue already had its diagnosis": the
+# cap branch parks instead of opening a second episode, and removing the marker
+# is what re-arms fail-review.
+FAIL_REVIEW_LABEL = "status:fail-review"
+FAIL_REVIEW_MARKER = "gate:fail-reviewed"
+
+# The status labels `_park` strips before it writes PARK_LABEL — exactly the two
+# ORCHESTRATOR-OWNED claim labels, which are also exactly the park-reachable
+# labels that sort BEFORE `status:parked`. Leaving either in place would make
+# `normalize_status_state` report a parked issue as `in progress`/`fail review`
+# (sorted-first derivation, tracker.py) and trip the multi-label diagnostic on
+# every poll. The other two park-reachable labels — `status:todo` (the dominant
+# cap-hit state) and `status:triage` (the verify-role cap-out) — sort AFTER
+# `status:parked` and are deliberately KEPT: they are what makes the unpark
+# round trip work, since an issue stripped to `[status:parked]` alone derives
+# `"none"` the moment the operator removes that label and is then invisible to
+# `fetch_candidate_issues`. Same reason `_park` backfills `status:todo` when the
+# strip would otherwise leave nothing non-park.
+PARK_STRIP_LABELS = (IN_PROGRESS_LABEL, FAIL_REVIEW_LABEL)
+
 # Posted when the orchestrator releases a live claim mid-run and reverts the
 # board (claim-release path only — the startup sweep is comment-free per
 # AgDR-010 decision #5, since a "nobody's working this" note seconds before the
@@ -211,9 +247,13 @@ REVIEW_POLL_STATES = ["human review"]
 REVIEW_POLL_INTERVAL_MS = 600000
 
 # Posted once per PR when the durable round cap is reached. At the cap the
-# orchestrator STOPS RELABELING — it does not park (no active
-# `human-review -> parked` edge exists, and `_park` clears only
-# IN_PROGRESS_LABEL, which would strand a dual-label state).
+# orchestrator STOPS RELABELING — it does not park: no active
+# `human-review -> parked` edge exists, and `_park` strips only the two
+# orchestrator-owned claim labels (PARK_STRIP_LABELS), so `status:human-review`
+# would survive the park and — sorting BEFORE `status:parked` — keep deriving
+# `human review` on a supposedly parked issue. Issue #31 generalized the strip
+# and added the `status:todo` backfill; neither makes `human-review` park-safe,
+# because a gate label the orchestrator does not own is not its to clear.
 REVIEW_CAP_COMMENT = (
     "{marker}\n"
     "**Switchboard reached its review-response round cap on this PR "
@@ -460,11 +500,44 @@ class Orchestrator:
             if iid == issue_id
         }
 
-    def _reset_issue_sessions(self, issue_id: str) -> None:
-        """Drop EVERY role's counter for one issue (unpark: both budgets are
-        restored, matching the park comment's promise)."""
-        for key in [k for k in self.sessions_per_issue if k[0] == issue_id]:
+    def _reset_issue_sessions(
+        self,
+        issue_id: str,
+        roles: tuple[str, ...] | None = None,
+    ) -> None:
+        """Drop the named roles' counters for one issue; ALL roles by default.
+
+        The default is what the two pre-#31 callers want — unpark (every budget
+        is restored, matching the park comment's promise) and the
+        review-response trigger (issue #43, whose own comment requires "Reset
+        every role"). Issue #31 added a third caller that must be selective:
+        the fail-review cap branch clears the implement and fail-review
+        counters at EPISODE START and must leave the verify counter alone, so a
+        ticket that spent its triage budget does not silently get it back on an
+        implementation failure.
+        """
+        for key in [
+            k for k in self.sessions_per_issue
+            if k[0] == issue_id and (roles is None or k[1] in roles)
+        ]:
             del self.sessions_per_issue[key]
+
+    def _cap_for_role(self, role: str) -> int:
+        """The session cap for `role` (issue #31).
+
+        Pre-#31 the counter was per-role but the CAP was one global scalar. The
+        fail-review verifier needs its own, smaller default (1): it is a single
+        diagnostic pass, not an implementation budget. Every other role keeps
+        `max_sessions_per_issue`. Both values are always positive — workflow.py
+        coerces invalid config back to the default, so parking cannot be
+        configured off for either.
+        """
+        cfg = self._cfg
+        assert cfg is not None
+        agent = cfg.agent()
+        if role == FAIL_REVIEW_ROLE:
+            return agent.max_fail_review_sessions_per_issue
+        return agent.max_sessions_per_issue
 
     def _provider_circuit(self, provider_id: str) -> ProviderCircuit:
         circuit = self.provider_circuits.get(provider_id)
@@ -1171,16 +1244,36 @@ class Orchestrator:
         # dispatch-time state and frozen for the whole session, so the verify
         # passes a ticket spent at `status:triage` do not shrink the implementer
         # budget it gets at `status:todo`.
-        cap = cfg.agent().max_sessions_per_issue
         role = session_role(issue.state, cfg.tracker())
+        cap = self._cap_for_role(role)
         session_key = (issue.id, role)
         spent = self.sessions_per_issue.get(session_key, 0)
         if spent >= cap:
+            # issue #31: an IMPLEMENT cap-hit routes to the fail-review verifier
+            # instead of parking — but only once per issue, and only while the
+            # durable episode marker is absent. Every other role (and every
+            # later episode) keeps today's behaviour: park.
+            if role == IMPLEMENT_ROLE and FAIL_REVIEW_MARKER not in issue.labels:
+                return await self._route_to_fail_review(issue, runner.provider_id)
             await self._park(
                 issue,
                 f"{role} budget exhausted ({spent}/{cap} {role} sessions)",
             )
             return DispatchOutcome(DispatchResult.REFUSED, runner.provider_id)
+
+        # issue #31, idempotent dispatch guard. `set_sole_status_label` can raise
+        # `handoff_swap_uncertain` from its FINAL read-back with the swap already
+        # applied server-side: the board shows `status:fail-review`, so the next
+        # tick arrives HERE, but the cap branch's marker write and counter reset
+        # never ran. Restoring them before dispatch keeps the episode bound exact
+        # instead of off-by-one. On the normal path the marker is already present
+        # and this is a no-op.
+        if role == FAIL_REVIEW_ROLE and FAIL_REVIEW_MARKER not in issue.labels:
+            refused = await self._restore_fail_review_episode(
+                issue, runner.provider_id)
+            if refused is not None:
+                return refused
+            spent = self.sessions_per_issue.get(session_key, 0)
 
         provider_id = runner.provider_id
         dispatch_context = ProviderWaitEntry(
@@ -2227,6 +2320,169 @@ class Orchestrator:
                 continue  # a live claim already owns it
             await self._release_in_progress_claim(tracker, issue, comment=False)
 
+    # -- fail-review routing (issue #31) -------------------------------------------
+
+    async def _route_to_fail_review(
+        self,
+        issue: Issue,
+        provider_id: str,
+    ) -> DispatchOutcome:
+        """Open a fail-review episode on an implement-role cap-hit.
+
+        Three writes, in this order and no other: `status:fail-review`, the
+        durable `gate:fail-reviewed` episode marker, then the counter reset.
+        ORDERING IS LOAD-BEARING. If the reset landed first and the status write
+        then failed transiently, the issue would keep `status:todo` with a
+        freshly cleared implement counter — a full budget re-granted with no
+        relabel, no verifier and no verdict, repeating on every transient error.
+        Writing first means every failure branch below runs with the counter
+        STILL AT CAP, which is exactly what `_park`'s own comment promises.
+
+        Returns REFUSED either way: the verifier is dispatched by the NEXT poll
+        tick, at the re-derived state `fail review`. Re-dispatching inline would
+        book the wrong counter — `set_sole_status_label` takes an issue id and
+        does not mutate the in-memory `Issue`, so `issue.state` is still the
+        pre-write state here.
+        """
+        tracker, _ = self._components()
+        # The claim is held across the writes for the reason `_park` holds it:
+        # both unclaimed dispatch entries (the poll tick and the retry timer)
+        # can enter `_dispatch` mid-await, and `_should_dispatch` only consults
+        # `running`/`claimed`. `_cancel_retry` first, for symmetry with `_park`.
+        self._cancel_retry(issue.id)
+        self.claimed.add(issue.id)
+        try:
+            try:
+                await tracker.set_sole_status_label(issue.id, FAIL_REVIEW_LABEL)
+            except TrackerError as exc:
+                return await self._fail_review_write_failed(
+                    issue, exc, provider_id, stage="status")
+            # Reconcile the in-memory labels to the post-write server state.
+            # Load-bearing, not cosmetic: the marker-failure path below hands
+            # this same `Issue` to `_park`, whose backfill decision reads
+            # exactly this field. Left stale it would still say `status:todo`,
+            # no backfill would fire, and the issue would end at
+            # `[status:parked]` alone — the strand this ticket forbids.
+            issue.labels = [
+                lbl for lbl in issue.labels if not lbl.startswith("status:")
+            ]
+            issue.labels.append(FAIL_REVIEW_LABEL)
+            try:
+                await tracker.add_labels(issue.id, [FAIL_REVIEW_MARKER])
+            except TrackerError as exc:
+                return await self._fail_review_write_failed(
+                    issue, exc, provider_id, stage="marker")
+            if FAIL_REVIEW_MARKER not in issue.labels:
+                issue.labels.append(FAIL_REVIEW_MARKER)
+            # Episode start: clear the implement budget the verdict may route
+            # back into, and the fail-review budget the verifier is about to
+            # book. The verify budget is deliberately untouched.
+            self._reset_issue_sessions(
+                issue.id, roles=(IMPLEMENT_ROLE, FAIL_REVIEW_ROLE))
+            self._tick_wakeup.set()
+            log("cap-hit routed to fail review", issue_id=issue.id,
+                issue_identifier=issue.identifier, outcome="refused")
+            return DispatchOutcome(DispatchResult.REFUSED, provider_id)
+        finally:
+            self.claimed.discard(issue.id)
+
+    async def _fail_review_write_failed(
+        self,
+        issue: Issue,
+        exc: TrackerError,
+        provider_id: str,
+        *,
+        stage: str,
+    ) -> DispatchOutcome:
+        """Decide the cap branch's failure behaviour PER ERROR CODE.
+
+        Every branch runs with the session counter still at cap.
+
+        - `github_label_not_found` on the status write: the project predates
+          this feature and never had `status:fail-review` provisioned
+          (`register-project.sh` runs at scaffold time only). Fall back to
+          today's durable behaviour — `_park()`. The dispatch halt does NOT arm:
+          `status:parked` IS provisioned on that entire population, so `_park`'s
+          own writes succeed and `_park_label_missing` stays None. Arming it
+          would stop ALL dispatch runner-wide over one project missing one
+          optional label.
+        - ANY error on the marker write: the status write already landed, so the
+          issue is sitting at `status:fail-review` with no episode bound. Park —
+          the honest terminal, and the one that leaves counters at cap.
+        - `handoff_label_rollback_failed`: the add landed, the strip failed and
+          the rollback failed, leaving a dual-status state the tracker's own
+          docstring says needs operator repair. Park: the strip leaves
+          `status:todo`, which unparks cleanly.
+        - `handoff_preempted` / `handoff_swap_uncertain` / anything else: touch
+          NOTHING. A newer transition won (parking would clobber a deliberate
+          human move), or the write is commit-ambiguous, or nothing landed at
+          all. Transients self-heal — the counter is still at cap, so the next
+          tick re-enters this branch and retries; an applied-but-unverified swap
+          is repaired by the idempotent dispatch guard instead.
+        """
+        if stage == "marker" or exc.code in (
+                "github_label_not_found", "handoff_label_rollback_failed"):
+            log("fail-review write failed; parking instead",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                stage=stage, error=str(exc), code=exc.code)
+            await self._park(
+                issue,
+                f"the fail-review {stage} write failed ({exc.code}), so no "
+                f"diagnosis could be dispatched",
+            )
+            return DispatchOutcome(DispatchResult.REFUSED, provider_id)
+        log("fail-review status write failed; leaving the issue untouched and "
+            "retrying on a later tick (counter still at cap)",
+            issue_id=issue.id, issue_identifier=issue.identifier,
+            outcome="refused", error=str(exc), code=exc.code)
+        return DispatchOutcome(DispatchResult.REFUSED, provider_id)
+
+    async def _restore_fail_review_episode(
+        self,
+        issue: Issue,
+        provider_id: str,
+    ) -> DispatchOutcome | None:
+        """Self-repair for an ambiguous swap; None means "carry on dispatching".
+
+        Reached only when an issue is ALREADY at `status:fail-review` without
+        the episode marker — i.e. the swap landed but the cap branch never saw
+        it succeed. Writes the marker and clears the counters the cap branch
+        would have, then lets the dispatch proceed.
+
+        Claimed across the await for the same reason the cap branch is, and more
+        sharply: this `add_labels` is otherwise the FIRST await in `_dispatch`
+        ahead of the claim, so a double entry here would mean two workers on one
+        workspace — not just two label writes.
+        """
+        tracker, _ = self._components()
+        self.claimed.add(issue.id)
+        try:
+            try:
+                await tracker.add_labels(issue.id, [FAIL_REVIEW_MARKER])
+            except TrackerError as exc:
+                if exc.code == "github_label_not_found":
+                    await self._park(
+                        issue,
+                        f"`{FAIL_REVIEW_MARKER}` is not provisioned on this "
+                        f"repository, so the fail-review episode cannot be "
+                        f"bounded",
+                    )
+                else:
+                    log("fail-review episode marker write failed; not "
+                        "dispatching, will retry on a later tick",
+                        issue_id=issue.id, issue_identifier=issue.identifier,
+                        outcome="refused", error=str(exc), code=exc.code)
+                return DispatchOutcome(DispatchResult.REFUSED, provider_id)
+            if FAIL_REVIEW_MARKER not in issue.labels:
+                issue.labels.append(FAIL_REVIEW_MARKER)
+            self._reset_issue_sessions(
+                issue.id, roles=(IMPLEMENT_ROLE, FAIL_REVIEW_ROLE))
+            log("fail-review episode marker restored after an ambiguous swap",
+                issue_id=issue.id, issue_identifier=issue.identifier)
+        finally:
+            self.claimed.discard(issue.id)
+        return None
+
     # -- parking (owned extension, SPEC.md §4) --------------------------------------
 
     async def _park(self, issue: Issue, reason: str) -> None:
@@ -2236,8 +2492,13 @@ class Orchestrator:
             f"**Switchboard parked this issue** — {reason}.\n\n"
             f"The orchestrator will not dispatch it again while it carries the "
             f"`{PARK_LABEL}` label. Remove that label (or move the issue off "
-            f"*Parked* on the board) to re-dispatch — BOTH session counters "
-            f"(`{VERIFY_ROLE}` and `{IMPLEMENT_ROLE}`) reset on unpark. The "
+            f"*Parked* on the board) to re-dispatch — EVERY session counter "
+            f"(`{VERIFY_ROLE}`, `{IMPLEMENT_ROLE}` and `{FAIL_REVIEW_ROLE}`) "
+            f"resets on unpark. Unparking alone does NOT re-arm the "
+            f"fail-review diagnosis: this issue keeps its `{FAIL_REVIEW_MARKER}` "
+            f"marker if it already had one, and an unparked issue that caps "
+            f"again will park rather than open a second episode. Remove "
+            f"`{FAIL_REVIEW_MARKER}` too if you want a fresh diagnosis. The "
             f"per-issue workspace is preserved for diagnosis at "
             f"`{wsm.path_for(issue.identifier)}`."
         )
@@ -2258,18 +2519,49 @@ class Orchestrator:
                     workspace_preserved=True)
             await tracker.add_labels(issue.id, [PARK_LABEL])
             self.parked.add(issue.id)  # durable marker confirmed
-            # issue #14: preserve the one-status-label contract — a parked issue
-            # should show status:parked ALONE, not also status:in-progress. Done
-            # only after the durable park write succeeds; a failure here is
-            # cosmetic (the issue is already durably parked), so it never trips
-            # the cap-enforcement halt below.
-            try:
-                await tracker.remove_labels(issue.id, [IN_PROGRESS_LABEL])
-                issue.labels = [lbl for lbl in issue.labels
-                                if lbl != IN_PROGRESS_LABEL]
-            except TrackerError as exc:
-                log("could not clear status:in-progress on park (cosmetic; issue "
-                    "is durably parked)", issue_id=issue.id, error=str(exc))
+            # issue #14, generalized by #31: preserve the one-status-label
+            # contract by clearing the orchestrator's own claim labels, so a
+            # parked issue does not keep deriving `in progress`/`fail review`
+            # from a label that sorts before `status:parked`. Done only after
+            # the durable park write succeeds; a failed STRIP is cosmetic (the
+            # issue is already durably parked and the PARK_LABEL gate refuses
+            # it either way), so it never trips the cap-enforcement halt below.
+            strip = [lbl for lbl in PARK_STRIP_LABELS if lbl in issue.labels]
+            remaining = [
+                lbl for lbl in issue.labels
+                if lbl.startswith("status:")
+                and lbl != PARK_LABEL
+                and lbl not in strip
+            ]
+            if not remaining:
+                # ADD-FIRST, and in its own try. Remove-first would leave
+                # `[status:parked]` alone if the backfill then failed, and an
+                # issue stripped to the park label alone derives `"none"` the
+                # moment the operator unparks it — invisible to the candidate
+                # poll, stranded on the very action the park comment documents.
+                # Add-first makes that unreachable. Placing this BEFORE the
+                # PARK_LABEL write would instead put a new `add_labels` under
+                # the outer `except`, turning a missing `status:todo` into a
+                # runner-wide dispatch halt.
+                try:
+                    await tracker.add_labels(issue.id, [TODO_LABEL])
+                    if TODO_LABEL not in issue.labels:
+                        issue.labels.append(TODO_LABEL)
+                except TrackerError as exc:
+                    log("PARK BACKFILL FAILED — this issue may strand on "
+                        "unpark (no non-park status label); add "
+                        f"`{TODO_LABEL}` by hand", issue_id=issue.id,
+                        issue_identifier=issue.identifier, error=str(exc))
+            if strip:
+                try:
+                    await tracker.remove_labels(issue.id, strip)
+                    issue.labels = [lbl for lbl in issue.labels
+                                    if lbl not in strip]
+                except TrackerError as exc:
+                    log("could not clear the orchestrator claim label(s) on "
+                        "park (cosmetic; issue is durably parked)",
+                        issue_id=issue.id, labels=",".join(strip),
+                        error=str(exc))
         except TrackerError as exc:
             if exc.code == "github_label_not_found":
                 # The park label is unprovisioned: parking can never persist, so
