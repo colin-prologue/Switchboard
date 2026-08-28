@@ -37,8 +37,13 @@ ordered, activated, and developed — for the operator and for agents alike. The
 Projects board is retired as a control surface: #157 is closed and PR #179 is
 closed unmerged. The staged workflow file
 (`deploy/github-workflows/status-board-sync.yml`) is **retained, not deleted** —
-reopening is a `git mv` plus two credentials, and the arbitration logic
-(#156/#164) stays correct in the tree.
+the arbitration logic (#156/#164) stays correct in the tree. Reopening is a
+`git mv`, two credentials, **and the AgDR-044 premise probe**: verify against
+the live API that an issue-side label write does not bump
+`ProjectV2ItemFieldSingleSelectValue.updatedAt`. AgDR-044 deferred that probe to
+the installation merge gate and it has never run; without it the poll can read a
+pending mirror as a drag and revert the operator's own label edit. The probe is
+part of the reopening gate, not optional diligence.
 
 ### 2. One orchestrator process per repo, ever — held by the operator
 
@@ -59,8 +64,13 @@ starts.
 
 The operator's window into the system is #12's running-set surface
 (SPEC.core §13.3 snapshot, §13.7 optional HTTP extension). Under one operator,
-loopback-bind with no auth is not a v1 simplification — it is the **final**
-design. #12 sheds its multi-tenant open questions.
+loopback-bind with no auth is the **final** design **for the read-only
+surface** — the GET snapshot and status endpoints. It is not a blanket grant:
+§13.7 also specifies an unauthenticated `POST /api/v1/refresh`, and loopback
+binding does not stop a browser-originated cross-origin form POST from a page
+the operator happens to have open. Any mutating endpoint is either dropped from
+#12's scope or ships with Origin-header enforcement. #12 sheds its multi-tenant
+questions, not its browser-facing ones.
 
 ### 4. The scaling axis is projects, not seats
 
@@ -103,7 +113,8 @@ not less, because no second human reviews a merge.
   live") and is re-prioritized on dispatch-clarity merit alone. Part (a)
   (explicit precedence) *gains* weight — labels are now the sole control plane.
 - **#12:** the (a)-local-file vs (c)-HTTP decision narrows to §13.3/§13.7 as
-  written; auth/tenancy questions are struck.
+  written; multi-tenant auth questions are struck. The browser-facing question
+  for any mutating endpoint (Origin/CSRF) remains — see §3.
 - **#56:** the runner-identity prerequisite (shared App login) is moot while
   iceboxed but must be restored to the body on any reopen.
 - **Docs:** SETUP.md's board-sync `[MANUAL]` install stage and AgDR-009's
