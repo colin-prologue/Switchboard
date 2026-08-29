@@ -87,10 +87,12 @@ def test_duplicate_yaml_mapping_key_raises_parse_error(tmp_path: Path):
     p = tmp_path / "WORKFLOW.md"
     p.write_text(
         "---\n"
-        "claude:\n"
-        "  command: first\n"
-        "claude:\n"
-        "  command: second\n"
+        "providers:\n"
+        "  claude:\n"
+        "    command: first\n"
+        "providers:\n"
+        "  claude:\n"
+        "    command: second\n"
         "---\n"
         "body\n"
     )
@@ -100,19 +102,21 @@ def test_duplicate_yaml_mapping_key_raises_parse_error(tmp_path: Path):
 
     assert exc_info.value.code == "workflow_parse_error"
     assert "duplicate key" in str(exc_info.value)
-    assert "claude" in str(exc_info.value)
+    assert "providers" in str(exc_info.value)
 
 
-def test_yaml_merge_override_remains_valid_for_legacy_workflow(tmp_path: Path):
+def test_yaml_merge_override_remains_valid_for_provider_workflow(tmp_path: Path):
     p = tmp_path / "WORKFLOW.md"
     p.write_text(
         "---\n"
         "claude_defaults: &claude_defaults\n"
+        "  kind: claude-cli\n"
         "  command: inherited\n"
         "  max_turns: 20\n"
-        "claude:\n"
-        "  <<: *claude_defaults\n"
-        "  command: overridden\n"
+        "providers:\n"
+        "  claude:\n"
+        "    <<: *claude_defaults\n"
+        "    command: overridden\n"
         "---\n"
         "body\n"
     )
@@ -453,13 +457,21 @@ def test_claude_defaults(tmp_path: Path):
 
 def test_claude_command_preserved_as_shell_string(tmp_path: Path):
     cmd = "claude -p --output-format stream-json --allowedTools 'Bash(git:*)'"
-    defn = WorkflowDefinition(config={"claude": {"command": cmd}}, prompt_template="")
+    defn = WorkflowDefinition(
+        config={"providers": {"claude": {"kind": "claude-cli", "command": cmd}}},
+        prompt_template="",
+    )
     cfg = Config(defn, tmp_path)
     assert cfg.claude().command == cmd
 
 
 def test_claude_max_budget_usd_float(tmp_path: Path):
-    defn = WorkflowDefinition(config={"claude": {"max_budget_usd": 5}}, prompt_template="")
+    defn = WorkflowDefinition(
+        config={
+            "providers": {"claude": {"kind": "claude-cli", "max_budget_usd": 5}}
+        },
+        prompt_template="",
+    )
     cfg = Config(defn, tmp_path)
     assert cfg.claude().max_budget_usd == 5.0
     assert isinstance(cfg.claude().max_budget_usd, float)
@@ -576,9 +588,13 @@ def test_codex_config_rejects_legacy_mixed_or_malformed_forms(
     assert exc_info.value.code == error_code
 
 
-def test_equivalent_legacy_and_provider_claude_blocks_are_accepted(tmp_path: Path):
-    defn = WorkflowDefinition(
-        config={
+@pytest.mark.parametrize(
+    "config",
+    [
+        # Legacy-only: the shape AgDR-017 kept alive and AgDR-049 retired.
+        {"claude": {"command": "claude -p"}},
+        # Legacy beside the envelope: what the dual-read used to reconcile.
+        {
             "claude": {"command": "claude -p"},
             "providers": {
                 "claude": {
@@ -588,23 +604,67 @@ def test_equivalent_legacy_and_provider_claude_blocks_are_accepted(tmp_path: Pat
                 }
             },
         },
-        prompt_template="",
-    )
+        # Legacy beside a *conflicting* envelope: this used to be the only
+        # rejected combination (conflicting_provider_config). It is now
+        # rejected for the same reason as the equivalent one — the block
+        # itself, not the disagreement.
+        {
+            "claude": {"command": "claude -p", "max_turns": 20},
+            "providers": {
+                "claude": {
+                    "kind": "claude-cli",
+                    "command": "claude -p",
+                    "max_turns": 30,
+                }
+            },
+        },
+        # A non-map legacy block used to be coerced to defaults, not refused.
+        {"claude": "not-a-map"},
+    ],
+)
+def test_legacy_top_level_claude_block_is_rejected(tmp_path: Path, config: dict):
+    """AgDR-049: the legacy shape is refused by name, never read.
 
-    assert Config(defn, tmp_path).claude().max_turns == 20
+    The message must name the migration — a bare parse error would leave an
+    operator guessing that a block which worked yesterday is now a typo.
+    """
+    cfg = Config(WorkflowDefinition(config=config, prompt_template=""), tmp_path)
+
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.claude()
+
+    assert exc_info.value.code == "unsupported_provider_id"
+    message = str(exc_info.value)
+    assert "providers.claude" in message
+    assert "kind: claude-cli" in message
 
 
-def test_legacy_claude_coercions_remain_unchanged(tmp_path: Path):
+def test_legacy_claude_coercions_are_gone_with_the_legacy_block(tmp_path: Path):
+    """The lenient parse existed only for the legacy block; both are gone.
+
+    A non-string command and a boolean budget silently became defaults under
+    the legacy block. In the envelope they are parse errors.
+    """
     cfg = Config(
         WorkflowDefinition(
-            config={"claude": {"command": 42, "max_budget_usd": True}},
+            config={
+                "providers": {
+                    "claude": {
+                        "kind": "claude-cli",
+                        "command": 42,
+                        "max_budget_usd": True,
+                    }
+                }
+            },
             prompt_template="",
         ),
         tmp_path,
     )
 
-    assert cfg.claude().command == "claude -p --verbose --output-format stream-json"
-    assert cfg.claude().max_budget_usd is None
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.claude()
+
+    assert exc_info.value.code == "workflow_parse_error"
 
 
 @pytest.mark.parametrize(
@@ -636,27 +696,23 @@ def test_provider_claude_rejects_malformed_or_unknown_fields(
     assert "providers.claude" in str(exc_info.value)
 
 
-def test_conflicting_legacy_and_provider_claude_blocks_fail(tmp_path: Path):
-    defn = WorkflowDefinition(
-        config={
-            "claude": {"command": "claude -p", "max_turns": 20},
-            "providers": {
-                "claude": {
-                    "kind": "claude-cli",
-                    "command": "claude -p",
-                    "max_turns": 30,
-                }
-            },
-        },
-        prompt_template="",
+def test_no_execution_block_still_resolves_to_defaults(tmp_path: Path):
+    """AgDR-049 removed a config *shape*, not the optionality of the block.
+
+    A workflow with no `providers:` key is the absence of configuration, which
+    has always meant "take the defaults" — distinct from the legacy shape. It
+    must resolve to exactly what an all-default envelope resolves to.
+    """
+    empty = Config(WorkflowDefinition(config={}, prompt_template=""), tmp_path)
+    envelope = Config(
+        WorkflowDefinition(
+            config={"providers": {"claude": {"kind": "claude-cli"}}},
+            prompt_template="",
+        ),
+        tmp_path,
     )
 
-    with pytest.raises(WorkflowError) as exc_info:
-        Config(defn, tmp_path).claude()
-
-    assert exc_info.value.code == "conflicting_provider_config"
-    assert "claude" in str(exc_info.value)
-    assert "providers.claude" in str(exc_info.value)
+    assert empty.claude() == envelope.claude()
 
 
 @pytest.mark.parametrize(
@@ -938,7 +994,7 @@ def test_validate_dispatch_empty_claude_command(tmp_path: Path):
     defn = WorkflowDefinition(
         config={
             "tracker": {"kind": "github", "repo": "acme/widgets", "api_key": "literal-token"},
-            "claude": {"command": "   "},
+            "providers": {"claude": {"kind": "claude-cli", "command": "   "}},
         },
         prompt_template="",
     )

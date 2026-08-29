@@ -38,7 +38,7 @@ not exact JSON names. We implement that over the Claude CLI.
 | cost accounting                     | `result` message `total_cost_usd` drives budget enforcement; `--max-budget-usd` as a hard per-run cost ceiling |
 | client-side tracker tool            | the agent's `gh` tooling; the token is never **written** into the workspace (clone auth via `gh auth setup-git`). The agent process does inherit the orchestrator's environment — Bash-level access to `$GITHUB_TOKEN` is inside the documented v1 guard scope (AgDR-004). |
 
-The provider-instance form of the front-matter execution block is
+The **only** form of the front-matter execution block is
 **`providers.claude`**, with `kind: claude-cli` plus the pass-through fields
 `command`, `max_turns`, `max_budget_usd`, `turn_timeout_ms`, `read_timeout_ms`,
 and `stall_timeout_ms`:
@@ -55,28 +55,35 @@ providers:
     stall_timeout_ms: 300000
 ```
 
-The top-level **`claude:`** block remains a supported legacy form with the same
-fields and defaults. During the dual-read migration (AgDR-017), either form may
-be used. If both are present, they must resolve to equal typed `ClaudeConfig`
-values; otherwise startup/reload fails with `conflicting_provider_config`
-instead of choosing one silently. A provider envelope must contain the canonical
-`claude` id with `kind: claude-cli`. In the default Claude process mode, other
-provider ids and kinds fail validation rather than being ignored. The shipped
-workflow template remains on the legacy form to continuously exercise backward
-compatibility. Stage 2 introduced no provider selection; the Stage 3 selection
-boundary and Stage 5 Codex opt-in are specified below.
-Provider-enveloped Claude settings are strict: unknown fields, malformed field
-types, and boolean `max_budget_usd` values fail parsing instead of falling back
-to defaults. Legacy coercions remain unchanged for compatibility. The workflow
-loader also rejects textual duplicate YAML mapping keys; a duplicate must never
-erase an earlier `claude` or `providers` value before dual-form conflict
-detection runs. Standard YAML merge-key inheritance and explicit overrides
-remain supported.
+The top-level **`claude:`** block was the legacy form. It is **removed**
+(AgDR-049, issue #159): AgDR-017 introduced it as one half of a dual-read whose
+stated removal criterion was "no tracked binding uses the legacy top-level
+form", and migrating the shipped templates to the envelope met that condition.
+A workflow still carrying a top-level `claude:` block now fails validation with
+`unsupported_provider_id` and a message naming the migration, rather than being
+read. `conflicting_provider_config` no longer exists as an outcome, because two
+forms can no longer both be present.
+
+A provider envelope must contain the canonical `claude` id with
+`kind: claude-cli`. In the default Claude process mode, other provider ids and
+kinds fail validation rather than being ignored. A workflow carrying no
+execution block at all still resolves to the documented defaults — that is the
+absence of configuration, not a second shape. Stage 2 introduced no provider
+selection; the Stage 3 selection boundary and Stage 5 Codex opt-in are specified
+below.
+
+Claude settings are parsed strictly: unknown fields, malformed field types, and
+boolean `max_budget_usd` values fail parsing instead of falling back to
+defaults. The lenient coercions that existed only for the legacy block are gone
+with it. The workflow loader also rejects textual duplicate YAML mapping keys,
+so a duplicate can never silently erase an earlier `providers` value before
+typed parsing sees it. Standard YAML merge-key inheritance and explicit
+overrides remain supported.
 
 At dispatch, the scheduler selects one `AgentRunner` through an injected
 `AgentRunnerSelector(Config, Issue)` boundary (AgDR-018). The production
 default remains `ClaudeOnlyRunnerSelector`, which returns
-`ClaudeRunner(cfg.claude())` for both Claude configuration forms. Selection
+`ClaudeRunner(cfg.claude())` from the provider envelope. Selection
 happens before claim or tracker mutation, once per worker session; all
 continuation turns in that session use the same runner instance. The selected
 provider id is retained on the running entry and emitted in worker lifecycle
@@ -95,10 +102,12 @@ flag still installs `ClaudeOnlyRunnerSelector`. A Codex process requires a
 strict, single-entry `providers.codex` map with `kind: codex-cli` and optional
 `command`, `turn_timeout_ms`, `read_timeout_ms`, and `stall_timeout_ms` fields.
 It rejects legacy execution blocks, mixed provider maps, unsupported kinds,
-unknown fields, and empty commands. A Claude process continues to accept only
-the legacy or provider-enveloped Claude forms described above. One workflow is
-therefore valid for one process provider; no weighting, fallback, per-issue
-override, or mixed selection exists.
+unknown fields, and empty commands. Its legacy-block refusal is retained after
+AgDR-049 and is now unreachable by construction rather than dead: no binding can
+carry a top-level block for it to catch. A Claude process accepts only the
+provider-enveloped Claude form described above. One workflow is therefore valid
+for one process provider; no weighting, fallback, per-issue override, or mixed
+selection exists.
 
 The provider-neutral runner contract owns `turn_timeout_ms`,
 `stall_timeout_ms`, and optional `max_budget_usd`. Token mint TTL and cumulative

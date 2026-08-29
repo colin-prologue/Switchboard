@@ -49,7 +49,10 @@ def _issue() -> Issue:
 @pytest.mark.parametrize(
     "execution_config",
     [
-        {"claude": {"command": "claude -p --legacy"}},
+        # AgDR-049 left one execution shape, so the parametrization that used to
+        # pair legacy-vs-envelope now pairs a bare envelope against a fully
+        # specified one.
+        {"providers": {"claude": {"kind": "claude-cli"}}},
         {
             "providers": {
                 "claude": {
@@ -134,7 +137,7 @@ def test_orchestrator_uses_injected_selector(tmp_path: Path) -> None:
     orchestrator = Orchestrator(workflow_path, runner_selector=selector)
     cfg = Config(
         WorkflowDefinition(
-            config={"claude": {"command": "claude -p"}},
+            config={"providers": {"claude": {"kind": "claude-cli", "command": "claude -p"}}},
             prompt_template="prompt",
         ),
         tmp_path,
@@ -159,7 +162,7 @@ async def test_selector_failure_does_not_claim_or_relabel_issue(tmp_path: Path) 
         WorkflowDefinition(
             config={
                 "agent": {"max_sessions_per_issue": 3},
-                "claude": {"command": "claude -p"},
+                "providers": {"claude": {"kind": "claude-cli", "command": "claude -p"}},
             },
             prompt_template="prompt",
         ),
@@ -653,8 +656,10 @@ def test_selection_after_reload_uses_current_config(tmp_path: Path) -> None:
         "  kind: github\n"
         "  repo: acme/widgets\n"
         "  api_key: test-token\n"
-        "claude:\n"
-        "  command: claude -p --first\n"
+        "providers:\n"
+        "  claude:\n"
+        "    kind: claude-cli\n"
+        "    command: claude -p --first\n"
         "---\n"
         "prompt\n"
     )

@@ -556,46 +556,44 @@ class Config:
             max_fail_review_sessions_per_issue=max_fail_review,
         )
 
-    # -- execution providers (SPEC.md §1; AgDR-017 dual-read migration) ---------
+    # -- execution providers (SPEC.md §1; AgDR-049 retires AgDR-017's dual-read) -
 
     @staticmethod
-    def _parse_claude(
-        raw: dict[str, Any],
-        path: str,
-        *,
-        strict: bool = False,
-    ) -> ClaudeConfig:
-        """Parse one legacy or provider-enveloped Claude settings block."""
+    def _parse_claude(raw: dict[str, Any], path: str) -> ClaudeConfig:
+        """Parse one provider-enveloped Claude settings block.
 
-        if strict:
-            allowed = {
-                "kind",
-                "command",
-                "max_turns",
-                "max_budget_usd",
-                "turn_timeout_ms",
-                "read_timeout_ms",
-                "stall_timeout_ms",
-            }
-            unknown = [key for key in raw if key not in allowed]
-            if unknown:
-                raise WorkflowError(
-                    "workflow_parse_error",
-                    f"{path} contains unknown fields: "
-                    f"{', '.join(sorted(map(str, unknown)))}",
-                )
-            if "command" in raw and not isinstance(raw["command"], str):
-                raise WorkflowError(
-                    "workflow_parse_error",
-                    f"{path}.command must be a string, got "
-                    f"{type(raw['command']).__name__}",
-                )
-            budget = raw.get("max_budget_usd")
-            if isinstance(budget, bool):
-                raise WorkflowError(
-                    "workflow_parse_error",
-                    f"{path}.max_budget_usd must be numeric or null, got {budget!r}",
-                )
+        Strict throughout: the lenient coercions this parser once applied
+        existed only for the legacy top-level block, which no longer loads.
+        """
+
+        allowed = {
+            "kind",
+            "command",
+            "max_turns",
+            "max_budget_usd",
+            "turn_timeout_ms",
+            "read_timeout_ms",
+            "stall_timeout_ms",
+        }
+        unknown = [key for key in raw if key not in allowed]
+        if unknown:
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"{path} contains unknown fields: "
+                f"{', '.join(sorted(map(str, unknown)))}",
+            )
+        if "command" in raw and not isinstance(raw["command"], str):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"{path}.command must be a string, got "
+                f"{type(raw['command']).__name__}",
+            )
+        budget = raw.get("max_budget_usd")
+        if isinstance(budget, bool):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"{path}.max_budget_usd must be numeric or null, got {budget!r}",
+            )
 
         command = raw.get("command")
         command = command if isinstance(command, str) else "claude -p --verbose --output-format stream-json"
@@ -640,22 +638,31 @@ class Config:
         )
 
     def claude(self) -> ClaudeConfig:
-        """Return canonical Claude config from the legacy or provider envelope.
+        """Return the canonical Claude config from the provider envelope.
 
-        Stage 2 deliberately supports only the canonical provider id `claude`
-        and kind `claude-cli`. Runtime selection remains Claude-only; accepting
-        another provider here before its adapter exists would make a workflow
-        look deployable while silently ignoring that provider.
+        The legacy top-level `claude:` block is gone (issue #159, AgDR-049).
+        AgDR-017's removal criterion — no tracked binding still on the legacy
+        form — was met by migrating the shipped templates, so `providers.claude`
+        is the only shape that carries Claude execution settings and a workflow
+        still holding the old block is refused by name instead of read.
+
+        Only the canonical provider id `claude` and kind `claude-cli` are
+        supported here. Runtime selection remains Claude-only; accepting another
+        provider would make a workflow look deployable while silently ignoring
+        that provider.
         """
-        legacy_present = "claude" in self._config
-        legacy_raw = self._config.get("claude")
-        # Preserve the legacy getter's established coercion: a non-map block is
-        # treated as an empty block and receives defaults.
-        legacy_map = legacy_raw if isinstance(legacy_raw, dict) else {}
-        legacy_cfg = self._parse_claude(legacy_map, "claude")
+        if "claude" in self._config:
+            raise WorkflowError(
+                "unsupported_provider_id",
+                "the legacy top-level 'claude:' block was removed (issue #159); "
+                "move its fields under providers.claude and add kind: claude-cli",
+            )
 
         if "providers" not in self._config:
-            return legacy_cfg
+            # A workflow with no execution block at all still takes the
+            # defaults. That is the absence of configuration, not the second
+            # config *shape* the dual-read carried.
+            return self._parse_claude({}, "providers.claude")
 
         providers = self._config["providers"]
         if not isinstance(providers, dict):
@@ -692,18 +699,7 @@ class Config:
                 f"providers.claude.kind must be 'claude-cli', got {kind!r}",
             )
 
-        provider_cfg = self._parse_claude(
-            provider_raw,
-            "providers.claude",
-            strict=True,
-        )
-        if legacy_present and legacy_cfg != provider_cfg:
-            raise WorkflowError(
-                "conflicting_provider_config",
-                "claude and providers.claude resolve to different settings; "
-                "make them equivalent or configure only one form",
-            )
-        return provider_cfg
+        return self._parse_claude(provider_raw, "providers.claude")
 
     def codex(self) -> CodexConfig:
         """Return the strict Codex CLI config for the opt-in canary mode.
@@ -794,6 +790,12 @@ class Config:
 
     def mixed(self) -> MixedExecutionConfig:
         """Return the strict, validation-only Stage 6 mixed-mode envelope."""
+        # Kept deliberately after AgDR-049 removed the legacy top-level Claude
+        # block. `claude()` now refuses that block outright, so no production
+        # binding can reach this guard — it is unreachable by construction
+        # rather than dead. It still states mixed mode's own rule at mixed
+        # mode's own boundary, and a future provider that reintroduces a
+        # top-level block would land on it first.
         legacy_blocks = [name for name in ("claude", "codex") if name in self._config]
         if legacy_blocks:
             raise WorkflowError(
@@ -836,7 +838,7 @@ class Config:
                 "providers.claude.kind must be 'claude-cli', "
                 f"got {claude_raw.get('kind')!r}",
             )
-        claude = self._parse_claude(claude_raw, "providers.claude", strict=True)
+        claude = self._parse_claude(claude_raw, "providers.claude")
         codex = self._parse_codex(providers["codex"], "providers.codex")
 
         routing = self._config.get("routing")
