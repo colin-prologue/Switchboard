@@ -139,7 +139,7 @@ def test_scheduler_components_still_construct_claude_only(tmp_path: Path) -> Non
         WorkflowDefinition(
             config={
                 "tracker": {"kind": "github", "repo": "acme/widgets"},
-                "claude": {"command": "claude -p"},
+                "providers": {"claude": {"kind": "claude-cli", "command": "claude -p"}},
             },
             prompt_template="prompt",
         ),

@@ -54,9 +54,22 @@ _ROUND_MARKER_RE = re.compile(
 # present by construction and therefore cannot guard the cap comment.
 CAP_MARKER = "<!-- switchboard:response-cap -->"
 
+# The human path's cap comment (issue #178) is a SECOND one-shot with its own
+# marker, not a reuse of `CAP_MARKER`. The two say different things — the
+# sub-poll's names unanswered bot threads and offers "relabel to todo" as the
+# recovery, which is precisely the action a human at this cap has just taken —
+# and a shared guard would let whichever fired first suppress the other's
+# explanation on the same PR.
+RELABEL_CAP_MARKER = "<!-- switchboard:relabel-cap -->"
+
 # Rounds one PR may trigger. The DURABLE outer bound (the marker lives on the
 # PR, so it survives an orchestrator restart); the freshly-reset per-role
 # session cap is the inner one, giving a bounded worst case of 2 x cap sessions.
+#
+# ONE budget, TWO actors (issue #178): a human changes-requested relabel draws
+# on this same count. That is deliberate — the cap exists so no actor can refill
+# an issue's implement allowance indefinitely, and a per-actor count would let
+# an operator alternate with the sub-poll to get 2x the rounds.
 ROUND_CAP = 2
 
 
@@ -190,13 +203,19 @@ def latest_round(
 
 
 def has_cap_comment(
-    comments: list[IssueComment], *, self_login: str | None
+    comments: list[IssueComment],
+    *,
+    self_login: str | None,
+    marker: str = CAP_MARKER,
 ) -> bool:
-    """Whether the one-shot cap comment was already posted on this PR.
+    """Whether the one-shot cap comment guarded by `marker` was already posted.
 
-    Same trust + first-line rule as `latest_round`."""
+    Same trust + first-line rule as `latest_round`. `marker` selects WHICH
+    one-shot is being asked about — the sub-poll's (`CAP_MARKER`, the default,
+    so existing callers are unchanged) or the human relabel path's
+    (`RELABEL_CAP_MARKER`, issue #178)."""
     me = normalize_login(self_login)
     return any(
-        _authored_by(c, me) and _first_line(c.body).startswith(CAP_MARKER)
+        _authored_by(c, me) and _first_line(c.body).startswith(marker)
         for c in comments
     )

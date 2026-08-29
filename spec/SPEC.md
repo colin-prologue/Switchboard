@@ -38,7 +38,7 @@ not exact JSON names. We implement that over the Claude CLI.
 | cost accounting                     | `result` message `total_cost_usd` drives budget enforcement; `--max-budget-usd` as a hard per-run cost ceiling |
 | client-side tracker tool            | the agent's `gh` tooling; the token is never **written** into the workspace (clone auth via `gh auth setup-git`). The agent process does inherit the orchestrator's environment — Bash-level access to `$GITHUB_TOKEN` is inside the documented v1 guard scope (AgDR-004). |
 
-The provider-instance form of the front-matter execution block is
+The **only** form of the front-matter execution block is
 **`providers.claude`**, with `kind: claude-cli` plus the pass-through fields
 `command`, `max_turns`, `max_budget_usd`, `turn_timeout_ms`, `read_timeout_ms`,
 and `stall_timeout_ms`:
@@ -55,28 +55,35 @@ providers:
     stall_timeout_ms: 300000
 ```
 
-The top-level **`claude:`** block remains a supported legacy form with the same
-fields and defaults. During the dual-read migration (AgDR-017), either form may
-be used. If both are present, they must resolve to equal typed `ClaudeConfig`
-values; otherwise startup/reload fails with `conflicting_provider_config`
-instead of choosing one silently. A provider envelope must contain the canonical
-`claude` id with `kind: claude-cli`. In the default Claude process mode, other
-provider ids and kinds fail validation rather than being ignored. The shipped
-workflow template remains on the legacy form to continuously exercise backward
-compatibility. Stage 2 introduced no provider selection; the Stage 3 selection
-boundary and Stage 5 Codex opt-in are specified below.
-Provider-enveloped Claude settings are strict: unknown fields, malformed field
-types, and boolean `max_budget_usd` values fail parsing instead of falling back
-to defaults. Legacy coercions remain unchanged for compatibility. The workflow
-loader also rejects textual duplicate YAML mapping keys; a duplicate must never
-erase an earlier `claude` or `providers` value before dual-form conflict
-detection runs. Standard YAML merge-key inheritance and explicit overrides
-remain supported.
+The top-level **`claude:`** block was the legacy form. It is **removed**
+(AgDR-2026-08-29-retire-the-legacy-claude-block, issue #159): AgDR-017 introduced it as one half of a dual-read whose
+stated removal criterion was "no tracked binding uses the legacy top-level
+form", and migrating the shipped templates to the envelope met that condition.
+A workflow still carrying a top-level `claude:` block now fails validation with
+`unsupported_provider_id` and a message naming the migration, rather than being
+read. `conflicting_provider_config` no longer exists as an outcome, because two
+forms can no longer both be present.
+
+A provider envelope must contain the canonical `claude` id with
+`kind: claude-cli`. In the default Claude process mode, other provider ids and
+kinds fail validation rather than being ignored. A workflow carrying no
+execution block at all still resolves to the documented defaults — that is the
+absence of configuration, not a second shape. Stage 2 introduced no provider
+selection; the Stage 3 selection boundary and Stage 5 Codex opt-in are specified
+below.
+
+Claude settings are parsed strictly: unknown fields, malformed field types, and
+boolean `max_budget_usd` values fail parsing instead of falling back to
+defaults. The lenient coercions that existed only for the legacy block are gone
+with it. The workflow loader also rejects textual duplicate YAML mapping keys,
+so a duplicate can never silently erase an earlier `providers` value before
+typed parsing sees it. Standard YAML merge-key inheritance and explicit
+overrides remain supported.
 
 At dispatch, the scheduler selects one `AgentRunner` through an injected
 `AgentRunnerSelector(Config, Issue)` boundary (AgDR-018). The production
 default remains `ClaudeOnlyRunnerSelector`, which returns
-`ClaudeRunner(cfg.claude())` for both Claude configuration forms. Selection
+`ClaudeRunner(cfg.claude())` from the provider envelope. Selection
 happens before claim or tracker mutation, once per worker session; all
 continuation turns in that session use the same runner instance. The selected
 provider id is retained on the running entry and emitted in worker lifecycle
@@ -93,19 +100,31 @@ Stage 5A makes that adapter dispatchable only through an explicit process mode
 (AgDR-020). `--provider codex` installs `CodexOnlyRunnerSelector`; omitting the
 flag still installs `ClaudeOnlyRunnerSelector`. A Codex process requires a
 strict, single-entry `providers.codex` map with `kind: codex-cli` and optional
-`command`, `turn_timeout_ms`, `read_timeout_ms`, and `stall_timeout_ms` fields.
+`command`, `max_budget_usd`, `turn_timeout_ms`, `read_timeout_ms`, and
+`stall_timeout_ms` fields (`max_budget_usd` is numeric-or-null under the same
+strictness as the Claude envelope; see the runner-contract paragraph below for
+what it does and does not enforce).
 It rejects legacy execution blocks, mixed provider maps, unsupported kinds,
-unknown fields, and empty commands. A Claude process continues to accept only
-the legacy or provider-enveloped Claude forms described above. One workflow is
-therefore valid for one process provider; no weighting, fallback, per-issue
-override, or mixed selection exists.
+unknown fields, and empty commands. Its legacy-block refusal is retained after
+AgDR-2026-08-29-retire-the-legacy-claude-block and is now unreachable by construction rather than dead: no binding can
+carry a top-level block for it to catch. A Claude process accepts only the
+provider-enveloped Claude form described above. One workflow is therefore valid
+for one process provider; no weighting, fallback, per-issue override, or mixed
+selection exists.
 
 The provider-neutral runner contract owns `turn_timeout_ms`,
 `stall_timeout_ms`, and optional `max_budget_usd`. Token mint TTL and cumulative
 session budget use the selected runner's policy. `RunningEntry` captures the
 stall timeout at dispatch, so workflow reload affects later sessions without
-silently changing an in-flight session's deadline. Codex reports no dollar
-budget in subscription mode. The safe sandbox may protect `.git` as read-only;
+silently changing an in-flight session's deadline. `providers.codex` accepts
+`max_budget_usd` and the runner carries it on that neutral interface, but Codex
+reports no dollar budget in subscription mode: its turns normalize to
+`cost_usd: 0.0`, so the cumulative-cost check never accumulates and a
+configured Codex ceiling cannot fire. The Codex leg's live bounds are
+`agent.max_turns` and the per-issue session cap; the runner logs the inert
+ceiling at construction so it never reads as an enforced one. Closing this is
+one change — surface a provider-reported cost into `TurnResult.cost_usd` once
+Codex reports one (AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert, issue #181). The safe sandbox may protect `.git` as read-only;
 a successful local git probe is host evidence only, and Stage 5B must verify
 ticket-to-PR handoff in a separate canary repository before mixed-pool work.
 
@@ -137,7 +156,15 @@ Normalized outputs must match the core's issue domain model.
 | tracker **writes**                  | **split, and the split is per ROLE — not "agents never write labels".** An *implementing* worker uses `gh` for comments and PR links but writes **no** `status:*` label; its final action is the handoff evidence contract `.run/handoff-evidence.json` (`orchestrator/src/orchestrator/handoff.py`). The **orchestrator** validates that evidence after verified provider success and performs the single handoff transition itself, alongside its own claim/park labels (issue #61 / AgDR-028). The **target** is the stance's `tracker.handoff_label` — `status:human-review` by default, `status:review` at `prototype` (AgDR-039/AgDR-043) — not a constant; the validation before writing it is unchanged. **Verdict-bearing roles DO write status labels**, by design and by prompt: the triage verifier writes `status:todo` / `status:drafting` / `status:decision` on its PASS / NEEDS WORK / NEEDS DECISION verdict (issue #17, #55 — `base` behaviour, predating the stance ladder), and `prototype`'s QA reviewer writes `status:todo` on FIX and `status:human-review` on ESCALATE (`WORKFLOW.prototype.md`). `methodology/METHODOLOGY.md`'s who-writes-what table is the authority for this; keep it in sync |
 
 **State mapping is the one real semantic gap.** Model state as `status:*` labels:
-the adapter normalizes a `status:todo` label into `state: "todo"`. Gate states are per
+the adapter normalizes a `status:todo` label into `state: "todo"`. One stage label
+per issue is the contract, but it is not an invariant the tracker can enforce, and
+`status:parked` is an **overlay** applied deliberately alongside the stage a held
+ticket resumes into — so more than one `status:*` label is a state the derivation
+must have an answer for. That answer is the `precedence` list in
+`workflow/transitions.yml`: an explicit ranking, highest first, ranking the hold
+above every stage it can hold and gates above the orchestrator's own claim labels.
+It is not alphabetical order, and labels outside the `status:` namespace never
+participate (issue #167 / `AgDR-2026-08-29-state-precedence-is-declared-not-alphabetical`). Gate states are per
 stance, and "gate" has two senses that only coincide at `base`. The **declared**
 vocabulary is `gate_states` (AgDR-045): `base` declares `status:drafting`,
 `status:decision`, `status:plan-review`, `status:blocked` and

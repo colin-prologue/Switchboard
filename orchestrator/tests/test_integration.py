@@ -512,24 +512,33 @@ agent:
   max_turns: 1
   max_retry_backoff_ms: 500
   max_sessions_per_issue: 2
-claude:
-  command: "unused-by-fake-runner"
-  max_turns: 1
-  turn_timeout_ms: 5000
-  read_timeout_ms: 3000
-  stall_timeout_ms: 0
+providers:
+  claude:
+    kind: claude-cli
+    command: "unused-by-fake-runner"
+    max_turns: 1
+    turn_timeout_ms: 5000
+    read_timeout_ms: 3000
+    stall_timeout_ms: 0
 ---
 Work {{{{ issue.identifier }}}}: {{{{ issue.title }}}}
 """
 
 
+# The Claude block is the whole `providers:` map here, so the Codex and mixed
+# variants replace the map rather than splicing a sibling key beside it.
+CLAUDE_PROVIDERS_BLOCK = """providers:
+  claude:
+    kind: claude-cli
+    command: "unused-by-fake-runner"
+    max_turns: 1
+    turn_timeout_ms: 5000
+    read_timeout_ms: 3000
+    stall_timeout_ms: 0"""
+
+
 CODEX_WORKFLOW_TMPL = WORKFLOW_TMPL.replace(
-    """claude:
-  command: "unused-by-fake-runner"
-  max_turns: 1
-  turn_timeout_ms: 5000
-  read_timeout_ms: 3000
-  stall_timeout_ms: 0""",
+    CLAUDE_PROVIDERS_BLOCK,
     """providers:
   codex:
     kind: codex-cli
@@ -547,12 +556,7 @@ MIXED_WORKFLOW_TMPL = WORKFLOW_TMPL.replace(
     claude: 2
     codex: 2""",
 ).replace(
-    """claude:
-  command: "unused-by-fake-runner"
-  max_turns: 1
-  turn_timeout_ms: 5000
-  read_timeout_ms: 3000
-  stall_timeout_ms: 0""",
+    CLAUDE_PROVIDERS_BLOCK,
     """providers:
   claude:
     kind: claude-cli
@@ -1315,7 +1319,7 @@ async def test_budget_ceiling_ends_session_normally(tmp_path, monkeypatch, capfd
     tmpl = (WORKFLOW_TMPL
             .replace("max_turns: 1", "max_turns: 10")
             .replace('command: "unused-by-fake-runner"',
-                     'command: "unused-by-fake-runner"\n  max_budget_usd: 0.025'))
+                     'command: "unused-by-fake-runner"\n    max_budget_usd: 0.025'))
     orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, tmpl)
 
     tracker.candidates = [make_issue(1)]
@@ -1489,7 +1493,7 @@ async def test_incomplete_streak_terminates_at_budget_ceiling(tmp_path, monkeypa
     tmpl = (WORKFLOW_TMPL
             .replace("max_turns: 1", "max_turns: 10")
             .replace('command: "unused-by-fake-runner"',
-                     'command: "unused-by-fake-runner"\n  max_budget_usd: 0.025'))
+                     'command: "unused-by-fake-runner"\n    max_budget_usd: 0.025'))
 
     def factory(n, resume):
         return TurnResult(status="incomplete", session_id=f"inc-{n}",
@@ -1725,6 +1729,58 @@ async def test_codex_mode_dispatches_continues_and_uses_codex_policy(
     err = capfd.readouterr().err
     assert "provider_id=codex" in err
     assert "worker completed" in err
+
+
+async def test_codex_budget_ceiling_ends_session_normally(
+    tmp_path,
+    monkeypatch,
+    capfd,
+):
+    """issue #181: a Codex-routed session honours the SAME cumulative ceiling a
+    Claude one does (test_budget_ceiling_ends_session_normally). At $0.01/turn a
+    $0.025 ceiling ends the session after turn 3, well before max_turns (10).
+
+    The runner here reports a per-turn cost; the real Codex CLI does not
+    (AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert residual), so this proves the scheduler path is provider-neutral
+    and fires as soon as the adapter has a dollar figure to report — not that
+    today's Codex telemetry feeds it.
+    """
+    tmpl = (
+        CODEX_WORKFLOW_TMPL
+        .replace("max_turns: 1", "max_turns: 10")
+        .replace(
+            "    kind: codex-cli\n",
+            "    kind: codex-cli\n    max_budget_usd: 0.025\n",
+        )
+    )
+    runner = FakeRunner()
+    runner.provider_id = "codex"
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=tmpl,
+        runner=runner,
+        provider_id="codex",
+    )
+
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}  # state never changes
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(
+        lambda: not orch.running
+        and not orch.retry_attempts
+        and "node-1" not in orch.claimed
+    )
+
+    assert len(runner.turns) == 3          # ceiling, not max_turns (10), ended it
+    err = capfd.readouterr().err
+    assert "worker budget ceiling reached" in err
+    assert "cost_usd=0.03" in err
+    assert "provider_id=codex" in err
+    assert "worker completed" in err
+    assert "worker failed" not in err
 
 
 async def test_codex_mode_failure_retries_and_releases_claim(

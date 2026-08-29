@@ -62,8 +62,15 @@ agent:
 # detection entirely, costing zero API calls. The bot identity
 # ($SB_APP_BOT_LOGIN) is never an operator: agents do not approve their own
 # verdicts.
+#
+# Composed from `SB_OPERATOR_LOGIN` in the project binding (issue #171), so
+# naming the operator is a tracked per-project edit rather than a hand-edit of
+# this shared template. Unset composes to `[]` — detection stays off for any
+# project that has not named one. SINGLE-VALUED by design: the operator is
+# exactly one person (AgDR-048), so the field composes one quoted login and a
+# project needing more hand-edits its composed WORKFLOW.md.
 fold:
-  operator_logins: []
+  operator_logins: ["colin-prologue"]
 
 # Owned extension (issue #43 / AgDR-037): the bot-login allowlist for the
 # review-response loop. Logins listed here are the BOTNESS DEFINITION — an
@@ -72,15 +79,17 @@ fold:
 # login is never listed). Read by the scheduler's review-response sub-poll,
 # which is bounded to `status:human-review` issues' bound PRs.
 #
-# SHIPPED EMPTY ON PURPOSE. An empty list (the default) disables the feature
-# entirely at zero API cost: no poll, no marker, no relabel, and the prompt
-# addendum stays inert because no marker is ever written. Going live is a
-# deliberate config edit (e.g. `["chatgpt-codex-connector"]`), never a merge
-# side effect. The feature ALSO requires `$SB_APP_BOT_LOGIN` — without the App
-# identity the loop cannot tell its own replies from a bot's, and it disables
-# itself with one log line rather than guessing.
+# OFF BY DEFAULT. An empty list disables the feature entirely at zero API cost:
+# no poll, no marker, no relabel, and the prompt addendum stays inert because no
+# marker is ever written. Going live stays a deliberate config edit (AgDR-037) —
+# it is now `SB_REVIEW_BOT` in the project binding, composed in here by
+# register-project.sh (issue #171), rather than a hand-edit of this shared
+# template. An unset variable composes to `[]`, so no project's posture changes
+# by adopting this template. The feature ALSO requires `$SB_APP_BOT_LOGIN` —
+# without the App identity the loop cannot tell its own replies from a bot's,
+# and it disables itself with one log line rather than guessing.
 review_response:
-  bot_logins: []
+  bot_logins: ["chatgpt-codex-connector"]
 
 # Pass-through execution block for the Claude adapter (see spec/SPEC.md §1).
 # --verbose is required by the CLI for stream-json in -p mode. Documented
@@ -99,34 +108,41 @@ review_response:
 # branch — that lands in the reviewable diff, and file writes remain
 # bounded by the containment guard. OS-level subprocess sandboxing is
 # deferred (candidate ticket).
-claude:
-  command: "claude -p --model claude-opus-5 --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
-  # 20 -> 100 (2026-07-06, AgDR-013) -> 20 (2026-08-26, rejection sweep).
-  #
-  # The raise was a stopgap, and AgDR-013 said so: it rejected "keep 20, add
-  # --resume on error_max_turns" as "the correct structural fix ... ticketed
-  # separately rather than rushed". That ticket (#47) shipped on 2026-07-27 —
-  # `error_max_turns` now yields `incomplete` + RESUME_SESSION
-  # (runner.py, AgDR-027), the orchestrator continues the SAME session, and the
-  # continuation does not spend session budget (scheduler.py). The wall the
-  # raise existed to clear is a checkpoint now.
-  #
-  # Nothing revisited the stopgap for seven weeks, because the condition for
-  # revisiting it lived in a REJECTED-options section that nothing re-reads.
-  # Found by the 2026-08-26 sweep; see SWEEP-2026-08-26-rejection-rationale.md.
-  #
-  # Restored to 20 rather than to a new number: AgDR-013 rejected picking a
-  # fresh arbitrary wall, and 20 is the value chosen on evidence before the
-  # stopgap. `agent.max_turns` (20 orchestrator turns) still bounds the session
-  # at ~400 CLI turns, and max_budget_usd bounds it in dollars.
-  max_turns: 20
-  max_budget_usd: 5
-  turn_timeout_ms: 3600000
-  # read_timeout 5000 -> 30000 (2026-07-06): 5s to first protocol line kills
-  # real `claude` cold starts (two evidence-free instant failures at 19:17Z
-  # burned #14's session budget in ~60s).
-  read_timeout_ms: 30000
-  stall_timeout_ms: 300000
+# The provider envelope is the only execution shape (AgDR-2026-08-29-retire-the-legacy-claude-block, issue #159).
+# The top-level `claude:` block AgDR-017 kept alive for compatibility is gone;
+# a workflow still carrying one is refused at load with a message naming this
+# migration. Strict parsing applies here — unknown fields, a non-string
+# command, and a boolean budget fail instead of falling back to defaults.
+providers:
+  claude:
+    kind: claude-cli
+    command: "claude -p --model claude-opus-5 --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
+    # 20 -> 100 (2026-07-06, AgDR-013) -> 20 (2026-08-26, rejection sweep).
+    #
+    # The raise was a stopgap, and AgDR-013 said so: it rejected "keep 20, add
+    # --resume on error_max_turns" as "the correct structural fix ... ticketed
+    # separately rather than rushed". That ticket (#47) shipped on 2026-07-27 —
+    # `error_max_turns` now yields `incomplete` + RESUME_SESSION
+    # (runner.py, AgDR-027), the orchestrator continues the SAME session, and the
+    # continuation does not spend session budget (scheduler.py). The wall the
+    # raise existed to clear is a checkpoint now.
+    #
+    # Nothing revisited the stopgap for seven weeks, because the condition for
+    # revisiting it lived in a REJECTED-options section that nothing re-reads.
+    # Found by the 2026-08-26 sweep; see SWEEP-2026-08-26-rejection-rationale.md.
+    #
+    # Restored to 20 rather than to a new number: AgDR-013 rejected picking a
+    # fresh arbitrary wall, and 20 is the value chosen on evidence before the
+    # stopgap. `agent.max_turns` (20 orchestrator turns) still bounds the session
+    # at ~400 CLI turns, and max_budget_usd bounds it in dollars.
+    max_turns: 20
+    max_budget_usd: 5
+    turn_timeout_ms: 3600000
+    # read_timeout 5000 -> 30000 (2026-07-06): 5s to first protocol line kills
+    # real `claude` cold starts (two evidence-free instant failures at 19:17Z
+    # burned #14's session budget in ~60s).
+    read_timeout_ms: 30000
+    stall_timeout_ms: 300000
 ---
 
 You are a Switchboard engineering agent working a single GitHub issue from the
@@ -598,10 +614,13 @@ and you are not implementing.
    methodology semantics (`spec/`, `methodology/`, workflow prompt templates)
    or makes a pivotal judgment call — forecloses alternatives, is expensive to
    reverse, resolves spec ambiguity, or commits resources — add an AgDR file
-   at `self/.decisions/AgDR-NNN-<slug>.md` (next free NNN) in
-   the same PR: context, decision, rejected options steelmanned, blast radius,
-   weakest point. A PR touching those layers with no AgDR is incomplete and
-   will be bounced at the merge gate.
+   at `self/.decisions/AgDR-YYYY-MM-DD-<slug>.md` — today's date,
+   no number: numbers were dropped because parallel branches all allocate the
+   same "next free" one (issue #154). The H1 heading repeats the filename stem.
+   Cite other records by slug, not by number; see the directory's `README.md`.
+   Include, in the same PR: context, decision, rejected options steelmanned,
+   blast radius, weakest point. A PR touching those layers with no AgDR is
+   incomplete and will be bounced at the merge gate.
 8. **Hand off, don't self-merge.** Commit, push the branch, and open a PR with
    `gh` whose body's FIRST line is `Closes #<this issue's number>` — a literal
    closing reference, not prose that mentions the issue. The orchestrator

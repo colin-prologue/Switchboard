@@ -206,6 +206,8 @@ p_vcmd="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${SB_VERIFY_CMD:-}
 p_vtools="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${SB_VERIFY_TOOLS:-}")"
 p_rbot="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${SB_REVIEW_BOT:-}")"
 p_rbot_yaml=""; [ -n "$p_rbot" ] && p_rbot_yaml="\"$p_rbot\""
+p_op="$(set -a; . "$ENV_FILE" >/dev/null 2>&1; printf '%s' "${SB_OPERATOR_LOGIN:-}")"
+p_op_yaml=""; [ -n "$p_op" ] && p_op_yaml="\"$p_op\""
 
 # SB_WORKFLOW_STANCE supersedes the legacy SB_WORKFLOW_TEMPLATE; read both, in
 # that order, exactly as verify-setup.sh does. A project registered before the
@@ -292,7 +294,8 @@ if ! composed="$(printf '%s\n' "$raw" | sed \
   -e "s|{{VERIFY_CMD}}|$(sed_escape "$p_vcmd")|g" \
   -e "s|{{VERIFY_TOOLS}}|$(sed_escape "$p_vtools")|g" \
   -e "s|{{REVIEW_BOT}}|$(sed_escape "$p_rbot")|g" \
-  -e "s|{{REVIEW_BOT_YAML}}|$(sed_escape "$p_rbot_yaml")|g")" || [ -z "$composed" ]; then
+  -e "s|{{REVIEW_BOT_YAML}}|$(sed_escape "$p_rbot_yaml")|g" \
+  -e "s|{{OPERATOR_LOGIN_YAML}}|$(sed_escape "$p_op_yaml")|g")" || [ -z "$composed" ]; then
   fail_open "substitution failed composing $TEMPLATE — skipping recompose (fail-open)"
 fi
 
