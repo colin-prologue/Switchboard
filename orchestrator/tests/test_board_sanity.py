@@ -40,6 +40,7 @@ def _config(tmp_path: Path, template: Path) -> Config:
         .replace("{{VERIFY_TOOLS}}", "")
         .replace("{{REVIEW_BOT}}", "")
         .replace("{{REVIEW_BOT_YAML}}", "")
+        .replace("{{OPERATOR_LOGIN_YAML}}", "")
     )
     path = tmp_path / "WORKFLOW.md"
     path.write_text(substituted)
