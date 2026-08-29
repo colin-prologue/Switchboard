@@ -126,13 +126,19 @@ polling:
   interval_ms: 100
 workspace:
   root: "{root}"
-claude:
-  command: "unused"
+providers:
+  claude:
+    kind: claude-cli
+    command: "unused"
 ---
 Body {{{{ issue.identifier }}}}
 """
 
-WORKFLOW_PROVIDER_CONFLICT = """---
+# AgDR-2026-08-29-retire-the-legacy-claude-block: the legacy top-level `claude:` block no longer loads. This used to
+# be a dual-form conflict (`conflicting_provider_config`); the block alone is
+# now the rejection, and it stands in for "a workflow that stops parsing on
+# reload" in the last-known-good retention test below.
+WORKFLOW_LEGACY_CLAUDE = """---
 tracker:
   kind: github
   repo: "acme/api"
@@ -142,11 +148,7 @@ polling:
 workspace:
   root: "{root}"
 claude:
-  command: "unused"
-providers:
-  claude:
-    kind: claude-cli
-    command: "different"
+  command: "different"
 ---
 Body {{{{ issue.identifier }}}}
 """
@@ -200,7 +202,7 @@ async def test_broken_reload_blocks_dispatch(tmp_path):
     assert calls["fetch"] == 2  # dispatch resumes
 
 
-async def test_conflicting_provider_reload_keeps_last_good_and_blocks_dispatch(
+async def test_legacy_claude_reload_keeps_last_good_and_blocks_dispatch(
     tmp_path,
 ):
     from orchestrator.scheduler import Orchestrator
@@ -234,7 +236,7 @@ async def test_conflicting_provider_reload_keeps_last_good_and_blocks_dispatch(
     await orch._tick()
     assert calls["fetch"] == 1
 
-    wf.write_text(WORKFLOW_PROVIDER_CONFLICT.format(root=tmp_path / "ws"))
+    wf.write_text(WORKFLOW_LEGACY_CLAUDE.format(root=tmp_path / "ws"))
     orch._workflow_mtime = None
     await orch._tick()
 

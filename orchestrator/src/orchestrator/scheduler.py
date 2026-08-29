@@ -31,6 +31,7 @@ import httpx
 
 from .agent_runner import AgentRunner
 from .board_sanity import report_board_state
+from .build_identity import resolve_build_identity
 from .fold import FoldSignal, detect_fold_signals
 from .fold_apply import apply_fold_signal
 from .log import log
@@ -52,8 +53,8 @@ from .provider_circuit import (
 )
 from .runner_selector import (
     AgentRunnerSelector,
+    AssignmentRefused,
     ClaudeOnlyRunnerSelector,
-    MixedAssignmentRefused,
 )
 from .singleton import acquire_singleton_lock
 from .tracker import GitHubTracker
@@ -616,8 +617,14 @@ class Orchestrator:
         self._load_workflow(initial=True)  # startup validation failure aborts (§6.3)
         cfg = self._cfg
         assert cfg is not None
+        # issue #143: the record EXTENDS in place — same name, same existing
+        # fields (SETUP.md:293 anchors tracebacks to this banner). `sha`/`dirty`
+        # say which build is running, so a healthy start stops being silent
+        # about code age. Never raises; unresolvable is "unknown", not a refusal.
+        sha, dirty = resolve_build_identity()
         log("orchestrator starting", workflow=str(self.workflow_path),
-            repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()))
+            repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()),
+            sha=sha, dirty=dirty)
 
         self._http = httpx.AsyncClient(timeout=30.0)  # core §11.2 network timeout
         self._build_creds()  # WorkflowError (bad key file) aborts startup (§6.3)
@@ -1218,8 +1225,12 @@ class Orchestrator:
         assert cfg is not None
         try:
             runner = self._select_runner(issue)
-        except MixedAssignmentRefused as exc:
-            log("mixed assignment refused; leaving issue untouched",
+        except AssignmentRefused as exc:
+            # Ambiguous provider labels (MixedAssignmentRefused) and a provider
+            # that lacks the guard surface this project's stance requires
+            # (CodexGuardUnavailable, issue #135) get the same handling: no
+            # claim, no label writes, one log line naming the reason.
+            log("provider assignment refused; leaving issue untouched",
                 issue_id=issue.id, issue_identifier=issue.identifier,
                 outcome="refused",
                 failure_class=FailureClass.ASSIGNMENT_REFUSED.value,
