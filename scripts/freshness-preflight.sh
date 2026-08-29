@@ -340,4 +340,48 @@ fi
 # PR #140).
 
 check_staleness
+
+# --- 5. shipped-but-unwired audit (issue #172) -------------------------------
+# Report any config field sitting at its documented disabling default, so a
+# feature that was built, reviewed and merged cannot go on doing nothing
+# without anyone noticing. Three have already shipped that way, each found by
+# tripping over it.
+#
+# It runs HERE because this is the one launch path that already holds the
+# composed bytes at the moment it produces them, and it audits $COMPOSED —
+# not the tracked template, since composed-vs-tracked is itself one of the
+# ways a feature ends up unwired. The policy table, by contrast, is read from
+# the WORKING TREE: the same origin-template/local-binding asymmetry the
+# recompose above already has, and shared with verify-setup.sh.
+#
+# Advisory and fail-open like everything else this script emits: every line —
+# findings, a malformed table, a missing interpreter — becomes one stderr
+# warning and nothing becomes an exit code. A gate here would make an audit
+# nobody asked for able to refuse a launch.
+#
+# `python3`, not the project venv: this runs before run-project.sh execs the
+# orchestrator, so no virtualenv is guaranteed to exist yet. The module is
+# stdlib-only for exactly that reason — an import error here would make the
+# usual outcome "the audit silently never ran", which is the bug class it
+# exists to end.
+#
+# PYTHONDONTWRITEBYTECODE is not hygiene: this script's contract is that it
+# writes no tracked file and moves no HEAD, and importing a module from the
+# checkout would otherwise drop `__pycache__/` into `orchestrator/src/`. That
+# is ignored in THIS repo and would not be in a deploy that vendored the
+# package differently — a preflight whose non-mutation depends on the reader's
+# .gitignore is not non-mutating.
+unwired_audit() {
+  local out
+  out="$(PYTHONDONTWRITEBYTECODE=1 \
+      PYTHONPATH="$SB_HOME/orchestrator/src${PYTHONPATH:+:$PYTHONPATH}" \
+      "${SB_PYTHON:-python3}" -m orchestrator.disabling_defaults \
+      "$SLUG" "$COMPOSED" "$SB_HOME/workflow/disabling-defaults.yml" 2>&1 || true)"
+  [ -n "$out" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] && warn "$line"
+  done <<< "$out"
+}
+
+unwired_audit
 exit 0

@@ -1,0 +1,37 @@
+# Shipped-but-unwired audit policy (issue #172).
+#
+# Read by `orchestrator/disabling_defaults.py`, which `freshness-preflight.sh`
+# runs once per project per launch against that project's COMPOSED workflow.
+# Nothing else reads this file: it does not participate in composition, is not
+# substituted by `scripts/register-project.sh`, and so cannot drift the
+# template-drift check in `scripts/verify-setup.sh`.
+#
+# A SIDECAR, not an annotation beside the field it annotates: `workflow.py`
+# raises `workflow_parse_error` on any key under `fold:`/`review_response:`
+# other than the single known one, so an inline annotation would make every
+# composed config unloadable.
+
+# field path -> the value that means "switched off".
+#
+# Declared, never inferred. This is not a list of empty-looking values; each
+# entry is a documented short-circuit — a value at which the feature makes zero
+# API calls and looks, from outside, exactly like "nothing has happened yet".
+defaults:
+  # scheduler's fold sub-poll short-circuits on an empty allowlist (issue #51).
+  fold.operator_logins: []
+  # scheduler's review-response sub-poll does the same (issue #43 / AgDR-037).
+  review_response.bot_logins: []
+
+# Per-project exemptions: this project means it.
+#
+# Keyed by project slug, and ONLY a slug entry silences the check. Template
+# prose is not an exemption — `workflow/WORKFLOW.base.md` calls
+# `review_response.bot_logins` "SHIPPED EMPTY ON PURPOSE", but that documents
+# the value every project STARTS from, not a decision any project has made.
+# Reading it as an exemption would mute the check on the one instance that
+# proved it works.
+#
+# Empty today: `switchboard-self` wants both features on, so a finding here is
+# a real one. Add an entry the day a project decides otherwise, in the same
+# commit as the decision.
+deliberately_off: {}
