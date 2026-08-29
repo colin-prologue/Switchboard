@@ -2,10 +2,12 @@
 
 The lifecycle rules live in ONE committed YAML file, `workflow/transitions.yml`,
 at the repo root — never duplicated as a Python literal (that is the drift the
-single-path-constant AC guards against). The orchestrator consumes only the
-`requires_marker` section (per-state provenance markers it can check against the
-current state + labels it observes); the `edges` section is for #52's Action,
-which sees both transition endpoints in its event payload.
+single-path-constant AC guards against). The orchestrator consumes the two
+sections answerable from a CURRENT label set alone: `requires_marker` (per-state
+provenance markers it checks against the state + labels it observes) and
+`precedence` (which state wins when an issue carries more than one `status:*`
+label — issue #167). The `edges` section is for #52's Action, which sees both
+transition endpoints in its event payload.
 
 See self/.decisions/AgDR-011-* for why the marker check is a bounded, config-
 driven exception to AgDR-006 ("gates cost zero orchestrator code").
@@ -57,6 +59,41 @@ def _load_table(path: Path) -> dict:
             f"transitions.yml decoded to {type(raw).__name__}, expected a map",
         )
     return raw
+
+
+def load_precedence(path: Path = TRANSITIONS_PATH) -> tuple[str, ...]:
+    """Load the `precedence` section: states highest-priority FIRST (issue #167).
+
+    Returned in the tracker's state vocabulary (lower-case, spaces not dashes)
+    the way `load_requires_marker` returns its keys, so a caller ranking derived
+    states never has to remember which spelling this file uses. Duplicates keep
+    their first (highest) position; blank and non-string rows are dropped.
+
+    Raises rather than falling back to an implicit order: an absent or malformed
+    section would silently restore the alphabetical coincidence this section was
+    written to retire, and a parked issue would derive an ACTIVE state again.
+    """
+    raw = _load_table(path)
+
+    section = raw.get("precedence")
+    if not isinstance(section, list) or not section:
+        raise WorkflowError(
+            "transitions_parse_error",
+            "precedence must be a non-empty list of states, highest first",
+        )
+
+    out: list[str] = []
+    for state in section:
+        if not isinstance(state, str):
+            continue
+        norm = state.strip().lower().replace("-", " ")
+        if norm and norm not in out:
+            out.append(norm)
+    if not out:
+        raise WorkflowError(
+            "transitions_parse_error", "precedence list contains no usable states"
+        )
+    return tuple(out)
 
 
 def load_requires_marker(path: Path = TRANSITIONS_PATH) -> dict[str, list[str]]:

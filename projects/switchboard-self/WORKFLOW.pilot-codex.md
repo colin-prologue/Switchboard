@@ -186,10 +186,13 @@ once the verdict is routed.
    methodology semantics (`spec/`, `methodology/`, workflow prompt templates)
    or makes a pivotal judgment call — forecloses alternatives, is expensive to
    reverse, resolves spec ambiguity, or commits resources — add an AgDR file
-   at `self/.decisions/AgDR-NNN-<slug>.md` (next free NNN) in
-   the same PR: context, decision, rejected options steelmanned, blast radius,
-   weakest point. A PR touching those layers with no AgDR is incomplete and
-   will be bounced at the merge gate.
+   at `self/.decisions/AgDR-YYYY-MM-DD-<slug>.md` — today's date,
+   no number: numbers were dropped because parallel branches all allocate the
+   same "next free" one (issue #154). The H1 heading repeats the filename stem.
+   Cite other records by slug, not by number; see the directory's `README.md`.
+   Include, in the same PR: context, decision, rejected options steelmanned,
+   blast radius, weakest point. A PR touching those layers with no AgDR is
+   incomplete and will be bounced at the merge gate.
 7. **Hand off, don't self-merge.** Commit, push the branch, open a PR with `gh`
    linking this issue, attach evidence of the criteria passing. Then, as your
    FINAL action, write the handoff evidence file `.run/handoff-evidence.json`

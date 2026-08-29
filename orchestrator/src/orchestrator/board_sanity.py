@@ -132,8 +132,12 @@ def find_invalid_states(issue: Issue, cfg: TrackerConfig) -> list[Finding]:
                 detail=(
                     "carries more than one live status label: "
                     + ", ".join(f"`{label}`" for label in live)
-                    + ". At most one may be live, so which state the ticket is "
-                    "in is decided arbitrarily (sorted-first)"
+                    + ". At most one may be live. Derivation still resolves "
+                    "this deterministically, against the committed state "
+                    "precedence — but the precedence exists to rank a HOLD "
+                    "above the stage it holds, not to arbitrate between two "
+                    "stage labels, so one of these is wrong and only a human "
+                    "knows which"
                 ),
             )
         )

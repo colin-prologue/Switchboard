@@ -511,24 +511,33 @@ agent:
   max_turns: 1
   max_retry_backoff_ms: 500
   max_sessions_per_issue: 2
-claude:
-  command: "unused-by-fake-runner"
-  max_turns: 1
-  turn_timeout_ms: 5000
-  read_timeout_ms: 3000
-  stall_timeout_ms: 0
+providers:
+  claude:
+    kind: claude-cli
+    command: "unused-by-fake-runner"
+    max_turns: 1
+    turn_timeout_ms: 5000
+    read_timeout_ms: 3000
+    stall_timeout_ms: 0
 ---
 Work {{{{ issue.identifier }}}}: {{{{ issue.title }}}}
 """
 
 
+# The Claude block is the whole `providers:` map here, so the Codex and mixed
+# variants replace the map rather than splicing a sibling key beside it.
+CLAUDE_PROVIDERS_BLOCK = """providers:
+  claude:
+    kind: claude-cli
+    command: "unused-by-fake-runner"
+    max_turns: 1
+    turn_timeout_ms: 5000
+    read_timeout_ms: 3000
+    stall_timeout_ms: 0"""
+
+
 CODEX_WORKFLOW_TMPL = WORKFLOW_TMPL.replace(
-    """claude:
-  command: "unused-by-fake-runner"
-  max_turns: 1
-  turn_timeout_ms: 5000
-  read_timeout_ms: 3000
-  stall_timeout_ms: 0""",
+    CLAUDE_PROVIDERS_BLOCK,
     """providers:
   codex:
     kind: codex-cli
@@ -546,12 +555,7 @@ MIXED_WORKFLOW_TMPL = WORKFLOW_TMPL.replace(
     claude: 2
     codex: 2""",
 ).replace(
-    """claude:
-  command: "unused-by-fake-runner"
-  max_turns: 1
-  turn_timeout_ms: 5000
-  read_timeout_ms: 3000
-  stall_timeout_ms: 0""",
+    CLAUDE_PROVIDERS_BLOCK,
     """providers:
   claude:
     kind: claude-cli
@@ -1300,7 +1304,7 @@ async def test_budget_ceiling_ends_session_normally(tmp_path, monkeypatch, capfd
     tmpl = (WORKFLOW_TMPL
             .replace("max_turns: 1", "max_turns: 10")
             .replace('command: "unused-by-fake-runner"',
-                     'command: "unused-by-fake-runner"\n  max_budget_usd: 0.025'))
+                     'command: "unused-by-fake-runner"\n    max_budget_usd: 0.025'))
     orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, tmpl)
 
     tracker.candidates = [make_issue(1)]
@@ -1474,7 +1478,7 @@ async def test_incomplete_streak_terminates_at_budget_ceiling(tmp_path, monkeypa
     tmpl = (WORKFLOW_TMPL
             .replace("max_turns: 1", "max_turns: 10")
             .replace('command: "unused-by-fake-runner"',
-                     'command: "unused-by-fake-runner"\n  max_budget_usd: 0.025'))
+                     'command: "unused-by-fake-runner"\n    max_budget_usd: 0.025'))
 
     def factory(n, resume):
         return TurnResult(status="incomplete", session_id=f"inc-{n}",
