@@ -179,7 +179,7 @@ dispatch, `todo` where it does not, and refuses — naming the states the projec
 *does* dispatch — where it cannot tell. An explicit `--entry` naming a state the
 project neither dispatches nor gates is refused the same way. At `prototype` the
 choice below therefore collapses to `todo` on its own; the list is the `base`
-menu (`AgDR-049`).
+menu (`AgDR-2026-08-29-entry-state-is-resolved-from-the-project`).
 
 At `base`, the path a ticket takes *is* the risk control — match it to the risk:
 

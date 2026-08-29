@@ -1,4 +1,4 @@
-# AgDR-049 — The entry state is resolved from the target project, and an auto-resolved `todo` stamps the triage marker
+# AgDR-2026-08-29 — The entry state is resolved from the target project, and an auto-resolved `todo` stamps the triage marker
 
 - **Date:** 2026-08-29
 - **Issue:** #176 (default stance + default entry state compose into a ticket that is never dispatched)

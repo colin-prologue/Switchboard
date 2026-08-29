@@ -278,7 +278,7 @@ resolves the target project's `active_states` (the same repo→binding→compose
 project verifies before dispatch, `todo` where it does not, and refuses outright
 where it cannot tell — naming `--entry` as the fix. An explicit `--entry` naming
 a state the project neither dispatches nor declares as a gate is refused the same
-way. See `AgDR-049`; the two defaults that composed into a dead ticket were
+way. See `AgDR-2026-08-29-entry-state-is-resolved-from-the-project`; the two defaults that composed into a dead ticket were
 issue #176.
 
 At a stance that dispatches them, the options are:

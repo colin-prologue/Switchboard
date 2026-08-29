@@ -246,7 +246,7 @@ LABEL="status:$ENTRY"
 # the project's stance has no triage step at all. Both stamp the provenance
 # marker the dispatch guard requires (issue #29 / AgDR-011), because an
 # unstamped status:todo is refused and never dispatched — which would re-create
-# the never-dispatched ticket this resolution exists to prevent. See AgDR-049.
+# the never-dispatched ticket this resolution exists to prevent. See AgDR-2026-08-29-entry-state-is-resolved-from-the-project.
 if [ "$ENTRY" = "todo" ]; then
   LABEL="$LABEL,gate:triage-passed"
 fi
