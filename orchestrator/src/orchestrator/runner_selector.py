@@ -8,7 +8,7 @@ from typing import Protocol
 from .agent_runner import AgentRunner
 from .codex_runner import CodexRunner
 from .runner import ClaudeRunner
-from .types import Issue
+from .types import CodexConfig, Issue
 from .workflow import Config
 
 
@@ -28,8 +28,50 @@ class AgentRunnerSelector(Protocol):
     def select(self, cfg: Config, issue: Issue) -> AgentRunner: ...
 
 
-class MixedAssignmentRefused(Exception):
+class AssignmentRefused(Exception):
+    """Raised when an issue has no safe provider assignment.
+
+    The scheduler catches this base, not its subclasses: every refusal here has
+    the same handling — leave the issue untouched, log `assignment_refused`,
+    dispatch nothing.
+    """
+
+
+class MixedAssignmentRefused(AssignmentRefused):
     """Raised when a mixed issue has no safe, unambiguous provider assignment."""
+
+
+class CodexGuardUnavailable(AssignmentRefused):
+    """Raised when Codex would be routed to a project whose stance hands Gate C
+    to an agent (issue #135, the named Codex residual of #133 / AgDR-036).
+
+    A Codex session has NO PreToolUse surface: `CodexRunner._build_argv` emits
+    no settings/hook/guard flag of any kind, so `guard.py` never runs and none
+    of the enumerated Gate-C shapes are denied. The Claude guard's job on an
+    agent-owned gate is not "permit merging" — the stance already permits that.
+    It is to BOUND the merge to the granting project's own repository
+    (`guard._merge_stays_inside_this_project`), because one App installation
+    token also reaches the human-gated repos in the same installation. Codex
+    carries no such bound, so this combination would hand an unbounded merge
+    right across project boundaries.
+
+    Refused at dispatch rather than left as a residual named in a record nobody
+    re-reads (AgDR-048): a mechanism is the floor, not a paragraph.
+    """
+
+
+def _codex_runner(cfg: Config, codex_cfg: CodexConfig) -> CodexRunner:
+    """The single construction point for `CodexRunner`, so the guard-surface
+    refusal cannot be reached by adding a second selector that forgets it."""
+    gate_c_repo = _gate_c_repo(cfg)
+    if gate_c_repo:
+        raise CodexGuardUnavailable(
+            "codex has no PreToolUse guard surface, so it cannot be routed to "
+            f"{gate_c_repo}, whose stance hands Gate C to an agent "
+            "(issue #135; route this issue to claude or move the project's "
+            "handoff back to the human gate)"
+        )
+    return CodexRunner(codex_cfg)
 
 
 class ClaudeOnlyRunnerSelector:
@@ -49,7 +91,7 @@ class CodexOnlyRunnerSelector:
 
     def select(self, cfg: Config, issue: Issue) -> AgentRunner:
         del issue
-        return CodexRunner(cfg.codex())
+        return _codex_runner(cfg, cfg.codex())
 
 
 class MixedRunnerSelector:
@@ -62,7 +104,7 @@ class MixedRunnerSelector:
         provider_id = self.select_provider(mixed.weights, issue)
         if provider_id == "claude":
             return ClaudeRunner(mixed.claude, _gate_c_repo(cfg))
-        return CodexRunner(mixed.codex)
+        return _codex_runner(cfg, mixed.codex)
 
     @staticmethod
     def select_provider(weights: dict[str, int], issue: Issue) -> str:

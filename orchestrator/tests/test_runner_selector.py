@@ -14,7 +14,9 @@ import pytest
 from orchestrator.codex_runner import CodexRunner
 from orchestrator.runner import ClaudeRunner
 from orchestrator.runner_selector import (
+    AssignmentRefused,
     ClaudeOnlyRunnerSelector,
+    CodexGuardUnavailable,
     CodexOnlyRunnerSelector,
     MixedAssignmentRefused,
     MixedRunnerSelector,
@@ -646,6 +648,159 @@ def test_mixed_restart_uses_durable_provider_assignment(tmp_path: Path) -> None:
     runner = restarted._select_runner(issue)
 
     assert isinstance(runner, CodexRunner)
+
+
+# --- Codex has no guard surface (issue #135, residual of #133 / AgDR-036) ----
+#
+# The Claude adapter injects `guard.py` via `--settings` every turn; the Codex
+# adapter injects nothing, so a Codex session denies none of the enumerated
+# Gate-C shapes. Until that changes, the selector refuses to route Codex to a
+# project whose stance hands Gate C to an agent — the one configuration where
+# the guard is doing more than restating the prompt, because there it BOUNDS an
+# otherwise-real merge right to the granting project's own repository.
+
+AGENT_GATE_REPO = "acme/widgets"
+
+
+def _agent_gate_tracker() -> dict:
+    """A `prototype`-shaped tracker: the handoff state IS dispatched, so an
+    agent owns Gate C (`TrackerConfig.agent_owns_gate_c`)."""
+    return {
+        "kind": "github",
+        "repo": AGENT_GATE_REPO,
+        "api_key": "literal-token",
+        "active_states": ["todo", "in progress", "review"],
+        "handoff_label": "status:review",
+    }
+
+
+def _agent_gate_config(tmp_path: Path) -> Config:
+    cfg = _mixed_config(tmp_path)
+    cfg._config["tracker"] = _agent_gate_tracker()
+    return cfg
+
+
+def test_codex_only_selector_refuses_a_project_whose_agent_owns_gate_c(
+    tmp_path: Path,
+) -> None:
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "tracker": _agent_gate_tracker(),
+                "providers": {"codex": {"kind": "codex-cli", "command": "codex"}},
+            },
+            prompt_template="prompt",
+        ),
+        tmp_path,
+    )
+
+    with pytest.raises(CodexGuardUnavailable) as excinfo:
+        CodexOnlyRunnerSelector().select(cfg, _issue())
+
+    # the diagnostic has to name the project, or an operator reading one log
+    # line cannot tell which board stopped moving
+    assert AGENT_GATE_REPO in str(excinfo.value)
+
+
+@pytest.mark.parametrize("labels", [["provider:codex"], ["agent:codex"]])
+def test_mixed_selector_refuses_codex_on_an_agent_owned_gate(
+    tmp_path: Path,
+    labels: list[str],
+) -> None:
+    """Label precedence is the live route to Codex regardless of weights
+    (`codex: 0` today), so both the durable assignment and the operator label
+    have to hit the refusal."""
+    issue = _issue()
+    issue.labels.extend(labels)
+
+    with pytest.raises(CodexGuardUnavailable):
+        MixedRunnerSelector().select(_agent_gate_config(tmp_path), issue)
+
+
+def test_mixed_selector_refuses_codex_by_weight_on_an_agent_owned_gate(
+    tmp_path: Path,
+) -> None:
+    """The unlabelled hash-bucket path is refused too — a project cannot reach
+    Codex by routing weights either."""
+    cfg = _agent_gate_config(tmp_path)
+    cfg._config["routing"] = {"weights": {"claude": 0, "codex": 100}}
+
+    with pytest.raises(CodexGuardUnavailable):
+        MixedRunnerSelector().select(cfg, _issue())
+
+
+def test_the_refusal_is_provider_scoped_not_a_project_wide_block(
+    tmp_path: Path,
+) -> None:
+    """Claude keeps running the same agent-gated project, and keeps being told
+    the repo that bounds its merge right. A refusal that stopped the whole
+    board would be a regression dressed as a guard."""
+    issue = _issue()
+    issue.labels.append("provider:claude")
+
+    runner = MixedRunnerSelector().select(_agent_gate_config(tmp_path), issue)
+
+    assert isinstance(runner, ClaudeRunner)
+    assert runner.gate_c_repo == AGENT_GATE_REPO
+
+
+def test_codex_still_runs_where_a_human_owns_gate_c(tmp_path: Path) -> None:
+    """The refusal is conditioned on the stance, not on the provider: a
+    human-gated project (every project shipped today) still routes to Codex."""
+    issue = _issue()
+    issue.labels.append("provider:codex")
+    cfg = _mixed_config(tmp_path)
+    cfg._config["tracker"] = {
+        "kind": "github",
+        "repo": AGENT_GATE_REPO,
+        "api_key": "literal-token",
+        "active_states": ["triage", "todo", "in progress"],
+        "handoff_label": "status:human-review",
+    }
+
+    assert isinstance(MixedRunnerSelector().select(cfg, issue), CodexRunner)
+
+
+async def test_codex_refusal_leaves_the_issue_untouched_and_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """End of the dispatch path: no claim, no provider label, no status swap,
+    no worker — the same handling ambiguous provider labels already get."""
+    workflow_path = tmp_path / "WORKFLOW.md"
+    workflow_path.write_text("prompt")
+    orchestrator = Orchestrator(workflow_path, runner_selector=MixedRunnerSelector())
+    orchestrator._cfg = _agent_gate_config(tmp_path)
+    issue = _issue()
+    issue.labels.append("provider:codex")
+    tracker = _LabelTracker()
+
+    async def _unexpected_worker(*args, **kwargs) -> None:
+        pytest.fail("an unguarded provider must not launch a worker")
+
+    monkeypatch.setattr(orchestrator, "_components", lambda: (tracker, None))
+    monkeypatch.setattr(orchestrator, "_worker", _unexpected_worker)
+
+    outcome = await orchestrator._dispatch(issue, attempt=None)
+
+    assert outcome.result is DispatchResult.REFUSED
+    assert tracker.operations == []
+    assert issue.id not in orchestrator.claimed
+    assert issue.id not in orchestrator.running
+    assert issue.labels == ["status:todo", "gate:triage-passed", "provider:codex"]
+    assert issue.state == "todo"
+    err = capfd.readouterr().err
+    assert "outcome=refused" in err
+    assert "failure_class=assignment_refused" in err
+
+
+def test_the_scheduler_catches_the_base_not_one_subclass() -> None:
+    """Both refusals must reach the same handler. Catching
+    `MixedAssignmentRefused` would let a Codex refusal escape as an unhandled
+    exception and take the dispatch loop with it."""
+    assert issubclass(MixedAssignmentRefused, AssignmentRefused)
+    assert issubclass(CodexGuardUnavailable, AssignmentRefused)
 
 
 def test_selection_after_reload_uses_current_config(tmp_path: Path) -> None:
