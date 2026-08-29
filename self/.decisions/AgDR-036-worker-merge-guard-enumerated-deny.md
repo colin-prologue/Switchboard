@@ -72,9 +72,9 @@ Read the enumeration below as still accurate about *what* is denied, and
 
 ## Codex residual: mechanism UNVERIFIABLE here, closed by refusal (2026-08-29, issue #135)
 
-The "Named residual — Codex" bullet below is now answered by `AgDR-049`. Read
+The "Named residual — Codex" bullet below is now answered by `AgDR-2026-08-29-codex-has-no-guard-surface-so-dispatch-refuses`. Read
 the bullet as still accurate about the *gap* — `CodexRunner` injects no settings
-and has no hook surface — and `AgDR-049` as the authority on what compensates
+and has no hook surface — and `AgDR-2026-08-29-codex-has-no-guard-surface-so-dispatch-refuses` as the authority on what compensates
 for it.
 
 **The investigation this record's residual implied, and what it returned.** Issue
@@ -102,7 +102,7 @@ got wrong in round 1: a vendor premise checkable only at a gate.
 
 **The design response is the lesson from the section above, applied.** What went
 wrong in #133 was not that verification was deferred; it was that a *mechanism
-whose correctness depended on the unverified premise* shipped anyway. `AgDR-049`
+whose correctness depended on the unverified premise* shipped anyway. `AgDR-2026-08-29-codex-has-no-guard-surface-so-dispatch-refuses`
 therefore ships a mechanism that does not depend on the answer at all — a
 dispatch-time refusal, entirely orchestrator-side, correct whichever way the
 Codex question resolves. If a hook surface is later found, the refusal is a

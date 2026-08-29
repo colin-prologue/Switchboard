@@ -773,7 +773,7 @@ def test_human_gate_denial_keeps_the_handoff_hint(tmp_path):
 
 # --- the OTHER provider: Codex has no surface to hang this guard on ----------
 #
-# Issue #135 — the residual AgDR-036:147-150 named and AgDR-049 closes. Every
+# Issue #135 — the residual AgDR-036:147-150 named and AgDR-2026-08-29-codex-has-no-guard-surface-so-dispatch-refuses closes. Every
 # test above exercises `guard.py` through the Claude adapter, which materializes
 # it into a settings file every turn. The Codex adapter materializes nothing, so
 # on that path NONE of the enumerated shapes above are denied. These two tests
@@ -781,7 +781,7 @@ def test_human_gate_denial_keeps_the_handoff_hint(tmp_path):
 # surface ever appears, the first fails and points at the second.
 
 def test_codex_argv_carries_no_guard_surface():
-    """The premise AgDR-049 rests on, asserted rather than assumed. `guard.py`
+    """The premise AgDR-2026-08-29-codex-has-no-guard-surface-so-dispatch-refuses rests on, asserted rather than assumed. `guard.py`
     reaches a session exactly one way — a settings file named on the argv — and
     Codex's argv names no settings, hook, or guard flag on either the fresh or
     the resumed path."""

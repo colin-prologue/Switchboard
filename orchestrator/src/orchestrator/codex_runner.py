@@ -115,7 +115,7 @@ class CodexRunner:
     def _build_argv(self, resume_session_id: str | None) -> list[str]:
         """Codex's argv carries NO guard: there is no `--settings`/hook flag
         here because the Codex CLI exposes no PreToolUse-equivalent veto we
-        have been able to verify (issue #135 / AgDR-049). The Claude adapter
+        have been able to verify (issue #135 / AgDR-2026-08-29-codex-has-no-guard-surface-so-dispatch-refuses). The Claude adapter
         materializes `guard.py` every turn (`runner._write_guard_settings`);
         this one has nothing to materialize it into, so none of the enumerated
         Gate-C shapes are denied in a Codex session.

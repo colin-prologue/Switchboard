@@ -1,4 +1,4 @@
-# AgDR-049 — Codex has no guard surface, so dispatch refuses the one stance that needs it
+# AgDR-2026-08-29 — Codex has no guard surface, so dispatch refuses the one stance that needs it
 
 - **Status:** proposed (ratify or overturn at the merge gate)
 - **Issue:** #135 (Codex-side merge guard; the residual `AgDR-036` named at
