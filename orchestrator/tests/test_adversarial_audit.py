@@ -101,12 +101,14 @@ agent:
   max_turns: 1
   max_retry_backoff_ms: 500
   max_sessions_per_issue: 2
-claude:
-  command: "unused-by-fake-runner"
-  max_turns: 1
-  turn_timeout_ms: 5000
-  read_timeout_ms: 3000
-  stall_timeout_ms: 0
+providers:
+  claude:
+    kind: claude-cli
+    command: "unused-by-fake-runner"
+    max_turns: 1
+    turn_timeout_ms: 5000
+    read_timeout_ms: 3000
+    stall_timeout_ms: 0
 ---
 Work {{{{ issue.identifier }}}}
 """
