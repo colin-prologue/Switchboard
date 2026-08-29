@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from orchestrator.runner import ClaudeRunner
+from orchestrator.runner import NO_TOOLS_FLAG, ClaudeRunner
 from orchestrator.types import AgentEvent, ClaudeConfig, Continuation, FailureClass
 
 FIXTURE = str(Path(__file__).resolve().parent / "fake_claude.py")
@@ -724,3 +726,100 @@ async def test_an_unclassified_stream_end_is_still_a_protocol_error(
 
     assert result.status == "failed"
     assert result.failure_class is FailureClass.RUNNER_PROTOCOL
+
+
+# --- the cap-hit summary pass (issue #16) -------------------------------------
+
+
+async def test_the_summary_pass_is_tool_less_and_capped_at_one_turn(
+    workspace: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The pre-dispatch blocker, resolved in the command builder.
+
+    `_build_command` can only APPEND to the operator-configured `command`, which
+    already carries `--allowedTools` — so "no tools" cannot be expressed by
+    narrowing that grant. `--tools ""` is the subtraction: a different axis that
+    selects the available built-in set, and an empty set has nothing for an
+    `--allowedTools` grant to permit.
+    """
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_SCENARIO", "resume")
+    monkeypatch.setenv("FAKE_ARGV_FILE", str(argv_file))
+    runner = ClaudeRunner(make_cfg(max_turns=9))
+
+    result = await runner.run_summary_turn(
+        workspace, "summarize", "sess-abc", EventRecorder(), "issue-1"
+    )
+
+    assert result.status == "succeeded"
+    argv = json.loads(argv_file.read_text())
+    # The empty string must survive as its own argv entry: `--tools` followed by
+    # a joined-away value would read as `--tools --max-turns`, silently making
+    # the flag a no-op and the pass fully tooled.
+    assert argv[argv.index("--tools") + 1] == ""
+    joined = " ".join(argv)
+    assert "--max-turns 1" in joined          # not the configured 9
+    assert "--resume sess-abc" in joined
+
+
+async def test_an_ordinary_turn_keeps_every_tool_it_was_configured_with(
+    workspace: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The subtraction is scoped to the summary pass and nowhere else."""
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_SCENARIO", "success")
+    monkeypatch.setenv("FAKE_ARGV_FILE", str(argv_file))
+
+    await ClaudeRunner(make_cfg(max_turns=9)).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-1"
+    )
+
+    argv = json.loads(argv_file.read_text())
+    assert "--tools" not in argv
+    assert "--max-turns 9" in " ".join(argv)
+
+
+@pytest.mark.skipif(
+    shutil.which("claude") is None, reason="claude CLI not installed here"
+)
+def test_the_summary_pass_flag_means_disable_all_tools_on_the_installed_cli() -> None:
+    """Pin `--tools ""` against the CLI itself, not against our belief about it.
+
+    This asserts the CLI's OWN documented contract for the flag, which is the
+    strongest check available without inference: a live `claude -p` probe is
+    outside the worker allowlist (AgDR-036 recorded the same wall and assigned
+    live verification to the human merge gate for the same reason). If a future
+    CLI renames the flag or changes its empty-string semantics, this fails at
+    the flag rather than silently shipping a fully-tooled "tool-less" pass.
+    """
+    help_text = subprocess.run(
+        ["claude", "--help"], capture_output=True, text=True, timeout=60
+    ).stdout
+    normalized = " ".join(help_text.split())
+
+    assert "--tools <tools...>" in normalized
+    assert 'Use "" to disable all tools' in normalized
+    assert NO_TOOLS_FLAG.strip() == '--tools ""'
+
+
+async def test_a_clean_success_carries_its_final_text_and_a_failure_does_not(
+    workspace: Path, monkeypatch
+) -> None:
+    """`TurnResult.text` exists for one caller — the summary pass, whose whole
+    product is prose. It is populated ONLY on the clean-success branch, which is
+    the one place `result` is model-authored rather than CLI-authored error text
+    (the issue #116 trust boundary, read from the other side)."""
+    monkeypatch.setenv("FAKE_SCENARIO", "success")
+    monkeypatch.setenv("FAKE_CLAUDE_RESULT_TEXT", "CLASS: complexity")
+
+    ok = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-1"
+    )
+    assert ok.text == "CLASS: complexity"
+
+    monkeypatch.setenv("FAKE_SCENARIO", "gated_success")
+    gated = await ClaudeRunner(make_cfg()).run_turn(
+        workspace, "prompt", None, EventRecorder(), "issue-1"
+    )
+    assert gated.status == "failed"
+    assert gated.text == ""

@@ -411,7 +411,9 @@ road. **Reach your classification from tiers 1–3 BEFORE you open tier 4.**
 1. **The mechanical digest** — the issue's own comment history
    (`gh issue view {{ issue.identifier }} --repo {{REPO}} --comments`): the park
    notices, dispatch refusals, and orchestrator log lines that name what the
-   budget was spent on.
+   budget was spent on. A `## Cap-hit report` comment is **tier 4, not tier 1** —
+   this command fetches it alongside the rest, so skip past it here or you have
+   anchored on the self-report the tier order exists to defer.
 2. **The workspace** — you are standing in it. `git log`, `git status`, and
    `git diff` against the base branch say exactly how far the work got: no
    commits at all reads very differently from a branch with tests written and
@@ -422,9 +424,16 @@ road. **Reach your classification from tiers 1–3 BEFORE you open tier 4.**
    loop, or a wall is actually visible. **Never quote transcript content into a
    GitHub comment** — cite what it shows, in your own words.
 4. **Self-reports LAST** — any summary the failed session wrote about its own
-   failure. Read these as claims to be checked against tiers 1–3, not as
-   findings. When your reading and the self-report disagree, say so explicitly
-   and show both: the disagreement is often the most useful line in the verdict.
+   failure. The one the orchestrator produces is the `## Cap-hit report` comment
+   (issue #16): a bounded, tool-less final turn the capped session was given at
+   the break. Its fenced YAML carries two class claims — `self_reported` (the
+   session's own) and `mechanical` (which ceiling fired, and nothing else) — and
+   an `agreement:` field, deliberately left unreconciled for you to weigh. Read
+   these as claims to be checked against tiers 1–3, not as findings. Treat
+   `mechanical` as a coarse prior, not as a second opinion: it is derived from
+   the ceiling alone and is no better informed than you are. When your reading
+   and the self-report disagree, say so explicitly and show both: the
+   disagreement is often the most useful line in the verdict.
 
 ### Step 2 — classify
 
