@@ -52,8 +52,8 @@ from .provider_circuit import (
 )
 from .runner_selector import (
     AgentRunnerSelector,
+    AssignmentRefused,
     ClaudeOnlyRunnerSelector,
-    MixedAssignmentRefused,
 )
 from .singleton import acquire_singleton_lock
 from .tracker import GitHubTracker
@@ -1218,8 +1218,12 @@ class Orchestrator:
         assert cfg is not None
         try:
             runner = self._select_runner(issue)
-        except MixedAssignmentRefused as exc:
-            log("mixed assignment refused; leaving issue untouched",
+        except AssignmentRefused as exc:
+            # Ambiguous provider labels (MixedAssignmentRefused) and a provider
+            # that lacks the guard surface this project's stance requires
+            # (CodexGuardUnavailable, issue #135) get the same handling: no
+            # claim, no label writes, one log line naming the reason.
+            log("provider assignment refused; leaving issue untouched",
                 issue_id=issue.id, issue_identifier=issue.identifier,
                 outcome="refused",
                 failure_class=FailureClass.ASSIGNMENT_REFUSED.value,

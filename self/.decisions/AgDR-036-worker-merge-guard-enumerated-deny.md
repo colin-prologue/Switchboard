@@ -70,6 +70,46 @@ same endpoint with the same token.
 Read the enumeration below as still accurate about *what* is denied, and
 `AgDR-043` as the authority on *when* the merge verb is.
 
+## Codex residual: mechanism UNVERIFIABLE here, closed by refusal (2026-08-29, issue #135)
+
+The "Named residual — Codex" bullet below is now answered by `AgDR-049`. Read
+the bullet as still accurate about the *gap* — `CodexRunner` injects no settings
+and has no hook surface — and `AgDR-049` as the authority on what compensates
+for it.
+
+**The investigation this record's residual implied, and what it returned.** Issue
+#135's first criterion was to establish whether Codex-CLI has a PreToolUse
+equivalent. From inside a worker session the answer is *not determinable*, and
+the three closed doors are worth naming so the next session does not re-walk
+them:
+
+- `codex` is not installed in the worker image (`which codex` → not found), and
+  it is on no worker allowlist, so it cannot be interrogated even where present.
+- Web search/fetch are not granted to worker sessions; both were denied.
+- The project's own record of the Codex configuration surface —
+  `spec/SPEC.core.md` §5.3.6 — enumerates `approval_policy`, `thread_sandbox`,
+  and `turn_sandbox_policy`. Those are **approval and sandbox posture**, not a
+  per-call veto: they decide whether a command needs approval and what the
+  filesystem/network boundary is, not whether *this* `gh pr merge` is refused.
+  The adapter's shipped default (`types.py`) already pins the permissive end of
+  both (`--ask-for-approval never --sandbox workspace-write`). Nothing in the
+  spec, the adapter, or the record base names a PreToolUse analogue.
+
+`SPEC.core.md` also names the one command that would answer it definitively —
+`codex app-server generate-json-schema` — and that command sits outside the
+worker allowlist. So the shape of the situation is *exactly* the one this record
+got wrong in round 1: a vendor premise checkable only at a gate.
+
+**The design response is the lesson from the section above, applied.** What went
+wrong in #133 was not that verification was deferred; it was that a *mechanism
+whose correctness depended on the unverified premise* shipped anyway. `AgDR-049`
+therefore ships a mechanism that does not depend on the answer at all — a
+dispatch-time refusal, entirely orchestrator-side, correct whichever way the
+Codex question resolves. If a hook surface is later found, the refusal is a
+conservative over-block to relax; if none exists, it is the only floor available.
+An assignment to a gate reads as diligence and produces nothing — so this change
+assigns nothing to one.
+
 ## Decision
 
 1. **`Bash` joins the existing matcher** — `Bash|Write|Edit|MultiEdit|NotebookEdit`

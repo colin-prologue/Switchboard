@@ -769,3 +769,100 @@ def test_human_gate_denial_keeps_the_handoff_hint(tmp_path):
     assert proc.returncode == 2
     assert "Gate C is Colin's" in proc.stderr
     assert "another project's repo" not in proc.stderr
+
+
+# --- the OTHER provider: Codex has no surface to hang this guard on ----------
+#
+# Issue #135 — the residual AgDR-036:147-150 named and AgDR-049 closes. Every
+# test above exercises `guard.py` through the Claude adapter, which materializes
+# it into a settings file every turn. The Codex adapter materializes nothing, so
+# on that path NONE of the enumerated shapes above are denied. These two tests
+# pin the asymmetry and its compensating control together: if a Codex hook
+# surface ever appears, the first fails and points at the second.
+
+def test_codex_argv_carries_no_guard_surface():
+    """The premise AgDR-049 rests on, asserted rather than assumed. `guard.py`
+    reaches a session exactly one way — a settings file named on the argv — and
+    Codex's argv names no settings, hook, or guard flag on either the fresh or
+    the resumed path."""
+    from orchestrator.codex_runner import CodexRunner
+    from orchestrator.types import CodexConfig
+
+    runner = CodexRunner(CodexConfig())
+    for argv in (runner._build_argv(None), runner._build_argv("thread-1")):
+        joined = " ".join(argv)
+        assert "--settings" not in joined
+        assert "hook" not in joined.lower()
+        assert str(GUARD_PATH) not in joined
+        assert guard.GATE_C_AGENT_FLAG not in joined
+
+
+def _selector_config(tmp_path: Path, handoff: str, active: list[str]):
+    from orchestrator.types import WorkflowDefinition
+    from orchestrator.workflow import Config
+
+    return Config(
+        WorkflowDefinition(
+            config={
+                "tracker": {
+                    "kind": "github",
+                    "repo": OWN_REPO,
+                    "api_key": "literal-token",
+                    "active_states": active,
+                    "handoff_label": handoff,
+                },
+                "providers": {
+                    "claude": {"kind": "claude-cli", "command": "claude -p"},
+                    "codex": {"kind": "codex-cli", "command": "codex"},
+                },
+                "routing": {"weights": {"claude": 1, "codex": 1}},
+            },
+            prompt_template="prompt",
+        ),
+        tmp_path,
+    )
+
+
+def _issue_labelled(provider: str):
+    from datetime import datetime, timezone
+
+    from orchestrator.types import Issue
+
+    return Issue(
+        id="node-135", identifier="135", title="t", description="",
+        priority=None, state="todo", branch_name=None, url="",
+        labels=["status:todo", f"provider:{provider}"],
+        created_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+    )
+
+
+def test_codex_is_refused_exactly_where_claude_would_be_guarded(tmp_path):
+    """Same project, same stance, one selector, two providers. Claude is handed
+    the repo that BOUNDS its merge right; Codex, which cannot be handed
+    anything, is refused before a workspace is ever created."""
+    from orchestrator.runner import ClaudeRunner
+    from orchestrator.runner_selector import (
+        CodexGuardUnavailable,
+        MixedRunnerSelector,
+    )
+
+    agent_gate = _selector_config(
+        tmp_path, "status:review", ["todo", "in progress", "review"])
+    claude = MixedRunnerSelector().select(agent_gate, _issue_labelled("claude"))
+    assert isinstance(claude, ClaudeRunner)
+    assert claude.gate_c_repo == OWN_REPO
+    with pytest.raises(CodexGuardUnavailable):
+        MixedRunnerSelector().select(agent_gate, _issue_labelled("codex"))
+
+    # And the human gate, where the guard denies `gh pr merge` OUTRIGHT: Codex
+    # is unguarded there too, but the right it would exercise is one no stance
+    # grants and the prompt explicitly withholds. The refusal deliberately does
+    # NOT fire — asserted here so the residual stays a choice a reader can
+    # argue with rather than an oversight nobody noticed.
+    human_gate = _selector_config(
+        tmp_path, "status:human-review", ["triage", "todo", "in progress"])
+    assert MixedRunnerSelector().select(
+        human_gate, _issue_labelled("claude")).gate_c_repo == ""
+    assert MixedRunnerSelector().select(
+        human_gate, _issue_labelled("codex")).provider_id == "codex"
