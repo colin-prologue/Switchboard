@@ -49,7 +49,7 @@ def _issue() -> Issue:
 @pytest.mark.parametrize(
     "execution_config",
     [
-        # AgDR-049 left one execution shape, so the parametrization that used to
+        # AgDR-2026-08-29-retire-the-legacy-claude-block left one execution shape, so the parametrization that used to
         # pair legacy-vs-envelope now pairs a bare envelope against a fully
         # specified one.
         {"providers": {"claude": {"kind": "claude-cli"}}},

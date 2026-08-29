@@ -1,4 +1,4 @@
-# AgDR-049: Retire the legacy top-level `claude:` block
+# AgDR-2026-08-29 — Retire the legacy top-level `claude:` block
 
 **Status:** accepted (2026-08-29)
 **Surfaces:** `orchestrator/src/orchestrator/workflow.py`, `spec/SPEC.md` §1,

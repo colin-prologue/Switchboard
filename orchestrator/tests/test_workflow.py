@@ -591,7 +591,7 @@ def test_codex_config_rejects_legacy_mixed_or_malformed_forms(
 @pytest.mark.parametrize(
     "config",
     [
-        # Legacy-only: the shape AgDR-017 kept alive and AgDR-049 retired.
+        # Legacy-only: the shape AgDR-017 kept alive and AgDR-2026-08-29-retire-the-legacy-claude-block retired.
         {"claude": {"command": "claude -p"}},
         # Legacy beside the envelope: what the dual-read used to reconcile.
         {
@@ -623,7 +623,7 @@ def test_codex_config_rejects_legacy_mixed_or_malformed_forms(
     ],
 )
 def test_legacy_top_level_claude_block_is_rejected(tmp_path: Path, config: dict):
-    """AgDR-049: the legacy shape is refused by name, never read.
+    """AgDR-2026-08-29-retire-the-legacy-claude-block: the legacy shape is refused by name, never read.
 
     The message must name the migration — a bare parse error would leave an
     operator guessing that a block which worked yesterday is now a typo.
@@ -697,7 +697,7 @@ def test_provider_claude_rejects_malformed_or_unknown_fields(
 
 
 def test_no_execution_block_still_resolves_to_defaults(tmp_path: Path):
-    """AgDR-049 removed a config *shape*, not the optionality of the block.
+    """AgDR-2026-08-29-retire-the-legacy-claude-block removed a config *shape*, not the optionality of the block.
 
     A workflow with no `providers:` key is the absence of configuration, which
     has always meant "take the defaults" — distinct from the legacy shape. It

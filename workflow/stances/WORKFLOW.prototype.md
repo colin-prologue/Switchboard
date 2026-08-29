@@ -88,7 +88,7 @@ review_response:
 # This is achieved by CONSUMING an external reviewer rather than by routing
 # Switchboard's own sessions across providers. Provider routing was the obvious
 # approach and was rejected: it needs a second provider in the `providers:`
-# envelope below (which since AgDR-049 is the only execution shape there is),
+# envelope below (which since AgDR-2026-08-29-retire-the-legacy-claude-block is the only execution shape there is),
 # a host-side login, and the mixed-canary rollout review — and, decisively, it
 # would still leave the QA session SELF-REPORTING that a cross-check happened.
 # Consuming an external review produces an ARTIFACT instead: a real review, at
@@ -103,7 +103,7 @@ review_response:
 # Honest limitation: the ship DECISION is still same-model. What is cross-model
 # is finding-generation, which is where the blind-spot value lives.
 
-# The provider envelope is the only execution shape (AgDR-049, issue #159).
+# The provider envelope is the only execution shape (AgDR-2026-08-29-retire-the-legacy-claude-block, issue #159).
 # The top-level `claude:` block AgDR-017 kept alive for compatibility is gone;
 # a workflow still carrying one is refused at load with a message naming this
 # migration. Strict parsing applies here — unknown fields, a non-string

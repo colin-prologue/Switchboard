@@ -1,11 +1,11 @@
 # AgDR-017: Add a provider envelope through semantic dual-read
 
-> **Amended 2026-08-29 (issue #159) — superseded in part by `AgDR-049`.** The
+> **Amended 2026-08-29 (issue #159) — superseded in part by `AgDR-2026-08-29-retire-the-legacy-claude-block`.** The
 > dual-read this record introduced has been removed. The record below stands
 > unrewritten; the amendment immediately after it is the current authority on
 > the legacy top-level `claude:` block.
 
-**Status:** accepted (2026-07-12), dual-read removed 2026-08-29 (AgDR-049)
+**Status:** accepted (2026-07-12), dual-read removed 2026-08-29 (AgDR-2026-08-29-retire-the-legacy-claude-block)
 **Surfaces:** `orchestrator/workflow.py`, `spec/SPEC.md`, workflow reload
 validation, and the AI-agnostic agent-pool migration
 
@@ -128,4 +128,4 @@ typed provider codes are all untouched. `mixed()`'s legacy-block refusal is
 deliberately kept: it is now unreachable by construction, and has no reachable
 production trigger.
 
-Rationale, rejected options, and blast radius: `AgDR-049`.
+Rationale, rejected options, and blast radius: `AgDR-2026-08-29-retire-the-legacy-claude-block`.

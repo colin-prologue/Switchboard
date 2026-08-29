@@ -556,7 +556,7 @@ class Config:
             max_fail_review_sessions_per_issue=max_fail_review,
         )
 
-    # -- execution providers (SPEC.md §1; AgDR-049 retires AgDR-017's dual-read) -
+    # -- execution providers (SPEC.md §1; AgDR-2026-08-29-retire-the-legacy-claude-block retires AgDR-017's dual-read) -
 
     @staticmethod
     def _parse_claude(raw: dict[str, Any], path: str) -> ClaudeConfig:
@@ -640,7 +640,7 @@ class Config:
     def claude(self) -> ClaudeConfig:
         """Return the canonical Claude config from the provider envelope.
 
-        The legacy top-level `claude:` block is gone (issue #159, AgDR-049).
+        The legacy top-level `claude:` block is gone (issue #159, AgDR-2026-08-29-retire-the-legacy-claude-block).
         AgDR-017's removal criterion — no tracked binding still on the legacy
         form — was met by migrating the shipped templates, so `providers.claude`
         is the only shape that carries Claude execution settings and a workflow
@@ -790,7 +790,7 @@ class Config:
 
     def mixed(self) -> MixedExecutionConfig:
         """Return the strict, validation-only Stage 6 mixed-mode envelope."""
-        # Kept deliberately after AgDR-049 removed the legacy top-level Claude
+        # Kept deliberately after AgDR-2026-08-29-retire-the-legacy-claude-block removed the legacy top-level Claude
         # block. `claude()` now refuses that block outright, so no production
         # binding can reach this guard — it is unreachable by construction
         # rather than dead. It still states mixed mode's own rule at mixed

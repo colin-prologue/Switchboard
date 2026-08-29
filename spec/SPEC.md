@@ -56,7 +56,7 @@ providers:
 ```
 
 The top-level **`claude:`** block was the legacy form. It is **removed**
-(AgDR-049, issue #159): AgDR-017 introduced it as one half of a dual-read whose
+(AgDR-2026-08-29-retire-the-legacy-claude-block, issue #159): AgDR-017 introduced it as one half of a dual-read whose
 stated removal criterion was "no tracked binding uses the legacy top-level
 form", and migrating the shipped templates to the envelope met that condition.
 A workflow still carrying a top-level `claude:` block now fails validation with
@@ -103,7 +103,7 @@ strict, single-entry `providers.codex` map with `kind: codex-cli` and optional
 `command`, `turn_timeout_ms`, `read_timeout_ms`, and `stall_timeout_ms` fields.
 It rejects legacy execution blocks, mixed provider maps, unsupported kinds,
 unknown fields, and empty commands. Its legacy-block refusal is retained after
-AgDR-049 and is now unreachable by construction rather than dead: no binding can
+AgDR-2026-08-29-retire-the-legacy-claude-block and is now unreachable by construction rather than dead: no binding can
 carry a top-level block for it to catch. A Claude process accepts only the
 provider-enveloped Claude form described above. One workflow is therefore valid
 for one process provider; no weighting, fallback, per-issue override, or mixed

@@ -99,7 +99,7 @@ review_response:
 # branch — that lands in the reviewable diff, and file writes remain
 # bounded by the containment guard. OS-level subprocess sandboxing is
 # deferred (candidate ticket).
-# The provider envelope is the only execution shape (AgDR-049, issue #159).
+# The provider envelope is the only execution shape (AgDR-2026-08-29-retire-the-legacy-claude-block, issue #159).
 # The top-level `claude:` block AgDR-017 kept alive for compatibility is gone;
 # a workflow still carrying one is refused at load with a message naming this
 # migration. Strict parsing applies here — unknown fields, a non-string

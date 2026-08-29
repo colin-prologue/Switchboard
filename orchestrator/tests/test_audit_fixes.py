@@ -134,7 +134,7 @@ providers:
 Body {{{{ issue.identifier }}}}
 """
 
-# AgDR-049: the legacy top-level `claude:` block no longer loads. This used to
+# AgDR-2026-08-29-retire-the-legacy-claude-block: the legacy top-level `claude:` block no longer loads. This used to
 # be a dual-form conflict (`conflicting_provider_config`); the block alone is
 # now the rejection, and it stands in for "a workflow that stops parsing on
 # reload" in the last-known-good retention test below.
