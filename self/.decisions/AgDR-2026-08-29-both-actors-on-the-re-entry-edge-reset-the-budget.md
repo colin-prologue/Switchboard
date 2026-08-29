@@ -1,4 +1,4 @@
-# AgDR-049 — Both actors on the re-entry edge reset the implement budget, under one shared durable round bound
+# AgDR-2026-08-29 — Both actors on the re-entry edge reset the implement budget, under one shared durable round bound
 
 - **Status:** proposed (ratify or overturn at the #178 merge gate)
 - **Issue:** #178 — A human changes-requested relabel does not reset session

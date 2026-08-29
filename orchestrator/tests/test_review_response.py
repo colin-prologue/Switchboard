@@ -342,7 +342,7 @@ def test_the_two_cap_comments_have_separate_one_shot_guards():
 
 
 # =============================================================================
-# The human changes-requested relabel (issue #178 / AgDR-049)
+# The human changes-requested relabel (issue #178 / AgDR-2026-08-29-both-actors-on-the-re-entry-edge-reset-the-budget)
 # =============================================================================
 #
 # Scheduler-level, unlike everything above, and deliberately so: the defect is
