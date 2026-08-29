@@ -99,34 +99,41 @@ review_response:
 # branch — that lands in the reviewable diff, and file writes remain
 # bounded by the containment guard. OS-level subprocess sandboxing is
 # deferred (candidate ticket).
-claude:
-  command: "claude -p --model claude-opus-5 --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
-  # 20 -> 100 (2026-07-06, AgDR-013) -> 20 (2026-08-26, rejection sweep).
-  #
-  # The raise was a stopgap, and AgDR-013 said so: it rejected "keep 20, add
-  # --resume on error_max_turns" as "the correct structural fix ... ticketed
-  # separately rather than rushed". That ticket (#47) shipped on 2026-07-27 —
-  # `error_max_turns` now yields `incomplete` + RESUME_SESSION
-  # (runner.py, AgDR-027), the orchestrator continues the SAME session, and the
-  # continuation does not spend session budget (scheduler.py). The wall the
-  # raise existed to clear is a checkpoint now.
-  #
-  # Nothing revisited the stopgap for seven weeks, because the condition for
-  # revisiting it lived in a REJECTED-options section that nothing re-reads.
-  # Found by the 2026-08-26 sweep; see SWEEP-2026-08-26-rejection-rationale.md.
-  #
-  # Restored to 20 rather than to a new number: AgDR-013 rejected picking a
-  # fresh arbitrary wall, and 20 is the value chosen on evidence before the
-  # stopgap. `agent.max_turns` (20 orchestrator turns) still bounds the session
-  # at ~400 CLI turns, and max_budget_usd bounds it in dollars.
-  max_turns: 20
-  max_budget_usd: 5
-  turn_timeout_ms: 3600000
-  # read_timeout 5000 -> 30000 (2026-07-06): 5s to first protocol line kills
-  # real `claude` cold starts (two evidence-free instant failures at 19:17Z
-  # burned #14's session budget in ~60s).
-  read_timeout_ms: 30000
-  stall_timeout_ms: 300000
+# The provider envelope is the only execution shape (AgDR-2026-08-29-retire-the-legacy-claude-block, issue #159).
+# The top-level `claude:` block AgDR-017 kept alive for compatibility is gone;
+# a workflow still carrying one is refused at load with a message naming this
+# migration. Strict parsing applies here — unknown fields, a non-string
+# command, and a boolean budget fail instead of falling back to defaults.
+providers:
+  claude:
+    kind: claude-cli
+    command: "claude -p --model claude-opus-5 --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
+    # 20 -> 100 (2026-07-06, AgDR-013) -> 20 (2026-08-26, rejection sweep).
+    #
+    # The raise was a stopgap, and AgDR-013 said so: it rejected "keep 20, add
+    # --resume on error_max_turns" as "the correct structural fix ... ticketed
+    # separately rather than rushed". That ticket (#47) shipped on 2026-07-27 —
+    # `error_max_turns` now yields `incomplete` + RESUME_SESSION
+    # (runner.py, AgDR-027), the orchestrator continues the SAME session, and the
+    # continuation does not spend session budget (scheduler.py). The wall the
+    # raise existed to clear is a checkpoint now.
+    #
+    # Nothing revisited the stopgap for seven weeks, because the condition for
+    # revisiting it lived in a REJECTED-options section that nothing re-reads.
+    # Found by the 2026-08-26 sweep; see SWEEP-2026-08-26-rejection-rationale.md.
+    #
+    # Restored to 20 rather than to a new number: AgDR-013 rejected picking a
+    # fresh arbitrary wall, and 20 is the value chosen on evidence before the
+    # stopgap. `agent.max_turns` (20 orchestrator turns) still bounds the session
+    # at ~400 CLI turns, and max_budget_usd bounds it in dollars.
+    max_turns: 20
+    max_budget_usd: 5
+    turn_timeout_ms: 3600000
+    # read_timeout 5000 -> 30000 (2026-07-06): 5s to first protocol line kills
+    # real `claude` cold starts (two evidence-free instant failures at 19:17Z
+    # burned #14's session budget in ~60s).
+    read_timeout_ms: 30000
+    stall_timeout_ms: 300000
 ---
 
 You are a Switchboard engineering agent working a single GitHub issue from the
