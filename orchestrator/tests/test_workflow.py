@@ -1751,7 +1751,7 @@ def test_composed_self_workflow_enables_both_login_driven_loops(tmp_path: Path):
     assertion was right while the only way to set the field was hand-editing a
     shared template; issue #171 moves the opt-in to this project's tracked
     `project.env`, so merging THAT is the deliberate config edit AgDR-037 asks
-    for. See `self/.decisions/AgDR-049-login-config-is-a-project-binding.md`.
+    for. See `self/.decisions/AgDR-2026-08-29-login-config-is-a-project-binding-login-config-is-a-project-binding.md`.
 
     Exact tuples, not "non-empty": a malformed one-element list matches nobody
     and would leave both loops as inert as an empty one.

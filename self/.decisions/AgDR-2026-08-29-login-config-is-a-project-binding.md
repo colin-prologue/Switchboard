@@ -1,4 +1,4 @@
-# AgDR-049 — Operator and review-bot logins are project bindings, not template literals
+# AgDR-2026-08-29 — Operator and review-bot logins are project bindings, not template literals
 
 - **Status:** proposed (ratify at this PR's merge gate)
 - **Issue:** #171
