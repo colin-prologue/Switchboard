@@ -114,3 +114,40 @@ def test_ordinary_registration_resolves_to_an_agent_owned_gate(sb_home, tmp_path
     workflow = sb_home / "projects" / "acme" / "WORKFLOW.md"
     tracker = Config(load_workflow(workflow), workflow.parent).tracker()
     assert tracker.agent_owns_gate_c()
+
+
+# --- login placeholders in the shared stance templates (issue #171) -----------
+
+SHARED_STANCE_TEMPLATES = (
+    REPO_ROOT / "workflow" / "WORKFLOW.base.md",
+    REPO_ROOT / "workflow" / "stances" / "WORKFLOW.prototype.md",
+)
+
+
+@pytest.mark.parametrize(
+    "placeholder", ["{{OPERATOR_LOGIN_YAML}}", "{{REVIEW_BOT_YAML}}"]
+)
+@pytest.mark.parametrize(
+    "template", SHARED_STANCE_TEMPLATES, ids=lambda p: p.name
+)
+def test_shared_stance_templates_carry_both_login_placeholders(
+    template: Path, placeholder: str
+) -> None:
+    """A feature whose config has no slot to receive a value cannot be switched
+    on at all. `fold.operator_logins` had no placeholder in either template, and
+    `review_response.bot_logins` had one in `prototype` only — so `--review-bot`
+    was computed, escaped, and substituted into nothing for every `base` project.
+
+    Scoped PER TEMPLATE on purpose: the union-across-templates form would have
+    been green on the broken tree, because the prototype recipe already carried
+    `{{REVIEW_BOT_YAML}}` while the base template carried a literal `[]`. That
+    asymmetry IS the bug.
+
+    The other placeholder asymmetries between the two recipes
+    (`{{VERIFY_CMD}}`, `{{VERIFY_TOOLS}}`, `{{BASE_BRANCH}}` are prototype-only)
+    are pre-existing and intentional; this test says nothing about them.
+    """
+    assert placeholder in template.read_text(encoding="utf-8"), (
+        f"{template.relative_to(REPO_ROOT)} has no slot for {placeholder} — "
+        "register-project.sh substitutes it into nothing"
+    )

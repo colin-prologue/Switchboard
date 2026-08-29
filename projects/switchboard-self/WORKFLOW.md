@@ -62,8 +62,15 @@ agent:
 # detection entirely, costing zero API calls. The bot identity
 # ($SB_APP_BOT_LOGIN) is never an operator: agents do not approve their own
 # verdicts.
+#
+# Composed from `SB_OPERATOR_LOGIN` in the project binding (issue #171), so
+# naming the operator is a tracked per-project edit rather than a hand-edit of
+# this shared template. Unset composes to `[]` — detection stays off for any
+# project that has not named one. SINGLE-VALUED by design: the operator is
+# exactly one person (AgDR-048), so the field composes one quoted login and a
+# project needing more hand-edits its composed WORKFLOW.md.
 fold:
-  operator_logins: []
+  operator_logins: ["colin-prologue"]
 
 # Owned extension (issue #43 / AgDR-037): the bot-login allowlist for the
 # review-response loop. Logins listed here are the BOTNESS DEFINITION — an
@@ -72,15 +79,17 @@ fold:
 # login is never listed). Read by the scheduler's review-response sub-poll,
 # which is bounded to `status:human-review` issues' bound PRs.
 #
-# SHIPPED EMPTY ON PURPOSE. An empty list (the default) disables the feature
-# entirely at zero API cost: no poll, no marker, no relabel, and the prompt
-# addendum stays inert because no marker is ever written. Going live is a
-# deliberate config edit (e.g. `["chatgpt-codex-connector"]`), never a merge
-# side effect. The feature ALSO requires `$SB_APP_BOT_LOGIN` — without the App
-# identity the loop cannot tell its own replies from a bot's, and it disables
-# itself with one log line rather than guessing.
+# OFF BY DEFAULT. An empty list disables the feature entirely at zero API cost:
+# no poll, no marker, no relabel, and the prompt addendum stays inert because no
+# marker is ever written. Going live stays a deliberate config edit (AgDR-037) —
+# it is now `SB_REVIEW_BOT` in the project binding, composed in here by
+# register-project.sh (issue #171), rather than a hand-edit of this shared
+# template. An unset variable composes to `[]`, so no project's posture changes
+# by adopting this template. The feature ALSO requires `$SB_APP_BOT_LOGIN` —
+# without the App identity the loop cannot tell its own replies from a bot's,
+# and it disables itself with one log line rather than guessing.
 review_response:
-  bot_logins: []
+  bot_logins: ["chatgpt-codex-connector"]
 
 # Pass-through execution block for the Claude adapter (see spec/SPEC.md §1).
 # --verbose is required by the CLI for stream-json in -p mode. Documented
