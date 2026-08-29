@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -184,30 +185,38 @@ class MechanicalFacts:
         return MECHANICAL_CLASS[self.cap]
 
 
+def _git_sync(workspace: Path, *args: str) -> str:
+    """One read-only git query, run to completion on a worker thread."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(workspace), *args],
+            capture_output=True, timeout=GIT_TIMEOUT_S,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.decode("utf-8", errors="replace").strip()
+
+
 async def _git(workspace: Path, *args: str) -> str:
     """One read-only git query in the workspace; "" on any failure.
 
     Every caller is building a diagnostic for a session that has already ended,
     so a git failure must degrade the report, never raise into the worker.
+
+    **Deliberately a thread and not `asyncio.create_subprocess_exec`.** An
+    asyncio child attaches a subprocess transport to the running loop, and this
+    call sits in the one place a worker is most likely to be cancelled — after
+    the turn loop broke, while the report is being built. A worker cancelled
+    mid-spawn leaves that transport's exit waiter pending, and the loop's own
+    shutdown then waits on a task that can never finish: the orchestrator hangs
+    instead of the one session ending. A pooled thread running a `subprocess`
+    with a hard timeout cannot wedge the loop — the worst case is a bounded
+    wait for a thread nobody is listening to any more. A diagnostic that can
+    hang the orchestrator is worse than no diagnostic.
     """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(workspace), *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        try:
-            out, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=GIT_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return ""
-        if proc.returncode != 0:
-            return ""
-        return out.decode("utf-8", errors="replace").strip()
-    except (OSError, ValueError):
-        return ""
+    return await asyncio.to_thread(_git_sync, workspace, *args)
 
 
 async def collect_git_facts(workspace: Path) -> tuple[str, int | None]:
