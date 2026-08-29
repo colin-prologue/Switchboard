@@ -1716,6 +1716,58 @@ async def test_codex_mode_dispatches_continues_and_uses_codex_policy(
     assert "worker completed" in err
 
 
+async def test_codex_budget_ceiling_ends_session_normally(
+    tmp_path,
+    monkeypatch,
+    capfd,
+):
+    """issue #181: a Codex-routed session honours the SAME cumulative ceiling a
+    Claude one does (test_budget_ceiling_ends_session_normally). At $0.01/turn a
+    $0.025 ceiling ends the session after turn 3, well before max_turns (10).
+
+    The runner here reports a per-turn cost; the real Codex CLI does not
+    (AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert residual), so this proves the scheduler path is provider-neutral
+    and fires as soon as the adapter has a dollar figure to report — not that
+    today's Codex telemetry feeds it.
+    """
+    tmpl = (
+        CODEX_WORKFLOW_TMPL
+        .replace("max_turns: 1", "max_turns: 10")
+        .replace(
+            "    kind: codex-cli\n",
+            "    kind: codex-cli\n    max_budget_usd: 0.025\n",
+        )
+    )
+    runner = FakeRunner()
+    runner.provider_id = "codex"
+    orch, tracker, _, _ = _build_harness(
+        tmp_path,
+        monkeypatch,
+        workflow_tmpl=tmpl,
+        runner=runner,
+        provider_id="codex",
+    )
+
+    tracker.candidates = [make_issue(1)]
+    tracker.states = {"node-1": make_issue(1, "todo")}  # state never changes
+
+    await orch._tick()
+    tracker.candidates = []
+    await wait_for(
+        lambda: not orch.running
+        and not orch.retry_attempts
+        and "node-1" not in orch.claimed
+    )
+
+    assert len(runner.turns) == 3          # ceiling, not max_turns (10), ended it
+    err = capfd.readouterr().err
+    assert "worker budget ceiling reached" in err
+    assert "cost_usd=0.03" in err
+    assert "provider_id=codex" in err
+    assert "worker completed" in err
+    assert "worker failed" not in err
+
+
 async def test_codex_mode_failure_retries_and_releases_claim(
     tmp_path,
     monkeypatch,

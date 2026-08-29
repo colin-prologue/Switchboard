@@ -21,12 +21,14 @@ AUTH_401_CAPTURE = Path(__file__).with_name("fixtures") / "codex_cli_auth_401.js
 def make_cfg(
     *,
     command: str | None = None,
+    max_budget_usd: float | None = None,
     turn_timeout_ms: int = 5000,
     read_timeout_ms: int = 3000,
     stall_timeout_ms: int = 0,
 ) -> CodexConfig:
     return CodexConfig(
         command=command or f"{sys.executable} {FIXTURE}",
+        max_budget_usd=max_budget_usd,
         turn_timeout_ms=turn_timeout_ms,
         read_timeout_ms=read_timeout_ms,
         stall_timeout_ms=stall_timeout_ms,
@@ -50,6 +52,47 @@ def workspace(tmp_path: Path) -> Path:
     path = tmp_path / "repo"
     path.mkdir()
     return path
+
+
+def test_budget_ceiling_comes_from_config_and_defaults_to_none() -> None:
+    """issue #181: the runner reads the neutral ceiling off its config instead
+    of hard-coding None, and the default stays None for compatibility."""
+    assert CodexRunner(CodexConfig()).max_budget_usd is None
+    assert CodexRunner(CodexConfig(max_budget_usd=5)).max_budget_usd == 5.0
+
+
+def test_configured_budget_ceiling_announces_that_it_cannot_fire(capfd) -> None:
+    """issue #181 AC3, the residual made loud: Codex reports no dollar cost, so
+    a configured ceiling is inert. It says so at construction rather than
+    reading as an enforced cap (AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert)."""
+    CodexRunner(CodexConfig(max_budget_usd=5.0))
+
+    err = capfd.readouterr().err
+    assert "codex budget ceiling configured" in err
+    assert "max_budget_usd=5.0" in err
+    assert "provider_id=codex" in err
+
+
+async def test_configured_ceiling_does_not_make_codex_report_cost(
+    workspace: Path,
+    monkeypatch,
+) -> None:
+    """issue #181 AC3: pins the reachability gap at the source. A successful
+    Codex turn under a configured ceiling still returns cost_usd 0.0 (the
+    stream carries token usage only), so the scheduler's cumulative-cost check
+    has nothing to accumulate. When this assertion starts failing, Codex has
+    begun reporting cost and the residual in AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert is closeable."""
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "success")
+    runner = CodexRunner(make_cfg(max_budget_usd=0.01))
+
+    result = await runner.run_turn(
+        workspace, "do the thing", None, EventRecorder(), "issue-181"
+    )
+
+    assert runner.max_budget_usd == 0.01
+    assert result.status == "succeeded"
+    assert result.cost_usd == 0.0
+    assert result.usage["output_tokens"] > 0  # telemetry exists; dollars do not
 
 
 def test_default_command_is_explicitly_headless_and_workspace_scoped() -> None:
