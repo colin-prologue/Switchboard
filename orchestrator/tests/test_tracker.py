@@ -737,8 +737,9 @@ async def test_mint_failure_surfaces_as_tracker_error():
 @pytest.mark.asyncio
 async def test_sole_status_swap_rolls_back_added_label_when_remove_fails():
     """PR #115 round 3: add-then-remove-fails must not strand a dual-status
-    issue (sorted-first normalization would deactivate it). The method removes
-    the label it just added, restoring the pre-call state, then raises."""
+    issue (the handoff label outranks the claim label it failed to remove, so
+    derivation would deactivate it). The method removes the label it just added,
+    restoring the pre-call state, then raises."""
     state = {"remove_calls": 0, "added": False}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1153,12 +1154,15 @@ async def test_issue_comments_missing_issue_raises_tracker_error():
     assert exc_info.value.code == "github_unknown_payload"
 
 
-def test_dual_status_resolves_sorted_first_and_logs_the_ambiguity(monkeypatch):
+def test_dual_status_resolves_by_precedence_and_logs_the_pick(monkeypatch):
     """The `parked` + `triage` pair the 2026-08-09 incident produced (#130).
 
-    `parked` sorts first, so a dual-labelled issue reads as parked and its
-    re-park looks sticky. The resolution is deterministic but semantically
-    arbitrary, which is exactly why the diagnostic has to fire.
+    `parked` outranks `triage` in the committed precedence
+    (`workflow/transitions.yml`, issue #167), so a dual-labelled issue reads as
+    parked and its re-park looks sticky. The pick is a stated decision now, not
+    an alphabetical accident, so the diagnostic reports WHICH state won rather
+    than warning that the winner was arbitrary — it still fires, because two
+    stage labels on one issue is still worth seeing.
 
     `_normalize_issue` is a @staticmethod: no tracker instance, no creds, no
     HTTP mock. `log` writes straight to stderr (log.py), never through the
@@ -1176,8 +1180,10 @@ def test_dual_status_resolves_sorted_first_and_logs_the_ambiguity(monkeypatch):
     assert issue.state == "parked"
     assert len(calls) == 1
     msg, ctx = calls[0]
-    assert msg == "issue carries multiple status:* labels; using sorted-first"
+    assert msg == ("issue carries multiple status:* labels; "
+                   "resolved by the committed precedence")
     assert ctx["labels"] == "status:parked,status:triage"
+    assert ctx["state"] == "parked"
     assert ctx["issue_number"] == 1
 
 

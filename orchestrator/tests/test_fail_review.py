@@ -448,11 +448,11 @@ async def test_a_verify_role_cap_hit_still_parks(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("state_label, expect_after_park", [
-    # KEPT (sorts after status:parked; derivation stays `parked`)
+    # KEPT (the resume target; `parked` outranks it, so derivation stays `parked`)
     (TODO_LABEL, [PARK_LABEL, TODO_LABEL]),
     ("status:triage", [PARK_LABEL, "status:triage"]),
-    # STRIPPED (orchestrator-owned claim labels, sort BEFORE status:parked) and
-    # therefore backfilled to status:todo
+    # STRIPPED (orchestrator-owned claim labels — board hygiene, not derivation)
+    # and therefore backfilled to status:todo
     (IN_PROGRESS_LABEL, [PARK_LABEL, TODO_LABEL]),
     (FAIL_REVIEW_LABEL, [PARK_LABEL, TODO_LABEL]),
 ])
@@ -477,7 +477,7 @@ async def test_park_never_strands_an_issue_on_unpark(
     await orch._park(issue, "test")
 
     assert _status_labels(issue) == sorted(expect_after_park)
-    assert issue.state == "parked"                       # sorted-first derivation
+    assert issue.state == "parked"                       # precedence derivation
     assert normalize_status_state(issue.labels, closed=False) == "parked"
 
     issue.labels.remove(PARK_LABEL)                      # the operator unparks
@@ -495,17 +495,19 @@ async def test_park_backfill_survives_a_failing_strip(tmp_path, monkeypatch):
     `except TrackerError` swallows failures as cosmetic, which is true for a
     failed STRIP and false for a failed BACKFILL.
 
-    ONE DIVERGENCE FROM THE AC'S LITERAL WORDING, and it is structural rather
-    than a gap in the implementation. The AC asks that the post-park set "still
-    derives to `parked`" here. It cannot, once a strip has failed: the labels
-    `PARK_STRIP_LABELS` removes are *by construction* exactly the park-reachable
-    ones that sort BEFORE `status:parked`, so any label that survives a failed
-    strip is a label that wins sorted-first derivation. The ticket body concedes
-    this in the same breath it calls a failed strip cosmetic — the durable
-    refusal is the `PARK_LABEL` gate, which reads the LABEL, not the derived
-    state. So this asserts the property the AC is actually protecting: the issue
-    stays undispatchable, and the operator's unpark still lands somewhere the
-    poll can see. See the PR body.
+    #31 ACCEPTED A DIVERGENCE HERE THAT #167 CLOSED. #31's AC asked that the
+    post-park set "still derives to `parked`" on this path, and under
+    alphabetical derivation it could not: `PARK_STRIP_LABELS` removed exactly
+    the park-reachable labels sorting BEFORE `status:parked`, so any label
+    surviving a failed strip won the derivation and a held ticket read as
+    `fail review`. That divergence was recorded as structural. It was not — it
+    was an artifact of the ordering rule, and the committed precedence
+    (`workflow/transitions.yml`, issue #167) ranks `parked` first outright.
+
+    So this now asserts the AC's literal wording: derivation says `parked` even
+    with the strip failed. The `PARK_LABEL` gate still refuses dispatch
+    independently — that belt stays, because it reads the LABEL and is immune to
+    the derivation rule changing under it.
     """
     orch, tracker, runner, _ = _build_harness(
         tmp_path, monkeypatch, FAIL_REVIEW_TMPL)
@@ -519,10 +521,11 @@ async def test_park_backfill_survives_a_failing_strip(tmp_path, monkeypatch):
 
     assert PARK_LABEL in issue.labels
     assert TODO_LABEL in issue.labels                    # backfill landed FIRST
-    # The strip raised, so `status:fail-review` survives and wins derivation.
-    assert normalize_status_state(issue.labels, closed=False) == FAIL_REVIEW_ROLE
-    # ...and the issue is nonetheless undispatchable, which is the whole point:
-    # the gate keys on the PARK_LABEL, never on the derived state.
+    # The strip raised, so `status:fail-review` survives — and LOSES anyway.
+    assert FAIL_REVIEW_LABEL in issue.labels
+    assert normalize_status_state(issue.labels, closed=False) == "parked"
+    # ...and the issue is undispatchable by the independent route too: the gate
+    # keys on the PARK_LABEL, never on the derived state.
     assert orch._should_dispatch(issue) is False
 
     issue.labels.remove(PARK_LABEL)                      # the operator unparks

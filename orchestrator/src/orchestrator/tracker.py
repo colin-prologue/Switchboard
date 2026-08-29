@@ -22,12 +22,14 @@ fields/types REQUIRED by this specification").
 from __future__ import annotations
 
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
 import httpx
 
 from orchestrator.auth import AppInstallationTokenProvider, StaticTokenProvider
 from orchestrator.log import log
+from orchestrator.transitions import load_precedence
 from orchestrator.types import (
     BlockerRef,
     CommentReaction,
@@ -339,25 +341,57 @@ def live_status_labels(labels: list[str]) -> list[str]:
     return sorted(l for l in status_labels(labels) if l not in DURABLE_STATUS_MARKERS)
 
 
-def normalize_status_state(labels: list[str], *, closed: bool) -> str:
+@lru_cache(maxsize=1)
+def status_precedence() -> tuple[str, ...]:
+    """The committed state precedence, highest first (`workflow/transitions.yml`).
+
+    Cached: `normalize_status_state` runs once per issue per poll, and the table
+    is a committed file that only changes with a deploy. Call
+    `status_precedence.cache_clear()` if a test needs to re-read it.
+    """
+    return load_precedence()
+
+
+def normalize_status_state(
+    labels: list[str], *, closed: bool, precedence: tuple[str, ...] | None = None
+) -> str:
     """Derive the workflow state from an issue's labels (SPEC.md §2).
 
     The single source of truth for status:* -> state mapping so test fakes can
     assert fidelity against it instead of hard-coding states: closed issues are
-    terminal "closed"; otherwise the sorted-first `status:*` label wins (one
-    status label per issue is the contract; ties resolve deterministically),
-    "status:" is stripped and "-" -> " "; no status label -> "none".
+    terminal "closed"; otherwise "status:" is stripped, "-" -> " ", and the
+    highest-ranked state under `precedence` wins; no status label -> "none".
+
+    `precedence` is the committed list in `workflow/transitions.yml`, EXPLICIT
+    rather than alphabetical (issue #167). One status label per issue is still
+    the contract for stage labels, but `status:parked` is an overlay applied
+    alongside the stage a ticket resumes into, so a second label is a designed
+    state and the winner has to be a stated decision. Under the old
+    `sorted(...)[0]` a parked issue carrying the claim label derived `in
+    progress` — an ACTIVE state — and only a separate best-effort strip and an
+    explicit `PARK_LABEL` check kept it out of dispatch. A state absent from the
+    list ranks below every listed one (ties alphabetical), so an undefined
+    `status:*` label can never out-vote a real state yet still derives
+    deterministically for the board-state check.
 
     Labels are assumed already normalized (stripped, lower-cased) as
-    `_normalize_issue` produces them. Pure — the multi-label diagnostic lives in
+    `_normalize_issue` produces them. Pure given `precedence`; the default is
+    read from the committed table. The multi-label diagnostic lives in
     `_normalize_issue`, which has the issue number to log.
     """
     if closed:
         return "closed"
-    status_labels = sorted(l for l in labels if l.startswith("status:"))
-    if status_labels:
-        return status_labels[0][len("status:") :].replace("-", " ")
-    return "none"
+    states = sorted(
+        l[len(STATUS_PREFIX) :].replace("-", " ")
+        for l in labels
+        if l.startswith(STATUS_PREFIX)
+    )
+    if not states:
+        return "none"
+    ranks = status_precedence() if precedence is None else precedence
+    order = {state: i for i, state in enumerate(ranks)}
+    unranked = len(order)
+    return min(states, key=lambda s: (order.get(s, unranked), s))
 
 
 class GitHubTracker:
@@ -926,9 +960,11 @@ class GitHubTracker:
                         ) from exc
                     # Swap complete on an open issue.
                     return
-                # Removal genuinely did not apply: partial swap (dual state,
-                # sorted-first normalization would deactivate the issue —
-                # round 3). Compensate by removing the label we just added so
+                # Removal genuinely did not apply: partial swap (dual state —
+                # the handoff label the swap adds outranks the claim label it
+                # failed to remove, so the issue would derive the GATE state and
+                # stop being dispatched, round 3). Compensate by removing the
+                # label we just added so
                 # the issue returns to its pre-call state and can retry.
                 if added_now and label in after:
                     try:
@@ -1134,17 +1170,21 @@ class GitHubTracker:
         closed = gh_state == "CLOSED"
         present = status_labels(labels)
         if not closed and len(present) > 1:
-            # One status label per issue is the workflow contract; more than one
-            # resolves deterministically (sorted-first) but the winner is
-            # semantically arbitrary — surface it. Derivation itself is delegated
-            # to the shared normalize_status_state helper.
+            # One status label per issue is the workflow contract for STAGE
+            # labels; the winner among several is now a stated decision rather
+            # than an alphabetical accident (issue #167), so this line reports
+            # WHICH state the committed precedence picked instead of warning
+            # that the pick was arbitrary. Derivation itself is delegated to the
+            # shared normalize_status_state helper.
             #
             # This is a note about THIS derivation, not a finding: markers count
             # here (`parked` + `triage` really does derive `parked`), and the
             # question "is this label set invalid?" belongs to board_sanity,
             # which owns the judgment, the config, and the comment.
-            log("issue carries multiple status:* labels; using sorted-first",
-                issue_number=raw.get("number"), labels=",".join(present))
+            log("issue carries multiple status:* labels; "
+                "resolved by the committed precedence",
+                issue_number=raw.get("number"), labels=",".join(present),
+                state=normalize_status_state(labels, closed=closed))
         state = normalize_status_state(labels, closed=closed)
 
         blocked_by = [
