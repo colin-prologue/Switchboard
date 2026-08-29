@@ -213,6 +213,14 @@ edges:
       implement-role session — no new state, no new role. Bounded by a durable
       per-PR round marker (2 rounds); at the cap the orchestrator stops
       relabeling and comments instead of parking.
+      BOTH actors reset the implement budget (issue #178). The orchestrator
+      resets before its own relabel; the human path is observed after the fact
+      — an unaccounted-for state change into todo is by construction somebody
+      else's write — and grants the same fresh budget. Before #178 only the
+      orchestrator path reset, so a human revision request on a spent ticket
+      opened a fail-review episode (marker absent) or parked (marker present)
+      rather than re-dispatching. ONE round budget serves both actors, so
+      alternating them cannot buy more than the 2 rounds.
 
   # === fail-review: post-failure diagnosis (ACTIVE since #31) =================
   # Pre-encoded by #29 as `active: false` / `requires: "#20b"`; #31 shipped the

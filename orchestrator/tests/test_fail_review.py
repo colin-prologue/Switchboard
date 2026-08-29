@@ -35,6 +35,7 @@ from orchestrator.scheduler import (
     FAIL_REVIEW_LABEL,
     FAIL_REVIEW_MARKER,
     FAIL_REVIEW_ROLE,
+    HUMAN_REVIEW_LABEL,
     IMPLEMENT_ROLE,
     IN_PROGRESS_LABEL,
     PARK_LABEL,
@@ -49,9 +50,14 @@ from orchestrator.types import TrackerError
 from orchestrator.workflow import Config, load_workflow
 
 from test_integration import (  # the shared fakes; this suite adds no second set
+    RR_BOT,
+    RR_SELF,
     WORKFLOW_TMPL,
+    _bind_pr,
     _build_harness,
+    _enable_app_identity,
     make_issue,
+    rr_issue,
     wait_for,
 )
 
@@ -442,6 +448,85 @@ async def test_a_verify_role_cap_hit_still_parks(tmp_path, monkeypatch):
     assert issue.state == "parked"
     issue.labels.remove(PARK_LABEL)
     assert normalize_status_state(issue.labels, closed=False) == "triage"
+
+
+async def test_a_human_relabel_does_not_consume_the_fail_review_episode(
+    tmp_path, monkeypatch
+):
+    """Issue #178: the marker-ABSENT case, which is this suite's stake in that
+    ticket and the reason it is tested here rather than beside the other #178
+    tests.
+
+    `human-review -> todo` has two sanctioned actors and, before #178, only the
+    orchestrator's own path reset the implement counter. So a reviewer's
+    revision request on a ticket with a spent budget arrived at the cap branch
+    above with `gate:fail-reviewed` absent — the ordinary case, since most
+    tickets have never failed — and was routed to a fail-review episode. Two
+    distinct harms, and the second is the worse one: the operator asked for a
+    revision and got a diagnostic verifier dispatched against a failure that
+    never happened, AND because the marker is once-per-issue and durable, the
+    request PERMANENTLY consumed the issue's only fail-review episode on a
+    non-failure. The verifier would not even address the review comments the
+    human wrote.
+
+    So the assertion that matters most here is the negative one: the marker
+    must still be UNWRITTEN afterwards, meaning the episode is still available
+    for the genuine cap-hit it was reserved for.
+
+    The comment log is left write-only deliberately — one round is granted, so
+    nothing reads a marker back. The read path (and with it the bound actually
+    binding at two rounds) is covered in `test_review_response.py`, which
+    mirrors posted comments into `fetch_pr_comments`.
+    """
+    tmpl = FAIL_REVIEW_TMPL.replace(
+        "polling:", f'review_response:\n  bot_logins: ["{RR_BOT}"]\n\npolling:')
+    _enable_app_identity(monkeypatch, RR_SELF)
+    orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, tmpl)
+    issue = rr_issue(1)
+    tracker.candidates = [issue]
+    tracker.states = {"node-1": issue}
+    _bind_pr(tracker, 1)
+    assert FAIL_REVIEW_MARKER not in issue.labels          # never failed
+
+    # Tick 1: a gate state. Observed by the relabel watcher, dispatched by
+    # nothing — which is what makes the next transition attributable to a human.
+    await orch._tick()
+    assert runner.turns == []
+
+    # The precondition the whole ticket is about: the budget is already spent
+    # when the reviewer asks for changes. With budget left the old code
+    # dispatched anyway and this test would pass against the bug.
+    orch.sessions_per_issue[("node-1", IMPLEMENT_ROLE)] = \
+        orch._cfg.agent().max_sessions_per_issue
+
+    # A reviewer's `gh issue edit`: two plain label writes, no orchestrator
+    # write, no `expected_status` guard.
+    await tracker.add_labels("node-1", [TODO_LABEL])
+    await tracker.remove_labels("node-1", [HUMAN_REVIEW_LABEL])
+
+    runner.hold = True
+    await orch._tick()
+
+    # Asserted BEFORE awaiting the turn, and in this order, so the test fails on
+    # the HARM rather than on a bookkeeping probe: with the observer removed the
+    # cap branch relabels and stamps the marker synchronously inside this tick,
+    # so these four lines are what go red. A test whose first failing assertion
+    # is an internal attribution detail would still be red for the right reason
+    # and would teach the next reader nothing about why it matters.
+    assert FAIL_REVIEW_MARKER not in issue.labels    # episode still UNSPENT
+    assert FAIL_REVIEW_LABEL not in issue.labels
+    assert tracker.sole_status_swaps == []           # no relabel attempted
+    assert orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 1}  # fresh + 1
+
+    # ...and what dispatched is the implement session the operator asked for.
+    await wait_for(lambda: len(runner.turns) == 1)
+    assert _status_labels(issue) == [IN_PROGRESS_LABEL]
+    assert "node-1" not in orch.parked
+    assert PARK_LABEL not in issue.labels
+
+    tracker.candidates = []                  # quiesce the continuation retry
+    runner.release.set()
+    await wait_for(lambda: not orch.running)
 
 
 # --- park never strands -------------------------------------------------------
