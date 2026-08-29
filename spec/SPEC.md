@@ -154,7 +154,7 @@ must have an answer for. That answer is the `precedence` list in
 `workflow/transitions.yml`: an explicit ranking, highest first, ranking the hold
 above every stage it can hold and gates above the orchestrator's own claim labels.
 It is not alphabetical order, and labels outside the `status:` namespace never
-participate (issue #167 / `AgDR-049`). Gate states are per
+participate (issue #167 / `AgDR-2026-08-29-state-precedence-is-declared-not-alphabetical`). Gate states are per
 stance, and "gate" has two senses that only coincide at `base`. The **declared**
 vocabulary is `gate_states` (AgDR-045): `base` declares `status:drafting`,
 `status:decision`, `status:plan-review`, `status:blocked` and

@@ -1,4 +1,4 @@
-# AgDR-049 — State precedence is declared, not alphabetical
+# AgDR-2026-08-29 — State precedence is declared, not alphabetical
 
 - **Status:** proposed (ratify at the adopting PR's merge gate)
 - **Issue:** #167 part (a)
