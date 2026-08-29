@@ -124,7 +124,7 @@ configured Codex ceiling cannot fire. The Codex leg's live bounds are
 `agent.max_turns` and the per-issue session cap; the runner logs the inert
 ceiling at construction so it never reads as an enforced one. Closing this is
 one change — surface a provider-reported cost into `TurnResult.cost_usd` once
-Codex reports one (AgDR-049, issue #181). The safe sandbox may protect `.git` as read-only;
+Codex reports one (AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert, issue #181). The safe sandbox may protect `.git` as read-only;
 a successful local git probe is host evidence only, and Stage 5B must verify
 ticket-to-PR handoff in a separate canary repository before mixed-pool work.
 

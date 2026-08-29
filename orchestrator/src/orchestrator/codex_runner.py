@@ -119,7 +119,7 @@ class CodexRunner:
             # subscription mode (SPEC.md §1) — so this runner's cost is always
             # 0.0 and the ceiling never trips. Say so once per session rather
             # than letting a configured ceiling read as an enforced one
-            # (AgDR-049, issue #181).
+            # (AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert, issue #181).
             log(
                 "codex budget ceiling configured but codex reports no cost "
                 "telemetry; ceiling cannot fire",

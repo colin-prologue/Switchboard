@@ -245,7 +245,7 @@ class CodexConfig:
     # dollar figure for in subscription mode (SPEC.md §1). Configuring a
     # ceiling here is therefore inert until Codex reports a cost; the runner
     # logs that fact at construction rather than pretending to be capped.
-    # See AgDR-049 (issue #181).
+    # See AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert (issue #181).
     max_budget_usd: float | None = None
     turn_timeout_ms: int = 3600000
     read_timeout_ms: int = 30000

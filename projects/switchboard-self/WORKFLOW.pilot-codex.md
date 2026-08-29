@@ -63,7 +63,7 @@ providers:
     # (issue #181). It is INERT today: `codex exec --json` reports no dollar
     # cost in subscription mode, so the scheduler's cumulative-cost check
     # never accumulates and this never fires. The Codex leg's live bound is
-    # agent.max_turns plus max_sessions_per_issue. See AgDR-049.
+    # agent.max_turns plus max_sessions_per_issue. See AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert.
     max_budget_usd: 5
     turn_timeout_ms: 3600000
     read_timeout_ms: 30000

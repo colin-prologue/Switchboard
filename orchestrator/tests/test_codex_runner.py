@@ -64,7 +64,7 @@ def test_budget_ceiling_comes_from_config_and_defaults_to_none() -> None:
 def test_configured_budget_ceiling_announces_that_it_cannot_fire(capfd) -> None:
     """issue #181 AC3, the residual made loud: Codex reports no dollar cost, so
     a configured ceiling is inert. It says so at construction rather than
-    reading as an enforced cap (AgDR-049)."""
+    reading as an enforced cap (AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert)."""
     CodexRunner(CodexConfig(max_budget_usd=5.0))
 
     err = capfd.readouterr().err
@@ -81,7 +81,7 @@ async def test_configured_ceiling_does_not_make_codex_report_cost(
     Codex turn under a configured ceiling still returns cost_usd 0.0 (the
     stream carries token usage only), so the scheduler's cumulative-cost check
     has nothing to accumulate. When this assertion starts failing, Codex has
-    begun reporting cost and the residual in AgDR-049 is closeable."""
+    begun reporting cost and the residual in AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert is closeable."""
     monkeypatch.setenv("FAKE_CODEX_SCENARIO", "success")
     runner = CodexRunner(make_cfg(max_budget_usd=0.01))
 

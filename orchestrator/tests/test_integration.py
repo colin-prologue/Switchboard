@@ -1726,7 +1726,7 @@ async def test_codex_budget_ceiling_ends_session_normally(
     $0.025 ceiling ends the session after turn 3, well before max_turns (10).
 
     The runner here reports a per-turn cost; the real Codex CLI does not
-    (AgDR-049 residual), so this proves the scheduler path is provider-neutral
+    (AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert residual), so this proves the scheduler path is provider-neutral
     and fires as soon as the adapter has a dollar figure to report — not that
     today's Codex telemetry feeds it.
     """

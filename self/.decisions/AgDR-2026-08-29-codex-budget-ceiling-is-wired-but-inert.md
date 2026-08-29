@@ -1,4 +1,4 @@
-# AgDR-049 — The Codex budget ceiling is wired end-to-end and inert at the source; the residual is named, logged, and pinned by a test
+# AgDR-2026-08-29 — The Codex budget ceiling is wired end-to-end and inert at the source; the residual is named, logged, and pinned by a test
 
 **Status:** proposed (ratify or overturn at the #181 merge gate)
 **Issue:** #181 — Codex sessions have no budget ceiling: `CodexConfig` lacks
