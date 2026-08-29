@@ -54,12 +54,11 @@ scripts/run-project.sh acme-api
 #    SB_GITHUB_REPO or the current checkout's git remote — i.e. Switchboard
 #    itself. Alternatively, source projects/acme-api/project.env first.)
 #
-#    --entry todo is REQUIRED on a `prototype` project, which is what step 1
-#    registers by default. new-ticket.sh defaults to `--entry triage`, and
-#    `prototype` does not dispatch `triage` — the two defaults compose into a
-#    ticket that is never picked up. Issue #176.
+#    The entry state is resolved from the project's stance — omit --entry and
+#    you get a state that project actually dispatches, or a refusal naming the
+#    ones it does. Pass --entry to override.
 scripts/new-ticket.sh --scaffold > body.md   # edit the skeleton
-scripts/new-ticket.sh --repo acme/api --entry todo \
+scripts/new-ticket.sh --repo acme/api \
   --title "Fix retry backoff in sync worker" --body-file body.md
 ```
 
@@ -111,7 +110,7 @@ flowchart TD
     parked["+ status:parked<br/>(additive overlay label)"]
 
     new -->|"--entry drafting:<br/>architecture-touching / long-lived"| drafting
-    new -->|"--entry triage (default):<br/>new or uncertain contract"| triage
+    new -->|"--entry triage (the default where<br/>the stance dispatches it):<br/>new or uncertain contract"| triage
     new -->|"--entry todo:<br/>trivial, bounded criteria"| todo
 
     drafting -->|"Gate A: human approves<br/>intent + criteria"| todo
@@ -173,15 +172,16 @@ the complete contract and rationale.
 
 ### Choosing the entry state (proportionality)
 
-**This section describes `base`.** Entry states are only meaningful where the
-stance dispatches them, and `prototype` — the `register-project.sh` default —
-dispatches only `todo`, `in progress` and `review`. On a `prototype` project the
-choice below collapses: file at `--entry todo`, because `triage` and `drafting`
-are states nothing there will move. Issue #176 tracks making the tools enforce
-this rather than the reader remembering it.
+Entry states are only meaningful where the stance dispatches them, so
+`new-ticket.sh` reads the target project's `active_states` rather than carrying a
+fixed default: it picks `triage` where the project verifies tickets before
+dispatch, `todo` where it does not, and refuses — naming the states the project
+*does* dispatch — where it cannot tell. An explicit `--entry` naming a state the
+project neither dispatches nor gates is refused the same way. At `prototype` the
+choice below therefore collapses to `todo` on its own; the list is the `base`
+menu (`AgDR-049`).
 
-With that said, at `base` the path a ticket takes *is* the risk control — match
-it to the risk:
+At `base`, the path a ticket takes *is* the risk control — match it to the risk:
 
 - **Trivial / low-risk** (one-line fix, typo, config bump) with already-bounded,
   checkable criteria → file straight at `--entry todo`. Forcing triage onto a
@@ -190,7 +190,7 @@ it to the risk:
   verification; an unstamped `status:todo` is refused by the dispatch guard.)
 - **New, author-fresh, or uncertain** — criteria smell unbounded
   ("all/every/comprehensive"), assumptions unstated, size unclear → file at
-  `--entry triage` (the default) **on a `base` project**. A verifier session
+  `--entry triage` (what the default resolves to at `base`). A verifier session
   adversarially reviews the
   ticket and routes it: **PASS** → `todo`; **NEEDS WORK** → back to `drafting`
   with a `## Triage verdict` comment; **SPLIT** → child issues with blocked-by

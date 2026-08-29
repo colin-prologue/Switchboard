@@ -8,32 +8,40 @@
 #
 # Usage:
 #   scripts/new-ticket.sh --title <t> [--body-file <path>|<stdin>]
-#                         [--entry {drafting|triage|todo}]   (default: triage)
+#                         [--entry {drafting|triage|todo}]   (default: resolved per project)
 #                         [--milestone <name>]               (created if absent)
 #                         [--blocked-by <n>[,<n>...]]        (native dependencies)
 #                         [--repo <owner/name>]              (SB_GITHUB_REPO or git remote)
 #   scripts/new-ticket.sh --scaffold        # emit body skeleton to stdout, don't file
 #   scripts/new-ticket.sh --dry-run ...     # print resolved payload, no network write
 #
-# --entry maps to the `status:<entry>` label. --dry-run and --scaffold never touch
-# the network (milestone is echoed by name, blocked-by by number), so they run in
-# any environment; real filing requires an authenticated `gh`.
+# --entry maps to the `status:<entry>` label. It is NOT a fixed default: the entry
+# state is only meaningful where the target project's stance dispatches it, so
+# omitting --entry resolves the project's `active_states` and picks from them, and
+# refuses rather than guessing when it cannot (issue #176). --dry-run and
+# --scaffold never touch the network (milestone is echoed by name, blocked-by by
+# number), so they run in any environment; real filing requires an authenticated `gh`.
 set -euo pipefail
 
-TITLE="" BODY_FILE="" ENTRY="triage" MILESTONE="" BLOCKED_BY="" REPO=""
+TITLE="" BODY_FILE="" ENTRY="" MILESTONE="" BLOCKED_BY="" REPO=""
 SCAFFOLD=0 DRY_RUN=0
+# Whether --entry was given EXPLICITLY. The resolved default and an explicitly
+# requested state are checked differently (an explicit state may name a GATE the
+# project parks at; a default may only name a state it DISPATCHES), so a bare
+# value comparison against "triage" cannot distinguish them.
+ENTRY_EXPLICIT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --title)      TITLE="$2"; shift 2;;
     --body-file)  BODY_FILE="$2"; shift 2;;
-    --entry)      ENTRY="$2"; shift 2;;
+    --entry)      ENTRY="$2"; ENTRY_EXPLICIT=1; shift 2;;
     --milestone)  MILESTONE="$2"; shift 2;;
     --blocked-by) BLOCKED_BY="$2"; shift 2;;
     --repo)       REPO="$2"; shift 2;;
     --scaffold)   SCAFFOLD=1; shift 1;;
     --dry-run)    DRY_RUN=1; shift 1;;
-    -h|--help)    sed -n '2,20p' "$0"; exit 0;;
+    -h|--help)    sed -n '2,25p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -80,18 +88,12 @@ SKELETON
   exit 0
 fi
 
-# --- validate entry state ----------------------------------------------------
-case "$ENTRY" in
-  drafting|triage|todo) ;;
-  *) echo "ERROR --entry must be one of: drafting, triage, todo (got '$ENTRY')" >&2; exit 2;;
-esac
-LABEL="status:$ENTRY"
-# --entry todo skips triage by design (trivial, bounded criteria — see README
-# "Which entry state?"): the human filing it IS the out-of-band verification,
-# so stamp the triage-PASS provenance marker the dispatch guard requires
-# (issue #29 / AgDR-011). An unstamped status:todo is refused, never dispatched.
-if [ "$ENTRY" = "todo" ]; then
-  LABEL="$LABEL,gate:triage-passed"
+# --- validate the entry state's VALUE (its fitness is checked after resolution)
+if [ "$ENTRY_EXPLICIT" -eq 1 ]; then
+  case "$ENTRY" in
+    drafting|triage|todo) ;;
+    *) echo "ERROR --entry must be one of: drafting, triage, todo (got '$ENTRY')" >&2; exit 2;;
+  esac
 fi
 
 [ -n "$TITLE" ] || { echo "ERROR --title required" >&2; exit 2; }
@@ -108,6 +110,146 @@ if [ -z "$REPO" ]; then
 fi
 [ -n "$REPO" ] || { echo "ERROR could not resolve repo (pass --repo, set SB_GITHUB_REPO, or add a git remote)" >&2; exit 2; }
 [[ "$REPO" == */* ]] || { echo "ERROR --repo must be owner/name (got '$REPO')" >&2; exit 2; }
+
+# --- resolve which states the TARGET PROJECT dispatches (issue #176) ---------
+# An entry state is only meaningful where the project's stance dispatches it:
+# `status:triage` on a `prototype` project is neither active, nor a gate, nor
+# terminal, so the ticket sits forever and the tool that filed it says nothing.
+#
+# Resolution mirrors `status_board.workflow_for_repo()` deliberately, step for
+# step: match `SB_GITHUB_REPO` across `projects/*/project.env`, then read that
+# project's COMPOSED `WORKFLOW.md`. Mirrored rather than invoked because bash
+# cannot import Python and the worker allowlist admits no ad-hoc interpreter
+# run; `test_new_ticket.py` pins the two implementations to the same answer for
+# a real binding, so this copy cannot quietly become a SECOND repo->project map
+# that disagrees with the one the scheduler dispatches from (AgDR-043).
+#
+# The state LIST is read, not the stance NAME: `SB_WORKFLOW_STANCE` post-dates
+# several bindings (switchboard-self's has no such line) and bindings are only
+# rewritten on re-registration, while `active_states` is present in every
+# composed file and is indifferent to how many stances exist.
+SB_HOME="${SB_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# First `<key>: [...]` flow list in the file, one item per line, unquoted.
+# Matched as one line rather than YAML-parsed for the same reason
+# `status_board.load_active_states` does: the uncomposed templates carry
+# `{{PLACEHOLDER}}` keys that a YAML loader refuses outright.
+yaml_flow_list() {
+  awk -v key="$2" '
+    $0 ~ "^[ \t]*" key ":[ \t]*\\[" {
+      sub(/^[^[]*\[/, ""); sub(/\].*$/, "")
+      n = split($0, items, ",")
+      for (i = 1; i <= n; i++) {
+        gsub(/^[ \t"]+/, "", items[i]); gsub(/[ \t"]+$/, "", items[i])
+        if (items[i] != "") print items[i]
+      }
+      exit
+    }
+  ' "$1"
+}
+
+WORKFLOW_PATH="" PROJECT_SLUG="" RESOLVE_ERR=""
+ACTIVE_STATES="" GATE_STATES=""
+_want="$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
+_matches=""
+for _env in "$SB_HOME"/projects/*/project.env; do
+  [ -f "$_env" ] || continue
+  _bound="$(sed -n 's/^SB_GITHUB_REPO=//p' "$_env" | head -n1 \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+  [ "$_bound" = "$_want" ] || continue
+  _matches="${_matches:+$_matches }$(basename "$(dirname "$_env")")"
+done
+set -- $_matches
+if [ "$#" -eq 0 ]; then
+  RESOLVE_ERR="no projects/*/project.env binds $REPO (is it registered?)"
+elif [ "$#" -gt 1 ]; then
+  # Ambiguity is refused rather than resolved first-match: picking one of two
+  # bindings could file against a state machine the scheduler does not use.
+  RESOLVE_ERR="$# projects bind $REPO ($_matches) — the binding is ambiguous"
+else
+  PROJECT_SLUG="$1"
+  WORKFLOW_PATH="$SB_HOME/projects/$PROJECT_SLUG/WORKFLOW.md"
+  if [ ! -f "$WORKFLOW_PATH" ]; then
+    RESOLVE_ERR="project '$PROJECT_SLUG' binds $REPO but has no composed WORKFLOW.md"
+    WORKFLOW_PATH=""
+  else
+    ACTIVE_STATES="$(yaml_flow_list "$WORKFLOW_PATH" active_states | tr '\n' '|')"
+    GATE_STATES="$(yaml_flow_list "$WORKFLOW_PATH" gate_states | tr '\n' '|')"
+    if [ -z "$ACTIVE_STATES" ]; then
+      RESOLVE_ERR="$WORKFLOW_PATH declares no tracker.active_states"
+      WORKFLOW_PATH=""
+    fi
+  fi
+fi
+set --   # drop the positional-parameter scratch space
+
+has_state() { case "|$1|" in *"|$2|"*) return 0;; *) return 1;; esac; }
+list_states() { printf '%s' "${1%|}" | tr '|' ',' | sed 's/,/, /g'; }
+# The subset of --entry's values this project would actually honour: a state it
+# dispatches, or one it parks at as a declared gate.
+entry_choices() {
+  local out="" s
+  for s in drafting triage todo; do
+    if has_state "$ACTIVE_STATES" "$s" || has_state "$GATE_STATES" "$s"; then
+      out="${out:+$out, }$s"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# --- resolve the entry state -------------------------------------------------
+if [ "$ENTRY_EXPLICIT" -eq 0 ]; then
+  # No --entry. Defaulting to a fixed state is what issue #176 is about, so the
+  # default is DERIVED, and refuses loudly where it cannot be: a wrong default
+  # here files a ticket nothing will ever pick up, and says nothing.
+  if [ -n "$RESOLVE_ERR" ]; then
+    cat >&2 <<EOF
+ERROR cannot resolve the entry state for $REPO: $RESOLVE_ERR
+      The entry state is only meaningful where the project dispatches it, so it
+      is not defaulted blind — filing at status:triage against a project that
+      never dispatches triage produces a ticket nobody ever picks up.
+      Re-run with an explicit --entry {drafting|triage|todo}.
+EOF
+    exit 2
+  elif has_state "$ACTIVE_STATES" "triage"; then
+    ENTRY="triage"          # the project verifies tickets before dispatch
+  elif has_state "$ACTIVE_STATES" "todo"; then
+    ENTRY="todo"            # no triage step here; the dispatchable entry is todo
+  else
+    cat >&2 <<EOF
+ERROR project '$PROJECT_SLUG' dispatches neither 'triage' nor 'todo', so there is
+      no entry state new-ticket.sh can default to.
+      dispatches: $(list_states "$ACTIVE_STATES")  (from $WORKFLOW_PATH)
+      Re-run with an explicit --entry {drafting|triage|todo}.
+EOF
+    exit 2
+  fi
+elif [ -z "$RESOLVE_ERR" ] \
+  && ! has_state "$ACTIVE_STATES" "$ENTRY" && ! has_state "$GATE_STATES" "$ENTRY"; then
+  # An explicitly requested state the project neither dispatches nor gates is
+  # the same dead ticket the default path refuses — the explicit case must not
+  # be silently worse than the defaulted one.
+  cat >&2 <<EOF
+ERROR --entry $ENTRY files status:$ENTRY, which project '$PROJECT_SLUG' neither
+      dispatches nor declares as a gate — nothing there would move the ticket.
+      dispatches: $(list_states "$ACTIVE_STATES")
+      gates:      $(list_states "${GATE_STATES:-(none)|}")
+      workflow:   $WORKFLOW_PATH
+      entry states this project honours: $(entry_choices)
+EOF
+  exit 2
+fi
+
+LABEL="status:$ENTRY"
+# A `todo` entry skips triage by design — either because the filer chose it for
+# trivial, bounded criteria (see README "Choosing the entry state"), or because
+# the project's stance has no triage step at all. Both stamp the provenance
+# marker the dispatch guard requires (issue #29 / AgDR-011), because an
+# unstamped status:todo is refused and never dispatched — which would re-create
+# the never-dispatched ticket this resolution exists to prevent. See AgDR-049.
+if [ "$ENTRY" = "todo" ]; then
+  LABEL="$LABEL,gate:triage-passed"
+fi
 
 # --- read body (--body-file or stdin) ----------------------------------------
 if [ -n "$BODY_FILE" ]; then
@@ -136,6 +278,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
   cat <<EOF
 === DRY RUN (no network writes) ===
 repo:       $REPO
+project:    ${PROJECT_SLUG:-(unresolved)}
+workflow:   ${WORKFLOW_PATH:-(unresolved: $RESOLVE_ERR)}
+dispatches: $([ -n "$ACTIVE_STATES" ] && list_states "$ACTIVE_STATES" || printf '(unknown)')
+entry:      $ENTRY ($([ "$ENTRY_EXPLICIT" -eq 1 ] && printf 'explicit' || printf 'resolved from active_states'))
 title:      $TITLE
 labels:     $LABEL
 milestone:  ${MILESTONE:-(none)}

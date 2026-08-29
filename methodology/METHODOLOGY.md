@@ -268,7 +268,20 @@ The permission dimension in (4) is `self/.decisions/AgDR-043-gate-c-owner-is-a-s
 ### Per ticket — the entry state
 
 Within whatever stance is live, the path a ticket takes through states *is* the
-risk control:
+risk control.
+
+**The entry state is not a constant, because the states are not.** A ticket filed
+at a state its project's stance does not dispatch is neither active, nor a gate,
+nor terminal: nothing moves it and nothing is waiting for it. So `new-ticket.sh`
+resolves the target project's `active_states` (the same repo→binding→composed-
+`WORKFLOW.md` walk the board sync uses) and defaults to `triage` where the
+project verifies before dispatch, `todo` where it does not, and refuses outright
+where it cannot tell — naming `--entry` as the fix. An explicit `--entry` naming
+a state the project neither dispatches nor declares as a gate is refused the same
+way. See `AgDR-049`; the two defaults that composed into a dead ticket were
+issue #176.
+
+At a stance that dispatches them, the options are:
 
 - **Routine / low-risk** (a bug, a small change): file it directly at
   `status:todo` with a one-line task-intent. No product-intent tier, no Gate A/B.
