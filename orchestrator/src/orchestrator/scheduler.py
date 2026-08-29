@@ -31,6 +31,7 @@ import httpx
 
 from .agent_runner import AgentRunner
 from .board_sanity import report_board_state
+from .build_identity import resolve_build_identity
 from .fold import FoldSignal, detect_fold_signals
 from .fold_apply import apply_fold_signal
 from .log import log
@@ -616,8 +617,14 @@ class Orchestrator:
         self._load_workflow(initial=True)  # startup validation failure aborts (§6.3)
         cfg = self._cfg
         assert cfg is not None
+        # issue #143: the record EXTENDS in place — same name, same existing
+        # fields (SETUP.md:293 anchors tracebacks to this banner). `sha`/`dirty`
+        # say which build is running, so a healthy start stops being silent
+        # about code age. Never raises; unresolvable is "unknown", not a refusal.
+        sha, dirty = resolve_build_identity()
         log("orchestrator starting", workflow=str(self.workflow_path),
-            repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()))
+            repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()),
+            sha=sha, dirty=dirty)
 
         self._http = httpx.AsyncClient(timeout=30.0)  # core §11.2 network timeout
         self._build_creds()  # WorkflowError (bad key file) aborts startup (§6.3)
