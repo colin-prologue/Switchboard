@@ -521,6 +521,49 @@ def test_providers_codex_parses_to_typed_config(tmp_path: Path):
     )
 
 
+def test_providers_codex_parses_max_budget_usd_as_float(tmp_path: Path):
+    """issue #181: the neutral per-run ceiling is configurable for Codex too."""
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "providers": {
+                    "codex": {"kind": "codex-cli", "max_budget_usd": 5},
+                }
+            },
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    assert cfg.codex().max_budget_usd == 5.0
+    assert isinstance(cfg.codex().max_budget_usd, float)
+
+
+@pytest.mark.parametrize("budget", [True, False, "five", [5]])
+def test_providers_codex_rejects_non_numeric_max_budget_usd(
+    tmp_path: Path,
+    budget: object,
+) -> None:
+    """Same strictness as providers.claude: numeric or null, booleans rejected."""
+    cfg = Config(
+        WorkflowDefinition(
+            config={
+                "providers": {
+                    "codex": {"kind": "codex-cli", "max_budget_usd": budget},
+                }
+            },
+            prompt_template="",
+        ),
+        tmp_path,
+    )
+
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.codex()
+
+    assert exc_info.value.code == "workflow_parse_error"
+    assert "max_budget_usd" in str(exc_info.value)
+
+
 def test_providers_codex_uses_safe_adapter_defaults(tmp_path: Path):
     cfg = Config(
         WorkflowDefinition(

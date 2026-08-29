@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .failure_classification import classify_codex_failure
+from .log import log
 from .types import AgentEvent, CodexConfig, EventCallback, FailureClass, TurnResult
 
 
@@ -110,7 +111,21 @@ class CodexRunner:
         self.cfg = cfg
         self.turn_timeout_ms = cfg.turn_timeout_ms
         self.stall_timeout_ms = cfg.stall_timeout_ms
-        self.max_budget_usd: float | None = None
+        self.max_budget_usd: float | None = cfg.max_budget_usd
+        if self.max_budget_usd is not None:
+            # The ceiling is real policy on the neutral interface, but the
+            # scheduler can only fire it from `TurnResult.cost_usd`, and
+            # `codex exec --json` reports token usage with no dollar figure in
+            # subscription mode (SPEC.md §1) — so this runner's cost is always
+            # 0.0 and the ceiling never trips. Say so once per session rather
+            # than letting a configured ceiling read as an enforced one
+            # (AgDR-049, issue #181).
+            log(
+                "codex budget ceiling configured but codex reports no cost "
+                "telemetry; ceiling cannot fire",
+                provider_id=self.provider_id,
+                max_budget_usd=self.max_budget_usd,
+            )
 
     def _build_argv(self, resume_session_id: str | None) -> list[str]:
         argv = shlex.split(self.cfg.command)

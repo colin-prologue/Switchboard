@@ -93,7 +93,10 @@ Stage 5A makes that adapter dispatchable only through an explicit process mode
 (AgDR-020). `--provider codex` installs `CodexOnlyRunnerSelector`; omitting the
 flag still installs `ClaudeOnlyRunnerSelector`. A Codex process requires a
 strict, single-entry `providers.codex` map with `kind: codex-cli` and optional
-`command`, `turn_timeout_ms`, `read_timeout_ms`, and `stall_timeout_ms` fields.
+`command`, `max_budget_usd`, `turn_timeout_ms`, `read_timeout_ms`, and
+`stall_timeout_ms` fields (`max_budget_usd` is numeric-or-null under the same
+strictness as the Claude envelope; see the runner-contract paragraph below for
+what it does and does not enforce).
 It rejects legacy execution blocks, mixed provider maps, unsupported kinds,
 unknown fields, and empty commands. A Claude process continues to accept only
 the legacy or provider-enveloped Claude forms described above. One workflow is
@@ -104,8 +107,15 @@ The provider-neutral runner contract owns `turn_timeout_ms`,
 `stall_timeout_ms`, and optional `max_budget_usd`. Token mint TTL and cumulative
 session budget use the selected runner's policy. `RunningEntry` captures the
 stall timeout at dispatch, so workflow reload affects later sessions without
-silently changing an in-flight session's deadline. Codex reports no dollar
-budget in subscription mode. The safe sandbox may protect `.git` as read-only;
+silently changing an in-flight session's deadline. `providers.codex` accepts
+`max_budget_usd` and the runner carries it on that neutral interface, but Codex
+reports no dollar budget in subscription mode: its turns normalize to
+`cost_usd: 0.0`, so the cumulative-cost check never accumulates and a
+configured Codex ceiling cannot fire. The Codex leg's live bounds are
+`agent.max_turns` and the per-issue session cap; the runner logs the inert
+ceiling at construction so it never reads as an enforced one. Closing this is
+one change — surface a provider-reported cost into `TurnResult.cost_usd` once
+Codex reports one (AgDR-049, issue #181). The safe sandbox may protect `.git` as read-only;
 a successful local git probe is host evidence only, and Stage 5B must verify
 ticket-to-PR handoff in a separate canary repository before mixed-pool work.
 
