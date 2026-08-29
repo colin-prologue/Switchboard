@@ -201,16 +201,19 @@ HUMAN_REVIEW_LABEL = "status:human-review"
 FAIL_REVIEW_LABEL = "status:fail-review"
 FAIL_REVIEW_MARKER = "gate:fail-reviewed"
 
-# The status labels `_park` strips before it writes PARK_LABEL — exactly the two
-# ORCHESTRATOR-OWNED claim labels, which are also exactly the park-reachable
-# labels that sort BEFORE `status:parked`. Leaving either in place would make
-# `normalize_status_state` report a parked issue as `in progress`/`fail review`
-# (sorted-first derivation, tracker.py) and trip the multi-label diagnostic on
-# every poll. The other two park-reachable labels — `status:todo` (the dominant
-# cap-hit state) and `status:triage` (the verify-role cap-out) — sort AFTER
-# `status:parked` and are deliberately KEPT: they are what makes the unpark
-# round trip work, since an issue stripped to `[status:parked]` alone derives
-# `"none"` the moment the operator removes that label and is then invisible to
+# The status labels `_park` strips after it writes PARK_LABEL — exactly the two
+# ORCHESTRATOR-OWNED claim labels. The strip is BOARD HYGIENE, not a correctness
+# gate: `parked` outranks every other state in the committed precedence
+# (`workflow/transitions.yml`, issue #167), so a parked issue derives `parked`
+# whether or not the claim label is still on it, and a failed strip is cosmetic.
+# What the strip buys is a board that reads honestly — no card claiming an agent
+# is working an issue nobody will dispatch.
+#
+# The other park-reachable labels — `status:todo` (the dominant cap-hit state)
+# and `status:triage` (the verify-role cap-out) — are deliberately KEPT, and NOT
+# because of where they sort: they are the only record of what the issue resumes
+# into. An issue stripped to `[status:parked]` alone derives `"none"` the moment
+# the operator removes that label and is then invisible to
 # `fetch_candidate_issues`. Same reason `_park` backfills `status:todo` when the
 # strip would otherwise leave nothing non-park.
 PARK_STRIP_LABELS = (IN_PROGRESS_LABEL, FAIL_REVIEW_LABEL)
@@ -2532,11 +2535,13 @@ class Orchestrator:
             self.parked.add(issue.id)  # durable marker confirmed
             # issue #14, generalized by #31: preserve the one-status-label
             # contract by clearing the orchestrator's own claim labels, so a
-            # parked issue does not keep deriving `in progress`/`fail review`
-            # from a label that sorts before `status:parked`. Done only after
-            # the durable park write succeeds; a failed STRIP is cosmetic (the
-            # issue is already durably parked and the PARK_LABEL gate refuses
-            # it either way), so it never trips the cap-enforcement halt below.
+            # parked issue does not show a card claiming an agent is working it.
+            # Since #167 this is hygiene only — `parked` outranks both labels in
+            # the committed precedence, so derivation says `parked` either way.
+            # Done only after the durable park write succeeds; a failed STRIP is
+            # cosmetic (the issue is already durably parked and the PARK_LABEL
+            # gate refuses it either way), so it never trips the cap-enforcement
+            # halt below.
             strip = [lbl for lbl in PARK_STRIP_LABELS if lbl in issue.labels]
             remaining = [
                 lbl for lbl in issue.labels

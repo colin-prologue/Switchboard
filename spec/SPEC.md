@@ -146,7 +146,15 @@ Normalized outputs must match the core's issue domain model.
 | tracker **writes**                  | **split, and the split is per ROLE — not "agents never write labels".** An *implementing* worker uses `gh` for comments and PR links but writes **no** `status:*` label; its final action is the handoff evidence contract `.run/handoff-evidence.json` (`orchestrator/src/orchestrator/handoff.py`). The **orchestrator** validates that evidence after verified provider success and performs the single handoff transition itself, alongside its own claim/park labels (issue #61 / AgDR-028). The **target** is the stance's `tracker.handoff_label` — `status:human-review` by default, `status:review` at `prototype` (AgDR-039/AgDR-043) — not a constant; the validation before writing it is unchanged. **Verdict-bearing roles DO write status labels**, by design and by prompt: the triage verifier writes `status:todo` / `status:drafting` / `status:decision` on its PASS / NEEDS WORK / NEEDS DECISION verdict (issue #17, #55 — `base` behaviour, predating the stance ladder), and `prototype`'s QA reviewer writes `status:todo` on FIX and `status:human-review` on ESCALATE (`WORKFLOW.prototype.md`). `methodology/METHODOLOGY.md`'s who-writes-what table is the authority for this; keep it in sync |
 
 **State mapping is the one real semantic gap.** Model state as `status:*` labels:
-the adapter normalizes a `status:todo` label into `state: "todo"`. Gate states are per
+the adapter normalizes a `status:todo` label into `state: "todo"`. One stage label
+per issue is the contract, but it is not an invariant the tracker can enforce, and
+`status:parked` is an **overlay** applied deliberately alongside the stage a held
+ticket resumes into — so more than one `status:*` label is a state the derivation
+must have an answer for. That answer is the `precedence` list in
+`workflow/transitions.yml`: an explicit ranking, highest first, ranking the hold
+above every stage it can hold and gates above the orchestrator's own claim labels.
+It is not alphabetical order, and labels outside the `status:` namespace never
+participate (issue #167 / `AgDR-2026-08-29-state-precedence-is-declared-not-alphabetical`). Gate states are per
 stance, and "gate" has two senses that only coincide at `base`. The **declared**
 vocabulary is `gate_states` (AgDR-045): `base` declares `status:drafting`,
 `status:decision`, `status:plan-review`, `status:blocked` and

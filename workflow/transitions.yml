@@ -23,10 +23,19 @@
 #                          `WORKFLOW.base.md` unconditionally, so the honored-drag
 #                          set is derived from base's states whatever project's
 #                          board is being synced.
+#   - `precedence`       — which state WINS when an issue carries more than one
+#                          `status:*` label. Consumed by `tracker.normalize_status_state`
+#                          (issue #167), which needs no `from` either — it ranks the
+#                          labels it can see.
 #   - `requires_marker`  — per-state provenance markers the dispatch guard demands
-#                          before it will claim an issue in that state. This is the
-#                          ONLY section the orchestrator reads (it can observe the
-#                          current state + labels — no `from` needed). See AgDR-011.
+#                          before it will claim an issue in that state. The
+#                          orchestrator can observe the current state + labels, so
+#                          no `from` is needed. See AgDR-011.
+#
+# The orchestrator reads `precedence` and `requires_marker` — the two sections
+# answerable from a CURRENT label set alone. `edges` stays off-limits to it for
+# the reason above: reconstructing a `from` across a restart is the durability
+# trap AgDR-008 escaped.
 #
 # Ratified 2026-07-05, amended 2026-07-07. See methodology/METHODOLOGY.md for the
 # gate semantics and self/.decisions/AgDR-011-* for the dispatch-guard exception.
@@ -189,9 +198,10 @@ edges:
     actor: human
     note: >-
       unpark of a verify-role cap-out. _park retains status:triage through the
-      park (it sorts after status:parked, so derivation stays `parked`), which
-      means removing status:parked derives `triage` and the issue resumes
-      verification; marker untouched (issue #31)
+      park (`precedence` below ranks parked above triage, so derivation stays
+      `parked` while both are present), which means removing status:parked
+      derives `triage` and the issue resumes verification; marker untouched
+      (issue #31)
 
   # --- Gate C: final review --------------------------------------------------
   - from: human-review
@@ -269,7 +279,63 @@ edges:
       marker write that fails after the status write already landed, and a
       handoff_label_rollback_failed leaving a dual-status state
 
-# --- requires_marker: the ONLY section the orchestrator dispatch guard reads ---
+# === precedence: which state wins when an issue carries two status labels ======
+# Issue #167. `status:*` labels encode workflow STATE, but one of them —
+# `status:parked` — is semantically an OVERLAY ("hold this wherever it is",
+# README.md), deliberately applied ALONGSIDE the stage label the ticket will
+# resume into. The residual stage label is the ONLY record of that resume target
+# (`_park` even backfills `status:todo` rather than let a park strip the issue
+# bare), so "two status labels" is a designed steady state here, not always a
+# board error — and the derivation needs a stated rule.
+#
+# The rule used to be alphabetical: `sorted(...)[0]` in tracker.py. That put
+# `status:parked` ahead of `status:todo` and `status:triage` but BEHIND
+# `status:fail-review` and `status:in-progress`, so a parked issue derived an
+# ACTIVE state until a separate best-effort strip caught up — and three comments
+# in this tree ended up promising to keep an alphabetical coincidence true. This
+# list replaces the coincidence. It is the one ordering
+# `tracker.normalize_status_state` consults, HIGHEST PRIORITY FIRST.
+#
+# States use the dashed spelling `edges` uses; the loader rewrites `-` to ` ` to
+# match the tracker's state vocabulary. A `status:*` label whose state is absent
+# from this list ranks BELOW every listed state, ties broken alphabetically: an
+# undefined label must never out-vote a real one, and must still derive
+# deterministically so the board-state check (#52) can report it.
+precedence:
+  # 1. The hold overlay, and the rank this section exists for. A parked issue is
+  #    held WHEREVER it is; the stage label beside it is a resume target, not a
+  #    competing claim about the present, and it must never out-vote the hold.
+  - parked
+
+  # 2. Gates and waiting states — nobody dispatches these, and an actor outside
+  #    the orchestrator owns the ticket. Ranked above the orchestrator's own
+  #    claim labels because when both are present the CLAIM is the stale one: a
+  #    handoff or a human move already happened, and deriving `in progress` for
+  #    a handed-off ticket invites the claim machinery to act on work that left.
+  - human-review
+  - plan-review
+  - review
+  - decision
+  - drafting
+  - blocked
+
+  # 3. States a SESSION runs in. Role-pinning means these should not coexist, so
+  #    the order here is about being total rather than about a live case: later
+  #    transition first (a cap-hit routes `in-progress -> fail-review`), and a
+  #    triage issue never takes the claim label at all
+  #    (`_apply_in_progress_label` fires only from `todo`), so a claim label seen
+  #    beside either of the other two is residue.
+  - fail-review
+  - triage
+  - in-progress
+
+  # 4. Dispatchable, and deliberately LAST. `status:todo` is what `_park`
+  #    backfills and what the fail-review `hold` verdict writes beside the park
+  #    label, which makes it the label most likely to turn up as a SECOND label.
+  #    It has to lose to every state above it.
+  - todo
+
+# --- requires_marker: the section the orchestrator dispatch guard reads --------
 # Per-state provenance markers that must be present on an issue before the guard
 # will claim it in that state. Keyed by current state (normalized, spaces not
 # dashes — matches tracker.py state derivation). See AgDR-011 for why this narrow

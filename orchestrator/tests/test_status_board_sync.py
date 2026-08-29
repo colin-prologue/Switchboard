@@ -290,9 +290,11 @@ def test_mirror_compare_before_write_no_ops():
     assert not decision.writes
 
 
-def test_mirror_of_a_two_label_issue_takes_the_sorted_first_option():
+def test_mirror_of_a_two_label_issue_takes_the_precedence_winner():
     # todo + parked shows *Parked* — the same answer the scheduler gets from
-    # normalize_status_state. The board may never disagree with tracker.py.
+    # normalize_status_state, which since #167 resolves multi-label issues
+    # against the committed precedence rather than alphabetically. The board may
+    # never disagree with tracker.py.
     decision = mirror_decision(
         ["status:todo", "status:parked"], closed=False, current_option=None
     )
@@ -510,7 +512,9 @@ def test_backfill_covers_the_open_issue_snapshot():
     }
     assert got == expected
     # Three rows in this snapshot carry two status labels; each resolves to the
-    # sorted-first option rather than being ambiguous.
+    # precedence winner rather than being ambiguous — and the winner is `Parked`
+    # because a hold outranks the stage it holds (#167), not because `p` sorts
+    # before `t`.
     assert expected[112] == expected[106] == expected[31] == "Parked"
 
 
