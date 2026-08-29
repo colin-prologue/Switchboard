@@ -149,6 +149,15 @@ process.
   that pair is reachable only through `handoff_label_rollback_failed`, and the
   new answer is the correct one. `triage` now outranks `in-progress`; the claim
   label is only ever written from `todo`, so the pair is unreachable today.
+  `triage` also now outranks `todo`, which alphabetical order resolved the other
+  way — the one flip among the pairs the verifier could in principle produce.
+  It is unreachable through the documented path: every triage verdict is a
+  SINGLE `gh issue edit` carrying both `--remove-label status:triage` and its
+  `--add-label` (`WORKFLOW.base.md`'s verdict table pins this, marker included),
+  so there is no window in which both labels are present. Were one to appear
+  anyway, deriving `triage` re-dispatches the verifier — which takes the
+  unchanged-body fast-path — rather than dispatching an implementer against a
+  `status:todo` whose swap did not complete.
 - **`board_sanity`'s multiple-live-labels finding** — the operator-facing text
   said the winner is "decided arbitrarily (sorted-first)", which is now false.
   Rewritten: derivation is deterministic, and the finding stands because the
