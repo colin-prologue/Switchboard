@@ -108,6 +108,8 @@ for env in projects/*/project.env; do
     p_vtools="$(set -a; . "$env" >/dev/null 2>&1; printf '%s' "${SB_VERIFY_TOOLS:-}")"
     p_rbot="$(set -a; . "$env" >/dev/null 2>&1; printf '%s' "${SB_REVIEW_BOT:-}")"
     p_rbot_yaml=""; [ -n "$p_rbot" ] && p_rbot_yaml="\"$p_rbot\""
+    p_op="$(set -a; . "$env" >/dev/null 2>&1; printf '%s' "${SB_OPERATOR_LOGIN:-}")"
+    p_op_yaml=""; [ -n "$p_op" ] && p_op_yaml="\"$p_op\""
     # SB_WORKFLOW_STANCE supersedes the legacy SB_WORKFLOW_TEMPLATE; read both so
     # projects registered before the stance ladder still verify.
     p_template="$(sed -n 's/^SB_WORKFLOW_STANCE=//p' "$env" | head -1)"
@@ -140,6 +142,7 @@ for env in projects/*/project.env; do
                -e "s|{{VERIFY_TOOLS}}|$(sre "$p_vtools")|g" \
                -e "s|{{REVIEW_BOT}}|$(sre "$p_rbot")|g" \
                -e "s|{{REVIEW_BOT_YAML}}|$(sre "$p_rbot_yaml")|g" \
+               -e "s|{{OPERATOR_LOGIN_YAML}}|$(sre "$p_op_yaml")|g" \
                "$template" | diff -q - "$wf" >/dev/null 2>&1; then
         fail "$slug: WORKFLOW.md drifted from $template — recompose it from the declared template"
       else

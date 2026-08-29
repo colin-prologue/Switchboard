@@ -8,6 +8,7 @@
 #   scripts/register-project.sh --slug acme-api --repo acme/api [--base main]
 #                               [--stance prototype|harden|sustain|base]
 #                               [--verify-cmd "<command>"] [--verify-tools '<allowlist>']
+#                               [--review-bot <login>] [--operator-login <login>]
 #                               [--max-agents 4] [--workspace-base ~/Developer/switchboard-workspaces]
 #                               [--convention-root <dir>] [--self]
 #
@@ -33,6 +34,15 @@
 #                          NOT enable it. When set, the QA role must cite that bot's
 #                          review of the reviewed sha and fails closed if none
 #                          exists; when unset, QA runs same-model and says so.
+# --operator-login <login> The GitHub login whose 👍/👎 reactions and `/fold` //
+#                          `/no-fold` comments count as approval of a triage
+#                          verdict. Empty by default: fold DETECTION is off until
+#                          an operator is named, and an unvetted allowlist must
+#                          never be granted fold authority by construction.
+#                          SINGLE-VALUED — the operator is exactly one person
+#                          (AgDR-048), so this composes one quoted login into the
+#                          `fold.operator_logins` list. A project needing several
+#                          hand-edits its composed WORKFLOW.md.
 # --convention-root <dir>  Root a project's .switchboard/ and .decisions/ under <dir>
 #                          instead of the repo root. Used for dogfooding so this repo
 #                          can manage itself without polluting the general-purpose root.
@@ -48,7 +58,7 @@ set -euo pipefail
 SB_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SLUG="" REPO="" BASE="main" MAX_AGENTS="4" CONVENTION_ROOT="" IS_SELF=0
-STANCE="prototype" VERIFY_CMD="" VERIFY_TOOLS="" REVIEW_BOT=""
+STANCE="prototype" VERIFY_CMD="" VERIFY_TOOLS="" REVIEW_BOT="" OPERATOR_LOGIN=""
 # Whether --stance was given EXPLICITLY. `--self` lowers the default to `base`
 # (see below), and an operator who deliberately asks for a loose self-stance
 # must still get one — so this distinguishes "not specified" from "specified as
@@ -65,6 +75,7 @@ while [ $# -gt 0 ]; do
     --verify-cmd)      VERIFY_CMD="$2"; shift 2;;
     --verify-tools)    VERIFY_TOOLS="$2"; shift 2;;
     --review-bot)      REVIEW_BOT="$2"; shift 2;;
+    --operator-login)  OPERATOR_LOGIN="$2"; shift 2;;
     --max-agents)      MAX_AGENTS="$2"; shift 2;;
     --workspace-base)  WORKSPACE_BASE="$2"; shift 2;;
     --convention-root) CONVENTION_ROOT="$2"; shift 2;;
@@ -162,6 +173,7 @@ SB_CONVENTION_ROOT=$CONVENTION_PREFIX
 SB_VERIFY_CMD=$(shq "$VERIFY_CMD")
 SB_VERIFY_TOOLS=$(shq "$VERIFY_TOOLS")
 SB_REVIEW_BOT=$(shq "$REVIEW_BOT")
+SB_OPERATOR_LOGIN=$(shq "$OPERATOR_LOGIN")
 # GITHUB_TOKEN is expected from the environment (GitHub App installation token).
 EOF
 
@@ -172,9 +184,14 @@ EOF
 # becomes ["login"]. Composed rather than hand-edited so the opt-in is one flag.
 REVIEW_BOT_YAML=""
 [ -n "$REVIEW_BOT" ] && REVIEW_BOT_YAML="\"$REVIEW_BOT\""
+# Same shape for fold.operator_logins: empty stays [], a set login becomes
+# ["login"]. Single-valued (AgDR-048) — a comma-bearing value would compose to
+# one malformed login that the loader accepts and that matches nobody.
+OPERATOR_LOGIN_YAML=""
+[ -n "$OPERATOR_LOGIN" ] && OPERATOR_LOGIN_YAML="\"$OPERATOR_LOGIN\""
 
-case "$VERIFY_CMD$VERIFY_TOOLS$REVIEW_BOT" in
-  *$'\n'*) echo "ERROR --verify-cmd/--verify-tools cannot contain a newline" >&2; exit 2;;
+case "$VERIFY_CMD$VERIFY_TOOLS$REVIEW_BOT$OPERATOR_LOGIN" in
+  *$'\n'*) echo "ERROR --verify-cmd/--verify-tools/--review-bot/--operator-login cannot contain a newline" >&2; exit 2;;
 esac
 sed \
   -e "s|{{REPO}}|$(sed_repl_escape "$REPO")|g" \
@@ -186,6 +203,7 @@ sed \
   -e "s|{{VERIFY_TOOLS}}|$(sed_repl_escape "$VERIFY_TOOLS")|g" \
   -e "s|{{REVIEW_BOT}}|$(sed_repl_escape "$REVIEW_BOT")|g" \
   -e "s|{{REVIEW_BOT_YAML}}|$(sed_repl_escape "$REVIEW_BOT_YAML")|g" \
+  -e "s|{{OPERATOR_LOGIN_YAML}}|$(sed_repl_escape "$OPERATOR_LOGIN_YAML")|g" \
   "$TEMPLATE" > "$PROJ_DIR/WORKFLOW.md"
 
 # --- 3. gate-state labels on the repo ---------------------------------------
@@ -247,6 +265,7 @@ registered '$SLUG' -> $REPO
   stance:     $STANCE  ($TEMPLATE)
   verify:     ${VERIFY_CMD:-<none set — preflight will be skipped with a note>}
   review bot: ${REVIEW_BOT:-<none — QA runs same-model and discloses it>}
+  operator:   ${OPERATOR_LOGIN:-<none — fold-signal detection stays off>}
   binding:    $PROJ_DIR/project.env
   workflow:   $PROJ_DIR/WORKFLOW.md
   workspaces: $WORKSPACE_ROOT

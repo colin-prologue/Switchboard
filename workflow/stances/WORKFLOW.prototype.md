@@ -64,10 +64,14 @@ agent:
   # swings, and there is no triage pass upstream to bound scope first.
   max_sessions_per_issue: 5
 
-# Not used by this stance (no status:decision state exists here). Kept as an
-# empty declaration so re-stancing to harden/sustain is a template swap only.
+# Not used by this stance (no status:decision state exists here). Kept as a
+# declaration so re-stancing to harden/sustain is a template swap only — and
+# composed from `SB_OPERATOR_LOGIN` in the project binding (issue #171) rather
+# than a literal, so the value carries across a re-stance instead of silently
+# reverting to a disabled default. Unset composes to `[]`. Single-valued by
+# design: the operator is exactly one person (AgDR-048).
 fold:
-  operator_logins: []
+  operator_logins: [{{OPERATOR_LOGIN_YAML}}]
 
 # Cross-model review, opt-in per project via `register-project.sh --review-bot`.
 # Empty unless the operator passed that flag: AgDR-037 requires going live to be

@@ -988,6 +988,8 @@ def test_real_workflow_base_file_loads_after_placeholder_substitution(tmp_path: 
         .replace("{{WORKSPACE_ROOT}}", "/tmp/symphony_workspaces/acme-widgets")
         .replace("{{MAX_AGENTS}}", "10")
         .replace("{{CONVENTION_ROOT}}", "")
+        .replace("{{OPERATOR_LOGIN_YAML}}", "")
+        .replace("{{REVIEW_BOT_YAML}}", "")
     )
     p = tmp_path / "WORKFLOW.md"
     p.write_text(substituted)
@@ -1023,6 +1025,8 @@ def test_decision_is_not_an_active_state(tmp_path: Path):
         .replace("{{WORKSPACE_ROOT}}", "/tmp/symphony_workspaces/acme-widgets")
         .replace("{{MAX_AGENTS}}", "10")
         .replace("{{CONVENTION_ROOT}}", "")
+        .replace("{{OPERATOR_LOGIN_YAML}}", "")
+        .replace("{{REVIEW_BOT_YAML}}", "")
     )
     p = tmp_path / "WORKFLOW.md"
     p.write_text(substituted)
@@ -1058,15 +1062,34 @@ def test_active_states_line_is_byte_identical_in_base_and_composed():
 
 
 def _parse_env(path: Path) -> dict[str, str]:
-    """Parse a project.env (KEY=value lines; ignore comments/blanks)."""
+    """Parse a project.env (KEY=value lines; ignore comments/blanks).
+
+    Values may be shell-quoted — register-project.sh single-quotes every value
+    it persists, because run-project.sh SOURCES this file — so the quotes are
+    stripped here the way sourcing would.
+    """
     env: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        env[key.strip()] = value.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        env[key.strip()] = value
     return env
+
+
+def _yaml_login(value: str) -> str:
+    """The empty-stays-`[]` derivation the three recomposers share (issue #171).
+
+    `register-project.sh`, `verify-setup.sh` and `freshness-preflight.sh` each
+    carry their own copy in shell; this is the fourth. Unset composes to nothing
+    between the brackets — `[]`, never `[""]`, which would match a bot named
+    empty-string.
+    """
+    return f'"{value}"' if value else ""
 
 
 def test_base_and_composed_workflow_are_in_sync():
@@ -1094,6 +1117,13 @@ def test_base_and_composed_workflow_are_in_sync():
         .replace("{{WORKSPACE_ROOT}}", env["SB_WORKSPACE_ROOT"])
         .replace("{{MAX_AGENTS}}", max_agents)
         .replace("{{CONVENTION_ROOT}}", env["SB_CONVENTION_ROOT"])
+        .replace(
+            "{{OPERATOR_LOGIN_YAML}}",
+            _yaml_login(env.get("SB_OPERATOR_LOGIN", "")),
+        )
+        .replace(
+            "{{REVIEW_BOT_YAML}}", _yaml_login(env.get("SB_REVIEW_BOT", ""))
+        )
     )
 
     assert substituted == composed_text, (
@@ -1395,7 +1425,11 @@ def test_validate_dispatch_forces_fold_validation(tmp_path: Path, monkeypatch):
 
 
 def _real_base_config(tmp_path: Path, name: str = "WORKFLOW.md") -> Config:
-    """The committed `WORKFLOW.base.md`, scaffold placeholders substituted."""
+    """The committed `WORKFLOW.base.md` composed for a project that named
+    NEITHER an operator nor a review bot — i.e. what registration produces from
+    an unset `SB_OPERATOR_LOGIN`/`SB_REVIEW_BOT` (issue #171). Both login
+    placeholders collapse to the empty string, so both lists compose to `[]`,
+    which is the default the two tests below pin."""
     real_path = Path(__file__).resolve().parents[2] / "workflow" / "WORKFLOW.base.md"
     substituted = (
         real_path.read_text(encoding="utf-8")
@@ -1403,6 +1437,8 @@ def _real_base_config(tmp_path: Path, name: str = "WORKFLOW.md") -> Config:
         .replace("{{WORKSPACE_ROOT}}", "/tmp/ws")
         .replace("{{MAX_AGENTS}}", "10")
         .replace("{{CONVENTION_ROOT}}", "")
+        .replace("{{OPERATOR_LOGIN_YAML}}", "")
+        .replace("{{REVIEW_BOT_YAML}}", "")
     )
     p = tmp_path / name
     p.write_text(substituted)
@@ -1410,8 +1446,10 @@ def _real_base_config(tmp_path: Path, name: str = "WORKFLOW.md") -> Config:
 
 
 def test_real_workflow_base_declares_an_empty_fold_allowlist(tmp_path: Path):
-    """The scaffold ships detection OFF: an allowlist nobody vetted must never
-    grant fold authority by default."""
+    """The scaffold ships detection OFF for a project that names no operator:
+    an allowlist nobody vetted must never grant fold authority by default. The
+    placeholder (issue #171) makes the value settable per project; it does not
+    make it default to anything."""
     assert _real_base_config(tmp_path).fold().operator_logins == ()
 
 
@@ -1498,23 +1536,40 @@ def test_validate_dispatch_forces_review_response_validation(
 
 
 def test_real_workflow_base_ships_the_response_loop_disabled(tmp_path: Path):
-    """SHIPPED CONFIG AC: the loop lands DISABLED, dead code by design.
+    """SHIPPED CONFIG AC: the loop lands DISABLED for a project that named no
+    review bot, dead code by design.
 
-    Going live is a deliberate post-merge config edit, never a merge side
-    effect — and with no `bot_logins` no trigger fires, so no round marker is
-    ever written and the prompt addendum stays inert too.
+    Going live is a deliberate config edit, never a merge side effect — since
+    issue #171 that edit is `SB_REVIEW_BOT` in the project's own binding, and an
+    unset variable composes to `[]` exactly as the literal did. With no
+    `bot_logins` no trigger fires, so no round marker is ever written and the
+    prompt addendum stays inert too.
     """
     assert _real_base_config(tmp_path).review_response().bot_logins == ()
 
 
-def test_composed_self_workflow_ships_the_response_loop_disabled(tmp_path: Path):
+def test_composed_self_workflow_enables_both_login_driven_loops(tmp_path: Path):
     """The OTHER carrying file. `projects/switchboard-self/WORKFLOW.md` is the
-    composed copy the live instance actually loads; shipping it enabled would
-    activate the loop on merge regardless of what the base template says."""
+    composed copy the live instance actually loads, and both loops short-circuit
+    on an empty list before any GitHub read — so an empty allowlist here is a
+    feature that cannot be switched on, not a feature that is off.
+
+    Supersedes `test_composed_self_workflow_ships_the_response_loop_disabled`
+    (issue #43), which asserted `bot_logins == ()` for this same file. That
+    assertion was right while the only way to set the field was hand-editing a
+    shared template; issue #171 moves the opt-in to this project's tracked
+    `project.env`, so merging THAT is the deliberate config edit AgDR-037 asks
+    for. See `self/.decisions/AgDR-049-login-config-is-a-project-binding.md`.
+
+    Exact tuples, not "non-empty": a malformed one-element list matches nobody
+    and would leave both loops as inert as an empty one.
+    """
     real = Path(__file__).resolve().parents[2] / "projects" / "switchboard-self"
     p = tmp_path / "WORKFLOW.md"
     p.write_text((real / "WORKFLOW.md").read_text(encoding="utf-8"))
-    assert Config(load_workflow(p), tmp_path).review_response().bot_logins == ()
+    cfg = Config(load_workflow(p), tmp_path)
+    assert cfg.fold().operator_logins == ("colin-prologue",)
+    assert cfg.review_response().bot_logins == ("chatgpt-codex-connector",)
 
 
 def test_review_response_rejects_logins_that_break_the_marker_grammar(tmp_path: Path):
