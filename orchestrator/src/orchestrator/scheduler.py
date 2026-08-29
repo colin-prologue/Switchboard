@@ -39,6 +39,7 @@ from .handoff import HandoffRejection, snapshot_evidence, validate_handoff
 from .prompt import render_prompt
 from .review_response import (
     CAP_MARKER,
+    RELABEL_CAP_MARKER,
     ROUND_CAP,
     format_round_marker,
     has_cap_comment,
@@ -269,6 +270,24 @@ REVIEW_CAP_COMMENT = (
     "_Posted by Switchboard (AI orchestrator)._"
 )
 
+# Posted once per PR when a HUMAN changes-requested relabel arrives at the same
+# durable round cap (issue #178). Deliberately not `REVIEW_CAP_COMMENT`: that
+# one offers "move the issue back to `status:todo`" as the recovery, which is
+# exactly the action this reader just took. The recovery named here is the
+# unpark round trip, which is the operator's existing deliberate escape hatch.
+RELABEL_CAP_COMMENT = (
+    "{marker}\n"
+    "**Switchboard did not refresh this issue's implementation budget.** The "
+    "issue was moved back to `" + TODO_LABEL + "`, but this PR has already "
+    "used its {cap} budget-granting rounds, so the re-dispatched session draws "
+    "on whatever budget is left. The bound is shared with the automatic "
+    "review-response loop so no single actor can refill the allowance "
+    "indefinitely.\n\n"
+    "If the issue parks for an exhausted budget, removing `" + PARK_LABEL +
+    "` is the deliberate operator unpark and does restore every budget.\n\n"
+    "_Posted by Switchboard (AI orchestrator)._"
+)
+
 CONTINUATION_PROMPT = (
     "Continue working the same issue in this workspace. Do not restart from "
     "scratch: review your progress so far, then finish the remaining work, "
@@ -423,6 +442,23 @@ class Orchestrator:
         # are cadence and log-once bookkeeping only.
         self._review_last_poll_at: datetime | None = None
         self._review_disabled_logged = False
+
+        # Human changes-requested relabels (issue #178). `human-review -> todo`
+        # has TWO sanctioned actors and only the orchestrator's own path reset
+        # the implement counter, so a human revision request on a spent ticket
+        # routed to a fail-review episode (marker absent) or parked (marker
+        # present) instead of re-dispatching. This map is how the human write is
+        # told apart from ours: every state the poll observes is recorded here,
+        # and the sub-poll records its OWN relabel, so an unaccounted-for
+        # `human review -> todo` change is by construction somebody else's.
+        #
+        # PROCESS-LIFETIME, deliberately, and that is not the weakness it looks
+        # like: it has exactly the lifetime of `sessions_per_issue`, which is
+        # the state it exists to correct. A restart empties both, so the ticket
+        # the map has forgotten is also the ticket whose budget is already
+        # fresh. The DURABLE half of this feature is the round marker on the PR.
+        self._last_status_state: dict[str, str] = {}
+        self._relabel_disabled_logged = False
 
         # Board-state sanity check (issue #52). In-memory `(issue id, condition)`
         # memo so an unchanged invalid state costs zero API calls on later
@@ -850,6 +886,14 @@ class Orchestrator:
             return
         issues = tracker.select_candidates(open_issues)
 
+        # BEFORE dispatch, deliberately (issue #178): the whole point of the
+        # grant is that the cap check below sees the reset counter. Run after
+        # it and a human's revision request would still route to fail-review or
+        # park on this very tick, one tick before the fix took effect. It reads
+        # `open_issues`, not `issues`, because `human review` is a gate state
+        # the candidate filter removes — the state the transition starts from.
+        await self._observe_human_relabels(tracker, open_issues)
+
         await self._resume_provider_waiters(issues)
 
         for issue in self._sort_for_dispatch(issues):
@@ -1041,11 +1085,133 @@ class Orchestrator:
         await tracker.set_sole_status_label(
             issue.id, TODO_LABEL, expected_status=(HUMAN_REVIEW_LABEL,)
         )
+        # Attribute the write to OURSELVES (issue #178). The human-relabel
+        # observer reads `_last_status_state` to tell an unaccounted-for
+        # `human review -> todo` change from this one; without this line the
+        # next tick would see our own relabel as a human's and burn a second
+        # round granting a budget we just granted.
+        self._last_status_state[issue.id] = "todo"
         self._tick_wakeup.set()
         log("review-response triggered",
             issue_id=issue.id, issue_identifier=issue.identifier,
             pr_number=pr_number, round=rounds + 1, owed=len(owed),
             threads=",".join(t.id for t in owed))
+        return True
+
+    # -- human changes-requested relabels (issue #178) --------------------------
+
+    async def _observe_human_relabels(
+        self, tracker: GitHubTracker, open_issues: list[Issue]
+    ) -> list[str]:
+        """Grant a fresh implement budget on a HUMAN `human-review -> todo`.
+
+        `transitions.yml` sanctions two actors on that edge and only one of them
+        was resetting the session counters, so the same edge produced three
+        different budget outcomes depending on who took it. This closes that:
+        the human path now grants the same fresh implement budget the sub-poll
+        does, drawn from the same durable per-PR round bound.
+
+        Detection is pure bookkeeping over the tick's ALREADY-FETCHED unfiltered
+        issue list — zero API calls until a transition is actually seen, which
+        is at most once per relabel. The map is rebuilt from `open_issues` each
+        tick so a closed issue's entry cannot accumulate.
+
+        Returns the identifiers granted (tests and logs; nothing else reads it).
+        """
+        seen: dict[str, str] = {}
+        granted: list[str] = []
+        for issue in open_issues:
+            state = (issue.state or "").lower()
+            seen[issue.id] = state
+            if self._last_status_state.get(issue.id) != "human review":
+                continue
+            if state != "todo":
+                continue
+            # A transition we did not record ourselves, so by construction a
+            # human took the edge. Record the new state FIRST: a grant that
+            # raises must not re-fire on every subsequent tick.
+            self._last_status_state[issue.id] = state
+            seen[issue.id] = state
+            try:
+                if await self._grant_relabel_budget(tracker, issue):
+                    granted.append(issue.identifier)
+            except TrackerError as exc:
+                log("human relabel: budget grant failed; leaving counters as they are",
+                    issue_identifier=issue.identifier, error=str(exc))
+        self._last_status_state = seen
+        return granted
+
+    async def _grant_relabel_budget(
+        self, tracker: GitHubTracker, issue: Issue
+    ) -> bool:
+        """Reset the issue's session counters, bounded at `ROUND_CAP` per PR.
+
+        Three refusals, each for its own reason:
+
+        - **Nothing spent.** The budget is already fresh, so a grant would buy
+          nothing and consume a round. This is also the common case — an
+          ordinary revision request on a ticket that never hit its cap — so it
+          costs zero API calls.
+        - **No App identity.** `latest_round` trusts only markers authored by
+          the normalized `$SB_APP_BOT_LOGIN`; with it unset the count reads 0
+          forever and the bound would not bind at all. Refusing keeps the cap
+          honest, matching the sub-poll's posture on the same env var.
+        - **Unbindable PR.** The bound lives in a comment ON THE PR. With no PR
+          to write it to there is nowhere to record that a round was spent, and
+          an unrecorded grant is exactly the refill-by-relabelling the cap
+          exists to prevent.
+        """
+        cfg = self._cfg
+        assert cfg is not None
+        spent = self.sessions_for_issue(issue.id).get(IMPLEMENT_ROLE, 0)
+        if spent <= 0:
+            return False
+
+        self_login = normalize_login(os.environ.get("SB_APP_BOT_LOGIN"))
+        if self_login is None:
+            if not self._relabel_disabled_logged:
+                self._relabel_disabled_logged = True
+                log("human relabel: budget grant disabled — SB_APP_BOT_LOGIN is "
+                    "unset, so the durable per-PR round cap is unreadable and "
+                    "an unbounded reset would let a relabel refill the budget",
+                    issue_identifier=issue.identifier)
+            return False
+
+        pr = await self._bind_pr(tracker, issue)
+        if pr is None:
+            log("human relabel: no bindable PR, so no durable place to record "
+                "the round; budget left as it is",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                spent=spent)
+            return False
+        pr_number, pr_id = pr["number"], pr["id"]
+
+        comments = await tracker.fetch_pr_comments(pr_number)
+        rounds, _ = latest_round(comments, self_login=self_login)
+        if rounds >= ROUND_CAP:
+            if not has_cap_comment(comments, self_login=self_login,
+                                   marker=RELABEL_CAP_MARKER):
+                await tracker.add_issue_comment(
+                    pr_id,
+                    RELABEL_CAP_COMMENT.format(
+                        marker=RELABEL_CAP_MARKER, cap=ROUND_CAP),
+                )
+            log("human relabel: round cap reached; budget not refreshed",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                pr_number=pr_number, rounds=rounds, spent=spent)
+            return False
+
+        # Marker BEFORE the reset, same ordering argument the sub-poll makes:
+        # a crash between them burns a round harmlessly, while the reverse hands
+        # out a budget the cap can never account for.
+        bot_logins = cfg.review_response().bot_logins
+        await tracker.add_issue_comment(
+            pr_id, format_round_marker(rounds + 1, bot_logins, self_login)
+        )
+        self._reset_issue_sessions(issue.id)
+        log("human relabel granted a fresh implement budget",
+            issue_id=issue.id, issue_identifier=issue.identifier,
+            pr_number=pr_number, round=rounds + 1, spent=spent)
         return True
 
     # -- fold-signal sub-poll (issue #51 part a) --------------------------------

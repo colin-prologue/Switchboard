@@ -145,6 +145,32 @@ def test_human_review_to_todo_edge_carries_both_actors_and_the_trigger():
     assert set(edge) == {"from", "to", "actor", "verdict", "trigger", "note"}
 
 
+def test_both_actors_on_the_re_entry_edge_reset_the_implement_budget():
+    """Issue #178: the edge's TWO actors must agree on the budget, not just on
+    the label they write.
+
+    The pre-#178 note recorded a reset on the orchestrator path only, and that
+    asymmetry is the defect — a human revision request on a ticket with a spent
+    implement budget opened a fail-review episode or parked instead of
+    re-dispatching. The table is where the widening was recorded, so it is
+    where the correction has to land too; a note that still says only one actor
+    resets would leave the next reader with the belief the code no longer has.
+
+    This is a documentation pin, not the behaviour check — the behaviour lives
+    in `test_review_response.py` (grant, no park, cap binds) and
+    `test_fail_review.py` (no consumed episode).
+    """
+    edge = [e for e in _edges()
+            if e["from"] == "human-review" and e["to"] == "todo"][0]
+    note = edge["note"]
+    assert "#178" in note
+    assert "BOTH actors reset" in note
+    # The bound is SHARED, which is the part an actor-scoped reading would get
+    # wrong: two actors with a round budget each is 2x the allowance the cap
+    # was chosen to permit.
+    assert "ONE round budget serves both actors" in note
+
+
 def test_review_response_adds_no_new_state_and_no_requires_marker():
     """The decision's load-bearing claim: no new state, no new gate.
 
