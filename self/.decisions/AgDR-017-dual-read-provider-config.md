@@ -1,6 +1,11 @@
 # AgDR-017: Add a provider envelope through semantic dual-read
 
-**Status:** accepted (2026-07-12)
+> **Amended 2026-08-29 (issue #159) — superseded in part by `AgDR-2026-08-29-retire-the-legacy-claude-block`.** The
+> dual-read this record introduced has been removed. The record below stands
+> unrewritten; the amendment immediately after it is the current authority on
+> the legacy top-level `claude:` block.
+
+**Status:** accepted (2026-07-12), dual-read removed 2026-08-29 (AgDR-2026-08-29-retire-the-legacy-claude-block)
 **Surfaces:** `orchestrator/workflow.py`, `spec/SPEC.md`, workflow reload
 validation, and the AI-agnostic agent-pool migration
 
@@ -88,3 +93,39 @@ new Claude setting must be added to one shared typed parser rather than one path
 at a time. The semantic comparison prevents drift today, but the migration needs
 a later removal criterion; otherwise compatibility code becomes permanent and
 the shipped template never proves the provider envelope in production.
+
+## Amendment — removal criterion, set and met (2026-08-29, issue #159)
+
+The weakest point above fired on both halves. No removal criterion was set for
+six weeks, and the `codex-canary` / `mixed-canary` bindings that were to prove
+the envelope in production were retired on 2026-08-15, closing that route. The
+compatibility layer had become permanent by default rather than by decision —
+exactly the state this record predicted.
+
+> **Removal criterion (set 2026-08-25, issue #159):** the dual-read is removed
+> when no tracked binding uses the legacy top-level form. That condition was met
+> by migrating the three tracked legacy bindings to the `providers:` envelope in
+> this issue. The envelope becomes the only load path, exercised by every run
+> rather than by one pilot binding.
+
+The reasoning that settled it inverted this record's own framing. "Keep the
+legacy form to continuously test the compatibility promise" (Decision, above)
+reads as caution, but the legacy top-level `claude:` block **cannot express
+Codex**, and `mixed()` refuses any binding carrying one. So the compatibility
+layer was not protecting multi-provider work — it was the thing preventing it
+from running on any production binding. Retiring the shape both removes the
+shared-parser tax on every new Claude setting and resolves the second half of
+the weakest point, because the envelope is now what every run parses.
+
+Migration cost was a re-indent under `providers.claude:` plus one
+`kind: claude-cli` line, three times: `workflow/WORKFLOW.base.md`,
+`workflow/stances/WORKFLOW.prototype.md`, and the composed
+`projects/switchboard-self/WORKFLOW.md`.
+
+This removes a config *shape*, not a capability. Codex support,
+`routing.weights`, `MixedRunnerSelector`, the provider circuit, and `AgDR-046`'s
+typed provider codes are all untouched. `mixed()`'s legacy-block refusal is
+deliberately kept: it is now unreachable by construction, and has no reachable
+production trigger.
+
+Rationale, rejected options, and blast radius: `AgDR-2026-08-29-retire-the-legacy-claude-block`.

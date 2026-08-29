@@ -113,6 +113,17 @@ class CodexRunner:
         self.max_budget_usd: float | None = None
 
     def _build_argv(self, resume_session_id: str | None) -> list[str]:
+        """Codex's argv carries NO guard: there is no `--settings`/hook flag
+        here because the Codex CLI exposes no PreToolUse-equivalent veto we
+        have been able to verify (issue #135 / AgDR-2026-08-29-codex-has-no-guard-surface-so-dispatch-refuses). The Claude adapter
+        materializes `guard.py` every turn (`runner._write_guard_settings`);
+        this one has nothing to materialize it into, so none of the enumerated
+        Gate-C shapes are denied in a Codex session.
+
+        The compensating control is at dispatch, not here:
+        `runner_selector._codex_runner` refuses to construct this adapter for a
+        project whose stance hands Gate C to an agent. If a Codex guard surface
+        is ever found, that refusal is what should be revisited."""
         argv = shlex.split(self.cfg.command)
         if not argv:
             raise ValueError("codex command must not be empty")

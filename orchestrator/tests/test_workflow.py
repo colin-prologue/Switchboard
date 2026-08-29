@@ -87,10 +87,12 @@ def test_duplicate_yaml_mapping_key_raises_parse_error(tmp_path: Path):
     p = tmp_path / "WORKFLOW.md"
     p.write_text(
         "---\n"
-        "claude:\n"
-        "  command: first\n"
-        "claude:\n"
-        "  command: second\n"
+        "providers:\n"
+        "  claude:\n"
+        "    command: first\n"
+        "providers:\n"
+        "  claude:\n"
+        "    command: second\n"
         "---\n"
         "body\n"
     )
@@ -100,19 +102,21 @@ def test_duplicate_yaml_mapping_key_raises_parse_error(tmp_path: Path):
 
     assert exc_info.value.code == "workflow_parse_error"
     assert "duplicate key" in str(exc_info.value)
-    assert "claude" in str(exc_info.value)
+    assert "providers" in str(exc_info.value)
 
 
-def test_yaml_merge_override_remains_valid_for_legacy_workflow(tmp_path: Path):
+def test_yaml_merge_override_remains_valid_for_provider_workflow(tmp_path: Path):
     p = tmp_path / "WORKFLOW.md"
     p.write_text(
         "---\n"
         "claude_defaults: &claude_defaults\n"
+        "  kind: claude-cli\n"
         "  command: inherited\n"
         "  max_turns: 20\n"
-        "claude:\n"
-        "  <<: *claude_defaults\n"
-        "  command: overridden\n"
+        "providers:\n"
+        "  claude:\n"
+        "    <<: *claude_defaults\n"
+        "    command: overridden\n"
         "---\n"
         "body\n"
     )
@@ -453,13 +457,21 @@ def test_claude_defaults(tmp_path: Path):
 
 def test_claude_command_preserved_as_shell_string(tmp_path: Path):
     cmd = "claude -p --output-format stream-json --allowedTools 'Bash(git:*)'"
-    defn = WorkflowDefinition(config={"claude": {"command": cmd}}, prompt_template="")
+    defn = WorkflowDefinition(
+        config={"providers": {"claude": {"kind": "claude-cli", "command": cmd}}},
+        prompt_template="",
+    )
     cfg = Config(defn, tmp_path)
     assert cfg.claude().command == cmd
 
 
 def test_claude_max_budget_usd_float(tmp_path: Path):
-    defn = WorkflowDefinition(config={"claude": {"max_budget_usd": 5}}, prompt_template="")
+    defn = WorkflowDefinition(
+        config={
+            "providers": {"claude": {"kind": "claude-cli", "max_budget_usd": 5}}
+        },
+        prompt_template="",
+    )
     cfg = Config(defn, tmp_path)
     assert cfg.claude().max_budget_usd == 5.0
     assert isinstance(cfg.claude().max_budget_usd, float)
@@ -576,9 +588,13 @@ def test_codex_config_rejects_legacy_mixed_or_malformed_forms(
     assert exc_info.value.code == error_code
 
 
-def test_equivalent_legacy_and_provider_claude_blocks_are_accepted(tmp_path: Path):
-    defn = WorkflowDefinition(
-        config={
+@pytest.mark.parametrize(
+    "config",
+    [
+        # Legacy-only: the shape AgDR-017 kept alive and AgDR-2026-08-29-retire-the-legacy-claude-block retired.
+        {"claude": {"command": "claude -p"}},
+        # Legacy beside the envelope: what the dual-read used to reconcile.
+        {
             "claude": {"command": "claude -p"},
             "providers": {
                 "claude": {
@@ -588,23 +604,67 @@ def test_equivalent_legacy_and_provider_claude_blocks_are_accepted(tmp_path: Pat
                 }
             },
         },
-        prompt_template="",
-    )
+        # Legacy beside a *conflicting* envelope: this used to be the only
+        # rejected combination (conflicting_provider_config). It is now
+        # rejected for the same reason as the equivalent one — the block
+        # itself, not the disagreement.
+        {
+            "claude": {"command": "claude -p", "max_turns": 20},
+            "providers": {
+                "claude": {
+                    "kind": "claude-cli",
+                    "command": "claude -p",
+                    "max_turns": 30,
+                }
+            },
+        },
+        # A non-map legacy block used to be coerced to defaults, not refused.
+        {"claude": "not-a-map"},
+    ],
+)
+def test_legacy_top_level_claude_block_is_rejected(tmp_path: Path, config: dict):
+    """AgDR-2026-08-29-retire-the-legacy-claude-block: the legacy shape is refused by name, never read.
 
-    assert Config(defn, tmp_path).claude().max_turns == 20
+    The message must name the migration — a bare parse error would leave an
+    operator guessing that a block which worked yesterday is now a typo.
+    """
+    cfg = Config(WorkflowDefinition(config=config, prompt_template=""), tmp_path)
+
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.claude()
+
+    assert exc_info.value.code == "unsupported_provider_id"
+    message = str(exc_info.value)
+    assert "providers.claude" in message
+    assert "kind: claude-cli" in message
 
 
-def test_legacy_claude_coercions_remain_unchanged(tmp_path: Path):
+def test_legacy_claude_coercions_are_gone_with_the_legacy_block(tmp_path: Path):
+    """The lenient parse existed only for the legacy block; both are gone.
+
+    A non-string command and a boolean budget silently became defaults under
+    the legacy block. In the envelope they are parse errors.
+    """
     cfg = Config(
         WorkflowDefinition(
-            config={"claude": {"command": 42, "max_budget_usd": True}},
+            config={
+                "providers": {
+                    "claude": {
+                        "kind": "claude-cli",
+                        "command": 42,
+                        "max_budget_usd": True,
+                    }
+                }
+            },
             prompt_template="",
         ),
         tmp_path,
     )
 
-    assert cfg.claude().command == "claude -p --verbose --output-format stream-json"
-    assert cfg.claude().max_budget_usd is None
+    with pytest.raises(WorkflowError) as exc_info:
+        cfg.claude()
+
+    assert exc_info.value.code == "workflow_parse_error"
 
 
 @pytest.mark.parametrize(
@@ -636,27 +696,23 @@ def test_provider_claude_rejects_malformed_or_unknown_fields(
     assert "providers.claude" in str(exc_info.value)
 
 
-def test_conflicting_legacy_and_provider_claude_blocks_fail(tmp_path: Path):
-    defn = WorkflowDefinition(
-        config={
-            "claude": {"command": "claude -p", "max_turns": 20},
-            "providers": {
-                "claude": {
-                    "kind": "claude-cli",
-                    "command": "claude -p",
-                    "max_turns": 30,
-                }
-            },
-        },
-        prompt_template="",
+def test_no_execution_block_still_resolves_to_defaults(tmp_path: Path):
+    """AgDR-2026-08-29-retire-the-legacy-claude-block removed a config *shape*, not the optionality of the block.
+
+    A workflow with no `providers:` key is the absence of configuration, which
+    has always meant "take the defaults" — distinct from the legacy shape. It
+    must resolve to exactly what an all-default envelope resolves to.
+    """
+    empty = Config(WorkflowDefinition(config={}, prompt_template=""), tmp_path)
+    envelope = Config(
+        WorkflowDefinition(
+            config={"providers": {"claude": {"kind": "claude-cli"}}},
+            prompt_template="",
+        ),
+        tmp_path,
     )
 
-    with pytest.raises(WorkflowError) as exc_info:
-        Config(defn, tmp_path).claude()
-
-    assert exc_info.value.code == "conflicting_provider_config"
-    assert "claude" in str(exc_info.value)
-    assert "providers.claude" in str(exc_info.value)
+    assert empty.claude() == envelope.claude()
 
 
 @pytest.mark.parametrize(
@@ -938,7 +994,7 @@ def test_validate_dispatch_empty_claude_command(tmp_path: Path):
     defn = WorkflowDefinition(
         config={
             "tracker": {"kind": "github", "repo": "acme/widgets", "api_key": "literal-token"},
-            "claude": {"command": "   "},
+            "providers": {"claude": {"kind": "claude-cli", "command": "   "}},
         },
         prompt_template="",
     )
@@ -988,6 +1044,8 @@ def test_real_workflow_base_file_loads_after_placeholder_substitution(tmp_path: 
         .replace("{{WORKSPACE_ROOT}}", "/tmp/symphony_workspaces/acme-widgets")
         .replace("{{MAX_AGENTS}}", "10")
         .replace("{{CONVENTION_ROOT}}", "")
+        .replace("{{OPERATOR_LOGIN_YAML}}", "")
+        .replace("{{REVIEW_BOT_YAML}}", "")
     )
     p = tmp_path / "WORKFLOW.md"
     p.write_text(substituted)
@@ -1023,6 +1081,8 @@ def test_decision_is_not_an_active_state(tmp_path: Path):
         .replace("{{WORKSPACE_ROOT}}", "/tmp/symphony_workspaces/acme-widgets")
         .replace("{{MAX_AGENTS}}", "10")
         .replace("{{CONVENTION_ROOT}}", "")
+        .replace("{{OPERATOR_LOGIN_YAML}}", "")
+        .replace("{{REVIEW_BOT_YAML}}", "")
     )
     p = tmp_path / "WORKFLOW.md"
     p.write_text(substituted)
@@ -1058,15 +1118,34 @@ def test_active_states_line_is_byte_identical_in_base_and_composed():
 
 
 def _parse_env(path: Path) -> dict[str, str]:
-    """Parse a project.env (KEY=value lines; ignore comments/blanks)."""
+    """Parse a project.env (KEY=value lines; ignore comments/blanks).
+
+    Values may be shell-quoted — register-project.sh single-quotes every value
+    it persists, because run-project.sh SOURCES this file — so the quotes are
+    stripped here the way sourcing would.
+    """
     env: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        env[key.strip()] = value.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        env[key.strip()] = value
     return env
+
+
+def _yaml_login(value: str) -> str:
+    """The empty-stays-`[]` derivation the three recomposers share (issue #171).
+
+    `register-project.sh`, `verify-setup.sh` and `freshness-preflight.sh` each
+    carry their own copy in shell; this is the fourth. Unset composes to nothing
+    between the brackets — `[]`, never `[""]`, which would match a bot named
+    empty-string.
+    """
+    return f'"{value}"' if value else ""
 
 
 def test_base_and_composed_workflow_are_in_sync():
@@ -1094,6 +1173,13 @@ def test_base_and_composed_workflow_are_in_sync():
         .replace("{{WORKSPACE_ROOT}}", env["SB_WORKSPACE_ROOT"])
         .replace("{{MAX_AGENTS}}", max_agents)
         .replace("{{CONVENTION_ROOT}}", env["SB_CONVENTION_ROOT"])
+        .replace(
+            "{{OPERATOR_LOGIN_YAML}}",
+            _yaml_login(env.get("SB_OPERATOR_LOGIN", "")),
+        )
+        .replace(
+            "{{REVIEW_BOT_YAML}}", _yaml_login(env.get("SB_REVIEW_BOT", ""))
+        )
     )
 
     assert substituted == composed_text, (
@@ -1175,25 +1261,94 @@ def test_workflow_prompt_pins_in_brief_block():
         )
 
 
-# --- decision-record numbering (self/.decisions) -------------------------------
+# --- decision-record naming (self/.decisions) ----------------------------------
 #
-# Parallel worker sessions each pick "next free AgDR number on their own branch",
-# so two branches can mint the same number and both merge green (each passes in
-# isolation). This test can't stop the collision pre-merge, but it turns the
-# merged result into a red suite immediately instead of silent duplicate IDs —
-# same posture as the base<->composed conformance test above.
+# Records used to be numbered, and parallel worker sessions each picked "next free
+# AgDR number on their own branch" — so two branches minted the same number and
+# both merged green (each passed in isolation). Issue #154 removed the allocator
+# rather than guarding it: new records are `AgDR-YYYY-MM-DD-<slug>.md`, which
+# cannot collide unless two sessions decide the same thing on the same day, and
+# that collision is a real duplicate worth reporting.
+#
+# Legacy numbered records are frozen, not renamed (the seam is self-describing: a
+# number means pre-changeover), so this test carries both forms and keeps the
+# uniqueness backstop for each in its own key space.
+
+# Every numbered record on `main` at the #154 changeover. Frozen: these names are
+# cited from prose, code comments, and docstrings across the repo, so renaming one
+# silently breaks references no test would catch.
+LEGACY_NUMBERED_RECORDS = frozenset(
+    {
+        "ADR-000-repair-and-rederivation.md",
+        "AgDR-001-python-asyncio-single-process.md",
+        "AgDR-002-session-cap-parking.md",
+        "AgDR-003-reload-mtime-polling.md",
+        "AgDR-004-permission-posture.md",
+        "AgDR-005-role-pinned-sessions.md",
+        "AgDR-006-triage-as-active-state.md",
+        "AgDR-007-triage-pass-agent-promotion.md",
+        "AgDR-008-durable-park-label.md",
+        "AgDR-009-github-app-identity.md",
+        "AgDR-010-in-progress-claim-visibility.md",
+        "AgDR-011-config-driven-dispatch-marker-guard.md",
+        "AgDR-012-graph-review-phasing.md",
+        "AgDR-013-worker-turn-budget-cold-start.md",
+        "AgDR-014-drafting-quality-at-scaffold-and-rubric.md",
+        "AgDR-015-triage-native-dependency-edge-check.md",
+        "AgDR-016-subscription-first-codex-auth.md",
+        "AgDR-017-dual-read-provider-config.md",
+        "AgDR-018-dispatch-time-runner-selection.md",
+        "AgDR-019-standalone-codex-cli-adapter.md",
+        "AgDR-020-opt-in-codex-process-mode.md",
+        "AgDR-021-codex-canary-python-command.md",
+        "AgDR-022-native-terminal-codex-canary-launch.md",
+        "AgDR-023-stage6-mixed-routing-policy.md",
+        "AgDR-024-deterministic-nonzero-codex-canary.md",
+        "AgDR-025-provider-observability-taxonomy.md",
+        "AgDR-026-provider-circuit-and-no-retry-burn.md",
+        "AgDR-027-incomplete-turn-continuation.md",
+        "AgDR-028-orchestrator-owned-terminal-handoff.md",
+        "AgDR-029-self-pilot-separate-binding.md",
+        "AgDR-030-codex-error-events-are-non-terminal.md",
+        "AgDR-031-needs-decision-verdict-and-body-hash-fastpath.md",
+        "AgDR-032-is-error-outcome-gate.md",
+        "AgDR-033-per-role-session-budgets.md",
+        "AgDR-034-fold-signal-detection-binding-and-visibility.md",
+        "AgDR-035-fold-apply-marker-first-idempotency.md",
+        "AgDR-036-worker-merge-guard-enumerated-deny.md",
+        "AgDR-037-review-response-reuses-existing-state-and-edge.md",
+        "AgDR-038-in-brief-plain-language-block.md",
+        "AgDR-039-per-project-stance-ladder.md",
+        "AgDR-040-cross-model-review-by-artifact.md",
+        "AgDR-041-runtime-freshness-preflight.md",
+        "AgDR-042-orchestrator-singleton-flock.md",
+        "AgDR-043-gate-c-owner-is-a-stance-property.md",
+        "AgDR-044-status-board-sync-arbitration.md",
+        "AgDR-045-gate-states-are-declared-not-inferred.md",
+        "AgDR-046-typed-provider-codes-and-latch-notice.md",
+        "AgDR-047-fail-review-episode-is-bounded-by-a-durable-marker.md",
+        "AgDR-048-single-operator-multi-project.md",
+    }
+)
 
 
 def test_decision_record_numbers_are_unique_and_match_headings():
     decisions = Path(__file__).resolve().parents[2] / "self" / ".decisions"
-    pattern = re.compile(r"^(ADR|AgDR)-(\d+)-.+\.md$")
-    # Sweeps are dated, not numbered: they record a re-reading of the numbered
-    # records rather than a new decision, so they take no number and cannot
-    # collide (issue #154 is about number collisions). Heading is still pinned.
+    # Dated first: `AgDR-2026-08-29-slug.md` also satisfies the legacy regex (the
+    # year reads as a number), so trying legacy first would mis-parse every new
+    # record as `AgDR-2026`.
+    dated = re.compile(r"^(ADR|AgDR)-(\d{4}-\d{2}-\d{2})-(.+)\.md$")
+    numbered = re.compile(r"^(ADR|AgDR)-(\d+)-.+\.md$")
+    # Sweeps are dated, not numbered: they record a re-reading of the decision
+    # records rather than a new decision. Predates the #154 changeover and is the
+    # form it copied. Heading is pinned differently ("# Sweep <date>").
     sweep = re.compile(r"^SWEEP-(\d{4}-\d{2}-\d{2})-.+\.md$")
 
-    seen: dict[tuple[str, int], str] = {}
+    seen_numbers: dict[tuple[str, int], str] = {}
+    seen_dated: dict[tuple[str, str, str], str] = {}
     for path in sorted(decisions.glob("*.md")):
+        if path.name == "README.md":  # the citation convention, not a record
+            continue
         if sw := sweep.match(path.name):
             heading = path.read_text(encoding="utf-8").splitlines()[0]
             assert heading.startswith(f"# Sweep {sw.group(1)}"), (
@@ -1201,23 +1356,90 @@ def test_decision_record_numbers_are_unique_and_match_headings():
                 f"filename's date {sw.group(1)}"
             )
             continue
-        m = pattern.match(path.name)
+        if d := dated.match(path.name):
+            # Exact-name duplicates are impossible on a filesystem; the key is
+            # casefolded so a slug that differs only in case still trips.
+            key = (d.group(1), d.group(2), d.group(3).casefold())
+            assert key not in seen_dated, (
+                f"duplicate {d.group(1)}-{d.group(2)}-{d.group(3)}: "
+                f"{seen_dated[key]} and {path.name}. Two sessions recorded the "
+                "same decision on the same day — merge them, or distinguish the "
+                "slugs if they are genuinely different decisions."
+            )
+            seen_dated[key] = path.name
+
+            heading = path.read_text(encoding="utf-8").splitlines()[0]
+            assert heading.startswith(f"# {d.group(1)}-{d.group(2)}"), (
+                f"{path.name}: H1 heading {heading!r} does not carry the "
+                f"filename's date {d.group(1)}-{d.group(2)}"
+            )
+            continue
+        m = numbered.match(path.name)
         assert m, (
-            f"{path.name}: does not match (ADR|AgDR)-NNN-<slug>.md "
+            f"{path.name}: does not match (ADR|AgDR)-YYYY-MM-DD-<slug>.md "
+            f"(the current form), (ADR|AgDR)-NNN-<slug>.md (legacy, frozen), "
             f"or SWEEP-YYYY-MM-DD-<slug>.md"
         )
-        key = (m.group(1), int(m.group(2)))
-        assert key not in seen, (
-            f"duplicate {m.group(1)}-{m.group(2)}: {seen[key]} and {path.name}. "
-            "A parallel branch minted the same number — renumber the later-merged "
-            "file to the next free number and update its cross-references."
+        assert path.name in LEGACY_NUMBERED_RECORDS, (
+            f"{path.name}: new records are dated, not numbered — name it "
+            f"{m.group(1)}-YYYY-MM-DD-<slug>.md (issue #154). Numbering was "
+            "dropped because parallel branches allocate the same next-free number."
         )
-        seen[key] = path.name
+        key = (m.group(1), int(m.group(2)))
+        assert key not in seen_numbers, (
+            f"duplicate {m.group(1)}-{m.group(2)}: {seen_numbers[key]} and "
+            f"{path.name}."
+        )
+        seen_numbers[key] = path.name
 
         heading = path.read_text(encoding="utf-8").splitlines()[0]
         assert heading.startswith(f"# {m.group(1)}-{m.group(2)}"), (
             f"{path.name}: H1 heading {heading!r} does not carry the filename's "
             f"number {m.group(1)}-{m.group(2)} (renumbered file without its heading?)"
+        )
+
+
+def test_legacy_numbered_records_are_not_renamed():
+    """The changeover freezes the numbered records; it does not renumber them.
+
+    Their names are cited across prose, code comments, and docstrings, so a
+    well-meaning "let's finish the migration" rename would break references
+    nothing else checks. Deleting a record is equally out of bounds — the point
+    of the corpus is that superseded decisions stay readable.
+    """
+    decisions = Path(__file__).resolve().parents[2] / "self" / ".decisions"
+    present = {path.name for path in decisions.glob("*.md")}
+    missing = sorted(LEGACY_NUMBERED_RECORDS - present)
+    assert not missing, (
+        f"legacy numbered record(s) renamed or deleted: {missing}. The #154 "
+        "changeover freezes them as-is — a number means pre-changeover. New "
+        "records get a date; old ones keep their number."
+    )
+
+
+def test_workflow_prompts_mint_dated_decision_records():
+    """The mint instruction is the surface that actually names records.
+
+    The uniqueness test above is a backstop that fires after a bad name is
+    already committed; this line is what stops one being written. If it says
+    "next free NNN", workers allocate numbers no matter what the corpus
+    convention is — so pin it in every prompt that carries the rule, including
+    the codex pilot variant, which the base<->composed sync test does not cover.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    for rel in (
+        "workflow/WORKFLOW.base.md",
+        "projects/switchboard-self/WORKFLOW.md",
+        "projects/switchboard-self/WORKFLOW.pilot-codex.md",
+    ):
+        text = (repo_root / rel).read_text(encoding="utf-8")
+        assert ".decisions/AgDR-YYYY-MM-DD-<slug>.md" in text, (
+            f"{rel}: worker rule for recording decisions no longer mints the "
+            "dated form (issue #154)"
+        )
+        assert "next free NNN" not in text, (
+            f"{rel}: still instructs workers to allocate a sequential number — "
+            "that allocator is what #154 removed"
         )
 
 
@@ -1395,7 +1617,11 @@ def test_validate_dispatch_forces_fold_validation(tmp_path: Path, monkeypatch):
 
 
 def _real_base_config(tmp_path: Path, name: str = "WORKFLOW.md") -> Config:
-    """The committed `WORKFLOW.base.md`, scaffold placeholders substituted."""
+    """The committed `WORKFLOW.base.md` composed for a project that named
+    NEITHER an operator nor a review bot — i.e. what registration produces from
+    an unset `SB_OPERATOR_LOGIN`/`SB_REVIEW_BOT` (issue #171). Both login
+    placeholders collapse to the empty string, so both lists compose to `[]`,
+    which is the default the two tests below pin."""
     real_path = Path(__file__).resolve().parents[2] / "workflow" / "WORKFLOW.base.md"
     substituted = (
         real_path.read_text(encoding="utf-8")
@@ -1403,6 +1629,8 @@ def _real_base_config(tmp_path: Path, name: str = "WORKFLOW.md") -> Config:
         .replace("{{WORKSPACE_ROOT}}", "/tmp/ws")
         .replace("{{MAX_AGENTS}}", "10")
         .replace("{{CONVENTION_ROOT}}", "")
+        .replace("{{OPERATOR_LOGIN_YAML}}", "")
+        .replace("{{REVIEW_BOT_YAML}}", "")
     )
     p = tmp_path / name
     p.write_text(substituted)
@@ -1410,8 +1638,10 @@ def _real_base_config(tmp_path: Path, name: str = "WORKFLOW.md") -> Config:
 
 
 def test_real_workflow_base_declares_an_empty_fold_allowlist(tmp_path: Path):
-    """The scaffold ships detection OFF: an allowlist nobody vetted must never
-    grant fold authority by default."""
+    """The scaffold ships detection OFF for a project that names no operator:
+    an allowlist nobody vetted must never grant fold authority by default. The
+    placeholder (issue #171) makes the value settable per project; it does not
+    make it default to anything."""
     assert _real_base_config(tmp_path).fold().operator_logins == ()
 
 
@@ -1498,23 +1728,40 @@ def test_validate_dispatch_forces_review_response_validation(
 
 
 def test_real_workflow_base_ships_the_response_loop_disabled(tmp_path: Path):
-    """SHIPPED CONFIG AC: the loop lands DISABLED, dead code by design.
+    """SHIPPED CONFIG AC: the loop lands DISABLED for a project that named no
+    review bot, dead code by design.
 
-    Going live is a deliberate post-merge config edit, never a merge side
-    effect — and with no `bot_logins` no trigger fires, so no round marker is
-    ever written and the prompt addendum stays inert too.
+    Going live is a deliberate config edit, never a merge side effect — since
+    issue #171 that edit is `SB_REVIEW_BOT` in the project's own binding, and an
+    unset variable composes to `[]` exactly as the literal did. With no
+    `bot_logins` no trigger fires, so no round marker is ever written and the
+    prompt addendum stays inert too.
     """
     assert _real_base_config(tmp_path).review_response().bot_logins == ()
 
 
-def test_composed_self_workflow_ships_the_response_loop_disabled(tmp_path: Path):
+def test_composed_self_workflow_enables_both_login_driven_loops(tmp_path: Path):
     """The OTHER carrying file. `projects/switchboard-self/WORKFLOW.md` is the
-    composed copy the live instance actually loads; shipping it enabled would
-    activate the loop on merge regardless of what the base template says."""
+    composed copy the live instance actually loads, and both loops short-circuit
+    on an empty list before any GitHub read — so an empty allowlist here is a
+    feature that cannot be switched on, not a feature that is off.
+
+    Supersedes `test_composed_self_workflow_ships_the_response_loop_disabled`
+    (issue #43), which asserted `bot_logins == ()` for this same file. That
+    assertion was right while the only way to set the field was hand-editing a
+    shared template; issue #171 moves the opt-in to this project's tracked
+    `project.env`, so merging THAT is the deliberate config edit AgDR-037 asks
+    for. See `self/.decisions/AgDR-2026-08-29-login-config-is-a-project-binding-login-config-is-a-project-binding.md`.
+
+    Exact tuples, not "non-empty": a malformed one-element list matches nobody
+    and would leave both loops as inert as an empty one.
+    """
     real = Path(__file__).resolve().parents[2] / "projects" / "switchboard-self"
     p = tmp_path / "WORKFLOW.md"
     p.write_text((real / "WORKFLOW.md").read_text(encoding="utf-8"))
-    assert Config(load_workflow(p), tmp_path).review_response().bot_logins == ()
+    cfg = Config(load_workflow(p), tmp_path)
+    assert cfg.fold().operator_logins == ("colin-prologue",)
+    assert cfg.review_response().bot_logins == ("chatgpt-codex-connector",)
 
 
 def test_review_response_rejects_logins_that_break_the_marker_grammar(tmp_path: Path):
