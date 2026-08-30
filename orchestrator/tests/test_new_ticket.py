@@ -124,22 +124,159 @@ def test_dry_run_maps_all_flags_to_payload() -> None:
     assert "second line" in out
 
 
-def test_dry_run_defaults_entry_to_triage() -> None:
-    proc = run("--dry-run", "--title", "T", "--repo", "o/n")
+# --- entry resolution: the target project's active_states (issue #176) --------
+#
+# `--entry` has no fixed default any more. A fixed one composed with the
+# `register-project.sh` stance default into a `status:triage` ticket on a
+# project that never dispatches triage — never picked up, and silently so. The
+# default is now READ from the project the repo is bound to.
+#
+# Fake fidelity: the fixture projects carry the REAL stance templates as their
+# composed WORKFLOW.md, not a hand-written `active_states` line. A fixture that
+# restated the state lists would keep passing the day a stance changes them.
+
+
+def _project(sb_home: Path, slug: str, repo: str, template: Path) -> Path:
+    proj = sb_home / "projects" / slug
+    proj.mkdir(parents=True)
+    (proj / "project.env").write_text(
+        f"SB_PROJECT_SLUG={slug}\nSB_GITHUB_REPO={repo}\nSB_BASE_BRANCH=main\n"
+    )
+    (proj / "WORKFLOW.md").write_text(template.read_text())
+    return proj
+
+
+PROTOTYPE_TEMPLATE = REPO_ROOT / "workflow" / "stances" / "WORKFLOW.prototype.md"
+BASE_TEMPLATE = REPO_ROOT / "workflow" / "WORKFLOW.base.md"
+
+
+@pytest.fixture()
+def sb_home(tmp_path: Path) -> Path:
+    """An SB_HOME with one prototype-shaped and one base-shaped project bound."""
+    home = tmp_path / "sb"
+    _project(home, "protoproj", "acme/proto", PROTOTYPE_TEMPLATE)
+    _project(home, "baseproj", "acme/base", BASE_TEMPLATE)
+    return home
+
+
+def run_in(sb_home: Path, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(SCRIPT), *args],
+        input=stdin, capture_output=True, text=True, cwd=REPO_ROOT,
+        env={**os.environ, "SB_HOME": str(sb_home)},
+    )
+
+
+def test_default_entry_on_base_project_is_triage(sb_home: Path) -> None:
+    # Criterion 6: base behaviour is unchanged — no --entry still means triage,
+    # and triage carries no gate:triage-passed stamp (a verifier grants that).
+    proc = run_in(sb_home, "--dry-run", "--title", "T", "--repo", "acme/base")
     assert proc.returncode == 0, proc.stderr
     assert "labels:     status:triage" in proc.stdout
+    assert "gate:triage-passed" not in proc.stdout
+
+
+def test_default_entry_on_prototype_project_is_dispatchable(sb_home: Path) -> None:
+    # The bug: prototype dispatches todo/in progress/review and never triage, so
+    # the default must land on a state the project actually moves.
+    proc = run_in(sb_home, "--dry-run", "--title", "T", "--repo", "acme/proto")
+    assert proc.returncode == 0, proc.stderr
+    assert "labels:     status:todo,gate:triage-passed" in proc.stdout
+    assert "entry:      todo (resolved from active_states)" in proc.stdout
+
+
+def test_dry_run_names_the_resolved_source_and_state_set(sb_home: Path) -> None:
+    # Criterion 1's checkable form: the resolution is observable, not implied.
+    proc = run_in(sb_home, "--dry-run", "--title", "T", "--repo", "acme/proto")
+    assert proc.returncode == 0, proc.stderr
+    assert "project:    protoproj" in proc.stdout
+    assert str(sb_home / "projects" / "protoproj" / "WORKFLOW.md") in proc.stdout
+    assert "dispatches: todo, in progress, review" in proc.stdout
+
+
+def test_unresolvable_project_refuses_rather_than_defaulting(sb_home: Path) -> None:
+    # Criterion 2: never a silent fall-through to triage.
+    proc = run_in(sb_home, "--dry-run", "--title", "T", "--repo", "nobody/unbound")
+    assert proc.returncode != 0
+    assert "status:triage" not in proc.stdout
+    assert "--entry" in proc.stderr
+    assert "nobody/unbound" in proc.stderr
+
+
+def test_ambiguous_binding_refuses(tmp_path: Path) -> None:
+    # Two bindings for one repo: first-match would file against a state machine
+    # the scheduler may not be the one using.
+    home = tmp_path / "sb"
+    _project(home, "one", "acme/dup", BASE_TEMPLATE)
+    _project(home, "two", "acme/dup", PROTOTYPE_TEMPLATE)
+    proc = run_in(home, "--dry-run", "--title", "T", "--repo", "acme/dup")
+    assert proc.returncode != 0
+    assert "ambiguous" in proc.stderr
+    assert "--entry" in proc.stderr
+
+
+def test_binding_without_composed_workflow_refuses(tmp_path: Path) -> None:
+    home = tmp_path / "sb"
+    proj = _project(home, "halfway", "acme/half", BASE_TEMPLATE)
+    (proj / "WORKFLOW.md").unlink()
+    proc = run_in(home, "--dry-run", "--title", "T", "--repo", "acme/half")
+    assert proc.returncode != 0
+    assert "WORKFLOW.md" in proc.stderr
+    assert "--entry" in proc.stderr
+
+
+def test_explicit_entry_survives_a_failed_resolution(sb_home: Path) -> None:
+    # The refusal above names --entry as the fix, so --entry must still work on
+    # exactly the path that refused. Otherwise the advice is a dead end.
+    proc = run_in(sb_home, "--dry-run", "--title", "T", "--repo", "nobody/unbound",
+                  "--entry", "todo")
+    assert proc.returncode == 0, proc.stderr
+    assert "labels:     status:todo,gate:triage-passed" in proc.stdout
+    assert "entry:      todo (explicit)" in proc.stdout
+
+
+def test_explicit_undispatchable_entry_is_refused(sb_home: Path) -> None:
+    # Criterion 5: the explicit case must not be silently worse than the default.
+    proc = run_in(sb_home, "--dry-run", "--title", "T", "--repo", "acme/proto",
+                  "--entry", "triage")
+    assert proc.returncode != 0
+    assert "dispatches: todo, in progress, review" in proc.stderr
+    assert "todo" in proc.stderr
+
+
+def test_explicit_gate_entry_is_allowed_where_the_stance_gates_it(sb_home: Path) -> None:
+    # `drafting` is not dispatched at base either — it is a declared GATE, where
+    # a ticket legitimately waits for a human. Refusing it would break Gate A.
+    proc = run_in(sb_home, "--dry-run", "--title", "T", "--repo", "acme/base",
+                  "--entry", "drafting")
+    assert proc.returncode == 0, proc.stderr
+    assert "labels:     status:drafting" in proc.stdout
+
+
+def test_bash_resolution_agrees_with_workflow_for_repo() -> None:
+    # The invariant that keeps the bash mirror from becoming a second, drifting
+    # repo->project map (AgDR-043): for a real binding, both must name the same
+    # composed WORKFLOW.md.
+    from orchestrator import status_board
+
+    expected = status_board.workflow_for_repo("colin-prologue/Switchboard")
+    assert expected is not None, "switchboard-self binding missing from projects/"
+    proc = run("--dry-run", "--title", "T", "--repo", "colin-prologue/Switchboard")
+    assert proc.returncode == 0, proc.stderr
+    assert f"workflow:   {expected}" in proc.stdout
 
 
 def test_dry_run_body_from_file(tmp_path: Path) -> None:
     body = tmp_path / "body.md"
     body.write_text("## Intent\n\nfrom a file\n")
-    proc = run("--dry-run", "--title", "T", "--repo", "o/n", "--body-file", str(body))
+    proc = run("--dry-run", "--title", "T", "--repo", "o/n", "--entry", "todo",
+               "--body-file", str(body))
     assert proc.returncode == 0, proc.stderr
     assert "from a file" in proc.stdout
 
 
 def test_dry_run_omitted_optionals_render_as_none() -> None:
-    proc = run("--dry-run", "--title", "T", "--repo", "o/n")
+    proc = run("--dry-run", "--title", "T", "--repo", "o/n", "--entry", "todo")
     assert proc.returncode == 0, proc.stderr
     assert "milestone:  (none)" in proc.stdout
     assert "blocked-by: (none)" in proc.stdout
@@ -154,7 +291,7 @@ def test_dry_run_makes_no_network_write(tmp_path: Path) -> None:
     fake_gh.chmod(0o755)
     env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
     proc = subprocess.run(
-        ["bash", str(SCRIPT), "--dry-run", "--title", "T", "--repo", "o/n"],
+        ["bash", str(SCRIPT), "--dry-run", "--title", "T", "--repo", "o/n", "--entry", "todo"],
         capture_output=True, text=True, cwd=REPO_ROOT, env=env,
     )
     assert proc.returncode == 0, proc.stderr
@@ -165,7 +302,8 @@ def test_dry_run_makes_no_network_write(tmp_path: Path) -> None:
 def test_scaffold_output_is_valid_dry_run_body() -> None:
     # The skeleton --scaffold emits should feed straight back in as a body.
     scaffold = run("--scaffold")
-    proc = run("--dry-run", "--title", "T", "--repo", "o/n", stdin=scaffold.stdout)
+    proc = run("--dry-run", "--title", "T", "--repo", "o/n", "--entry", "todo",
+               stdin=scaffold.stdout)
     assert proc.returncode == 0, proc.stderr
     for section in ("## In brief", "## Intent", "## Acceptance criteria", "## Non-goals", "## Assumptions"):
         assert section in proc.stdout
@@ -209,7 +347,7 @@ def test_real_filing_no_milestone_reaches_gh(tmp_path: Path) -> None:
     # expansion must not trip `set -u`. Reproduces #... on bash 3.2.
     env, arglog = _gh_stub(tmp_path)
     proc = subprocess.run(
-        ["bash", str(SCRIPT), "--title", "T", "--repo", "owner/name"],
+        ["bash", str(SCRIPT), "--title", "T", "--repo", "owner/name", "--entry", "todo"],
         input="body text\n", capture_output=True, text=True, cwd=REPO_ROOT, env=env,
     )
     assert proc.returncode == 0, f"real filing aborted: {proc.stderr}"
@@ -225,7 +363,7 @@ def test_real_filing_with_milestone_forwards_flag(tmp_path: Path) -> None:
     # array must still forward `--milestone <name>` to `gh issue create`.
     env, arglog = _gh_stub(tmp_path)
     proc = subprocess.run(
-        ["bash", str(SCRIPT), "--title", "T", "--repo", "owner/name",
+        ["bash", str(SCRIPT), "--title", "T", "--repo", "owner/name", "--entry", "todo",
          "--milestone", "Sprint 3"],
         input="body text\n", capture_output=True, text=True, cwd=REPO_ROOT, env=env,
     )
@@ -261,7 +399,8 @@ def test_invalid_entry_state_rejected() -> None:
 
 
 def test_non_numeric_blocked_by_rejected() -> None:
-    proc = run("--dry-run", "--title", "T", "--repo", "o/n", "--blocked-by", "12,abc")
+    proc = run("--dry-run", "--title", "T", "--repo", "o/n", "--entry", "todo",
+               "--blocked-by", "12,abc")
     assert proc.returncode != 0
     assert "blocked-by" in proc.stderr.lower()
 

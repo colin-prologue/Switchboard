@@ -47,6 +47,17 @@ from .types import (
 MAX_LINE_BYTES = 10 * 1024 * 1024  # core §10.1
 STDERR_TAIL_CHARS = 500
 NOTIFICATION_TEXT_CHARS = 200
+RESULT_TEXT_CHARS = 4000  # issue #16: bound on TurnResult.text
+
+# issue #16, the tool-SUBTRACTION mechanism. The operator's `command` already
+# carries `--allowedTools`, and `_build_command` can only APPEND — so "no tools"
+# cannot be expressed by narrowing that grant. `--tools` is a different axis: it
+# selects the available set from the built-in tools, and the installed CLI
+# documents `""` as "disable all tools". An empty set cannot be repopulated by
+# an `--allowedTools` grant, because a grant is permission to use a tool that
+# exists. Pinned against `claude --help` by
+# `test_runner.py::test_the_summary_pass_flag_means_disable_all_tools_on_the_installed_cli`.
+NO_TOOLS_FLAG = ' --tools ""'
 
 GUARD_PATH = Path(__file__).with_name("guard.py")
 # One hook, one settings file: `Bash` joins the containment matchers so the
@@ -160,6 +171,17 @@ def _synthetic_error_code(msg: dict) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
+def _result_text(msg: dict) -> str:
+    """The model-authored final text of a CLEAN terminal record (issue #16).
+
+    Only ever read on the `subtype == "success" and not is_error` branch, which
+    is the one place `result` is the model's own prose rather than CLI-authored
+    error text — the trust boundary issue #116 drew, read from the other side.
+    """
+    value = msg.get("result")
+    return value.strip()[:RESULT_TEXT_CHARS] if isinstance(value, str) else ""
+
+
 def _gated_error_text(msg: dict) -> str:
     """Classification input for a terminal result claimed by the `is_error`
     gate (issue #116).
@@ -217,9 +239,18 @@ class ClaudeRunner:
         return env
 
     def _build_command(self, resume_session_id: str | None,
-                       settings_path: Path | None = None) -> str:
+                       settings_path: Path | None = None,
+                       *, summary_pass: bool = False) -> str:
         cmd = self.cfg.command
-        cmd += f" --max-turns {self.cfg.max_turns}"
+        if summary_pass:
+            # One tool-less turn (issue #16). `--max-turns 1` is a cap on the
+            # CLI's INTERNAL loop, which is what makes the pass bounded: with no
+            # tools there is nothing to iterate on, and the cap is the belt to
+            # that braces.
+            cmd += NO_TOOLS_FLAG
+            cmd += " --max-turns 1"
+        else:
+            cmd += f" --max-turns {self.cfg.max_turns}"
         if self.cfg.max_budget_usd is not None:
             cmd += f" --max-budget-usd {self.cfg.max_budget_usd}"
         if resume_session_id:
@@ -227,6 +258,31 @@ class ClaudeRunner:
         if settings_path is not None:
             cmd += f" --settings {shlex.quote(str(settings_path))}"
         return cmd
+
+    async def run_summary_turn(
+        self,
+        workspace: Path,
+        prompt: str,
+        resume_session_id: str,
+        on_event: EventCallback,
+        issue_id: str,
+        agent_token: str | None = None,
+    ) -> TurnResult:
+        """One bounded, tool-less turn resuming an existing session (issue #16).
+
+        Presence of this method is what marks a provider as summary-capable —
+        the scheduler branches on the capability, never on a provider-id string
+        (`agent_runner.SummaryCapableRunner`). Codex does not implement it, and
+        has no budget ceiling to report on until #181 lands.
+
+        `--resume` here is an ORDINARY resume, not a resume of an interrupted
+        run: the orchestrator's ceilings sit BETWEEN CLI invocations, so the
+        session being resumed terminated cleanly on its own last turn, exactly
+        as every continuation turn's resume does.
+        """
+        return await self._run_turn(
+            workspace, prompt, resume_session_id, on_event, issue_id,
+            agent_token, summary_pass=True)
 
     async def run_turn(
         self,
@@ -237,11 +293,37 @@ class ClaudeRunner:
         issue_id: str,
         agent_token: str | None = None,
     ) -> TurnResult:
+        """The scheduler-facing call shape, identical across every adapter.
+
+        The summary pass's `summary_pass` knob lives on `_run_turn` and NOT
+        here on purpose: `agent_runner_contract.assert_success_contract`
+        inspects this signature parameter-for-parameter, because "the scheduler
+        call shape stays identical across providers" is the property that lets
+        the scheduler hold one runner reference and not care which provider it
+        is. An adapter-specific option that widened this signature would erode
+        exactly that, one keyword at a time.
+        """
+        return await self._run_turn(
+            workspace, prompt, resume_session_id, on_event, issue_id,
+            agent_token)
+
+    async def _run_turn(
+        self,
+        workspace: Path,
+        prompt: str,
+        resume_session_id: str | None,
+        on_event: EventCallback,
+        issue_id: str,
+        agent_token: str | None = None,
+        *,
+        summary_pass: bool = False,
+    ) -> TurnResult:
         if not workspace.is_dir():
             raise ValueError(f"workspace does not exist or is not a directory: {workspace}")
 
         settings_path = _write_guard_settings(workspace, self.gate_c_repo)
-        command = self._build_command(resume_session_id, settings_path)
+        command = self._build_command(
+            resume_session_id, settings_path, summary_pass=summary_pass)
         env = self._build_env(agent_token)
 
         def emit(event: str, payload: dict, pid: int | None, usage: dict | None = None) -> None:
@@ -526,6 +608,7 @@ class ClaudeRunner:
                             cost_usd=cost_usd,
                             usage=usage,
                             num_turns=num_turns,
+                            text=_result_text(msg),
                         )
                     elif subtype == "success":
                         # issue #116 outcome gate: a result that would otherwise

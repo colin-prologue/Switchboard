@@ -29,7 +29,17 @@ from pathlib import Path
 
 import httpx
 
-from .agent_runner import AgentRunner
+from .agent_runner import AgentRunner, SummaryCapableRunner
+from .cap_report import (
+    BUDGET_CAP,
+    CAP_SUMMARY_PROMPT,
+    TURNS_CAP,
+    MechanicalFacts,
+    SelfReport,
+    collect_git_facts,
+    parse_self_report,
+    render_report,
+)
 from .board_sanity import report_board_state
 from .build_identity import resolve_build_identity
 from .fold import FoldSignal, detect_fold_signals
@@ -39,6 +49,7 @@ from .handoff import HandoffRejection, snapshot_evidence, validate_handoff
 from .prompt import render_prompt
 from .review_response import (
     CAP_MARKER,
+    RELABEL_CAP_MARKER,
     ROUND_CAP,
     format_round_marker,
     has_cap_comment,
@@ -53,8 +64,8 @@ from .provider_circuit import (
 )
 from .runner_selector import (
     AgentRunnerSelector,
+    AssignmentRefused,
     ClaudeOnlyRunnerSelector,
-    MixedAssignmentRefused,
 )
 from .singleton import acquire_singleton_lock
 from .tracker import GitHubTracker
@@ -68,6 +79,7 @@ from .types import (
     TrackerConfig,
     TrackerError,
     WorkflowError,
+    Workspace,
 )
 from .auth import AppInstallationTokenProvider, StaticTokenProvider
 from .workflow import Config, build_credentials, load_workflow, validate_dispatch
@@ -201,16 +213,19 @@ HUMAN_REVIEW_LABEL = "status:human-review"
 FAIL_REVIEW_LABEL = "status:fail-review"
 FAIL_REVIEW_MARKER = "gate:fail-reviewed"
 
-# The status labels `_park` strips before it writes PARK_LABEL — exactly the two
-# ORCHESTRATOR-OWNED claim labels, which are also exactly the park-reachable
-# labels that sort BEFORE `status:parked`. Leaving either in place would make
-# `normalize_status_state` report a parked issue as `in progress`/`fail review`
-# (sorted-first derivation, tracker.py) and trip the multi-label diagnostic on
-# every poll. The other two park-reachable labels — `status:todo` (the dominant
-# cap-hit state) and `status:triage` (the verify-role cap-out) — sort AFTER
-# `status:parked` and are deliberately KEPT: they are what makes the unpark
-# round trip work, since an issue stripped to `[status:parked]` alone derives
-# `"none"` the moment the operator removes that label and is then invisible to
+# The status labels `_park` strips after it writes PARK_LABEL — exactly the two
+# ORCHESTRATOR-OWNED claim labels. The strip is BOARD HYGIENE, not a correctness
+# gate: `parked` outranks every other state in the committed precedence
+# (`workflow/transitions.yml`, issue #167), so a parked issue derives `parked`
+# whether or not the claim label is still on it, and a failed strip is cosmetic.
+# What the strip buys is a board that reads honestly — no card claiming an agent
+# is working an issue nobody will dispatch.
+#
+# The other park-reachable labels — `status:todo` (the dominant cap-hit state)
+# and `status:triage` (the verify-role cap-out) — are deliberately KEPT, and NOT
+# because of where they sort: they are the only record of what the issue resumes
+# into. An issue stripped to `[status:parked]` alone derives `"none"` the moment
+# the operator removes that label and is then invisible to
 # `fetch_candidate_issues`. Same reason `_park` backfills `status:todo` when the
 # strip would otherwise leave nothing non-park.
 PARK_STRIP_LABELS = (IN_PROGRESS_LABEL, FAIL_REVIEW_LABEL)
@@ -266,6 +281,24 @@ REVIEW_CAP_COMMENT = (
     "_Posted by Switchboard (AI orchestrator)._"
 )
 
+# Posted once per PR when a HUMAN changes-requested relabel arrives at the same
+# durable round cap (issue #178). Deliberately not `REVIEW_CAP_COMMENT`: that
+# one offers "move the issue back to `status:todo`" as the recovery, which is
+# exactly the action this reader just took. The recovery named here is the
+# unpark round trip, which is the operator's existing deliberate escape hatch.
+RELABEL_CAP_COMMENT = (
+    "{marker}\n"
+    "**Switchboard did not refresh this issue's implementation budget.** The "
+    "issue was moved back to `" + TODO_LABEL + "`, but this PR has already "
+    "used its {cap} budget-granting rounds, so the re-dispatched session draws "
+    "on whatever budget is left. The bound is shared with the automatic "
+    "review-response loop so no single actor can refill the allowance "
+    "indefinitely.\n\n"
+    "If the issue parks for an exhausted budget, removing `" + PARK_LABEL +
+    "` is the deliberate operator unpark and does restore every budget.\n\n"
+    "_Posted by Switchboard (AI orchestrator)._"
+)
+
 CONTINUATION_PROMPT = (
     "Continue working the same issue in this workspace. Do not restart from "
     "scratch: review your progress so far, then finish the remaining work, "
@@ -292,6 +325,9 @@ class RunningEntry:
                                            # failure refund (issue #35)
     session_id: str | None = None
     last_event_at: datetime | None = None  # stall-detection anchor (§8.5)
+    last_event: str = ""                   # its event NAME (issue #16): the
+                                           # anchor already exists, and the
+                                           # cap-hit report wants both halves
     retry_attempt: int | None = None
     circuit_probe_token: int | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -420,6 +456,23 @@ class Orchestrator:
         # are cadence and log-once bookkeeping only.
         self._review_last_poll_at: datetime | None = None
         self._review_disabled_logged = False
+
+        # Human changes-requested relabels (issue #178). `human-review -> todo`
+        # has TWO sanctioned actors and only the orchestrator's own path reset
+        # the implement counter, so a human revision request on a spent ticket
+        # routed to a fail-review episode (marker absent) or parked (marker
+        # present) instead of re-dispatching. This map is how the human write is
+        # told apart from ours: every state the poll observes is recorded here,
+        # and the sub-poll records its OWN relabel, so an unaccounted-for
+        # `human review -> todo` change is by construction somebody else's.
+        #
+        # PROCESS-LIFETIME, deliberately, and that is not the weakness it looks
+        # like: it has exactly the lifetime of `sessions_per_issue`, which is
+        # the state it exists to correct. A restart empties both, so the ticket
+        # the map has forgotten is also the ticket whose budget is already
+        # fresh. The DURABLE half of this feature is the round marker on the PR.
+        self._last_status_state: dict[str, str] = {}
+        self._relabel_disabled_logged = False
 
         # Board-state sanity check (issue #52). In-memory `(issue id, condition)`
         # memo so an unchanged invalid state costs zero API calls on later
@@ -847,6 +900,14 @@ class Orchestrator:
             return
         issues = tracker.select_candidates(open_issues)
 
+        # BEFORE dispatch, deliberately (issue #178): the whole point of the
+        # grant is that the cap check below sees the reset counter. Run after
+        # it and a human's revision request would still route to fail-review or
+        # park on this very tick, one tick before the fix took effect. It reads
+        # `open_issues`, not `issues`, because `human review` is a gate state
+        # the candidate filter removes — the state the transition starts from.
+        await self._observe_human_relabels(tracker, open_issues)
+
         await self._resume_provider_waiters(issues)
 
         for issue in self._sort_for_dispatch(issues):
@@ -1038,11 +1099,133 @@ class Orchestrator:
         await tracker.set_sole_status_label(
             issue.id, TODO_LABEL, expected_status=(HUMAN_REVIEW_LABEL,)
         )
+        # Attribute the write to OURSELVES (issue #178). The human-relabel
+        # observer reads `_last_status_state` to tell an unaccounted-for
+        # `human review -> todo` change from this one; without this line the
+        # next tick would see our own relabel as a human's and burn a second
+        # round granting a budget we just granted.
+        self._last_status_state[issue.id] = "todo"
         self._tick_wakeup.set()
         log("review-response triggered",
             issue_id=issue.id, issue_identifier=issue.identifier,
             pr_number=pr_number, round=rounds + 1, owed=len(owed),
             threads=",".join(t.id for t in owed))
+        return True
+
+    # -- human changes-requested relabels (issue #178) --------------------------
+
+    async def _observe_human_relabels(
+        self, tracker: GitHubTracker, open_issues: list[Issue]
+    ) -> list[str]:
+        """Grant a fresh implement budget on a HUMAN `human-review -> todo`.
+
+        `transitions.yml` sanctions two actors on that edge and only one of them
+        was resetting the session counters, so the same edge produced three
+        different budget outcomes depending on who took it. This closes that:
+        the human path now grants the same fresh implement budget the sub-poll
+        does, drawn from the same durable per-PR round bound.
+
+        Detection is pure bookkeeping over the tick's ALREADY-FETCHED unfiltered
+        issue list — zero API calls until a transition is actually seen, which
+        is at most once per relabel. The map is rebuilt from `open_issues` each
+        tick so a closed issue's entry cannot accumulate.
+
+        Returns the identifiers granted (tests and logs; nothing else reads it).
+        """
+        seen: dict[str, str] = {}
+        granted: list[str] = []
+        for issue in open_issues:
+            state = (issue.state or "").lower()
+            seen[issue.id] = state
+            if self._last_status_state.get(issue.id) != "human review":
+                continue
+            if state != "todo":
+                continue
+            # A transition we did not record ourselves, so by construction a
+            # human took the edge. Record the new state FIRST: a grant that
+            # raises must not re-fire on every subsequent tick.
+            self._last_status_state[issue.id] = state
+            seen[issue.id] = state
+            try:
+                if await self._grant_relabel_budget(tracker, issue):
+                    granted.append(issue.identifier)
+            except TrackerError as exc:
+                log("human relabel: budget grant failed; leaving counters as they are",
+                    issue_identifier=issue.identifier, error=str(exc))
+        self._last_status_state = seen
+        return granted
+
+    async def _grant_relabel_budget(
+        self, tracker: GitHubTracker, issue: Issue
+    ) -> bool:
+        """Reset the issue's session counters, bounded at `ROUND_CAP` per PR.
+
+        Three refusals, each for its own reason:
+
+        - **Nothing spent.** The budget is already fresh, so a grant would buy
+          nothing and consume a round. This is also the common case — an
+          ordinary revision request on a ticket that never hit its cap — so it
+          costs zero API calls.
+        - **No App identity.** `latest_round` trusts only markers authored by
+          the normalized `$SB_APP_BOT_LOGIN`; with it unset the count reads 0
+          forever and the bound would not bind at all. Refusing keeps the cap
+          honest, matching the sub-poll's posture on the same env var.
+        - **Unbindable PR.** The bound lives in a comment ON THE PR. With no PR
+          to write it to there is nowhere to record that a round was spent, and
+          an unrecorded grant is exactly the refill-by-relabelling the cap
+          exists to prevent.
+        """
+        cfg = self._cfg
+        assert cfg is not None
+        spent = self.sessions_for_issue(issue.id).get(IMPLEMENT_ROLE, 0)
+        if spent <= 0:
+            return False
+
+        self_login = normalize_login(os.environ.get("SB_APP_BOT_LOGIN"))
+        if self_login is None:
+            if not self._relabel_disabled_logged:
+                self._relabel_disabled_logged = True
+                log("human relabel: budget grant disabled — SB_APP_BOT_LOGIN is "
+                    "unset, so the durable per-PR round cap is unreadable and "
+                    "an unbounded reset would let a relabel refill the budget",
+                    issue_identifier=issue.identifier)
+            return False
+
+        pr = await self._bind_pr(tracker, issue)
+        if pr is None:
+            log("human relabel: no bindable PR, so no durable place to record "
+                "the round; budget left as it is",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                spent=spent)
+            return False
+        pr_number, pr_id = pr["number"], pr["id"]
+
+        comments = await tracker.fetch_pr_comments(pr_number)
+        rounds, _ = latest_round(comments, self_login=self_login)
+        if rounds >= ROUND_CAP:
+            if not has_cap_comment(comments, self_login=self_login,
+                                   marker=RELABEL_CAP_MARKER):
+                await tracker.add_issue_comment(
+                    pr_id,
+                    RELABEL_CAP_COMMENT.format(
+                        marker=RELABEL_CAP_MARKER, cap=ROUND_CAP),
+                )
+            log("human relabel: round cap reached; budget not refreshed",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                pr_number=pr_number, rounds=rounds, spent=spent)
+            return False
+
+        # Marker BEFORE the reset, same ordering argument the sub-poll makes:
+        # a crash between them burns a round harmlessly, while the reverse hands
+        # out a budget the cap can never account for.
+        bot_logins = cfg.review_response().bot_logins
+        await tracker.add_issue_comment(
+            pr_id, format_round_marker(rounds + 1, bot_logins, self_login)
+        )
+        self._reset_issue_sessions(issue.id)
+        log("human relabel granted a fresh implement budget",
+            issue_id=issue.id, issue_identifier=issue.identifier,
+            pr_number=pr_number, round=rounds + 1, spent=spent)
         return True
 
     # -- fold-signal sub-poll (issue #51 part a) --------------------------------
@@ -1225,8 +1408,12 @@ class Orchestrator:
         assert cfg is not None
         try:
             runner = self._select_runner(issue)
-        except MixedAssignmentRefused as exc:
-            log("mixed assignment refused; leaving issue untouched",
+        except AssignmentRefused as exc:
+            # Ambiguous provider labels (MixedAssignmentRefused) and a provider
+            # that lacks the guard surface this project's stance requires
+            # (CodexGuardUnavailable, issue #135) get the same handling: no
+            # claim, no label writes, one log line naming the reason.
+            log("provider assignment refused; leaving issue untouched",
                 issue_id=issue.id, issue_identifier=issue.identifier,
                 outcome="refused",
                 failure_class=FailureClass.ASSIGNMENT_REFUSED.value,
@@ -1419,6 +1606,10 @@ class Orchestrator:
         # cap ends the session — the loop is unwinnable no matter how good the
         # message is, because the only party who can act on it never sees it.
         pending_rejection: HandoffRejection | None = None
+        # issue #16: which ceiling ended the loop, or None for every other exit
+        # (handoff, role-pin state change, required-label removal). Only a
+        # ceiling produces a report — the others are not failures to explain.
+        cap_hit: str | None = None
         try:
             while True:
                 if turn_number == 1:
@@ -1553,12 +1744,116 @@ class Orchestrator:
                     log("worker budget ceiling reached; ending session normally",
                         issue_id=issue.id, issue_identifier=issue.identifier,
                         cost_usd=round(cumulative_cost, 4))
+                    cap_hit = BUDGET_CAP
                     break
                 if turn_number >= cfg.agent().max_turns:
+                    cap_hit = TURNS_CAP
                     break
                 turn_number += 1
+            if cap_hit is not None:
+                # issue #16. Runs AFTER the break, so it cannot re-enter the
+                # loop or re-cross the ceiling it just broke out of, and BEFORE
+                # after_run, so the workspace it reads is still the one the
+                # session left. `session_id` is still the live local here —
+                # that liveness is the whole reason this sits inside `_worker`
+                # rather than at the park/fail-review boundary, which sees only
+                # a reason string and a path.
+                await self._post_cap_hit_report(
+                    issue, ws, runner, cap_hit=cap_hit, session_id=session_id,
+                    turns_spent=turn_number, cumulative_cost=cumulative_cost)
         finally:
             await wsm.run_after_run(ws)                            # ignored on failure
+
+    # -- cap-hit report (issue #16) -------------------------------------------
+
+    async def _cap_hit_self_report(
+        self,
+        issue: Issue,
+        ws: Workspace,
+        runner: AgentRunner,
+        session_id: str | None,
+    ) -> tuple[SelfReport, str]:
+        """Run the bounded, tool-less summary pass. Returns (report, error).
+
+        Never raises. Every failure mode here — no session to resume, a provider
+        with no summary pass, a token mint that fails, a budget-dead session
+        that cannot afford one more turn — degrades to an empty report plus a
+        reason string, which `render_report` turns into the mechanical
+        fallback. The quota circularity makes that the EXPECTED outcome on the
+        budget path, not an edge case.
+        """
+        if session_id is None:
+            return SelfReport(), "no live session id"
+        if not isinstance(runner, SummaryCapableRunner):
+            return SelfReport(), f"provider {runner.provider_id} has no summary pass"
+        try:
+            agent_token = await self._agent_token(runner.turn_timeout_ms)
+            result = await runner.run_summary_turn(
+                ws.path, CAP_SUMMARY_PROMPT, session_id,
+                self._on_agent_event, issue.id, agent_token)
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must not raise
+            log("cap-hit summary pass errored", issue_id=issue.id,
+                issue_identifier=issue.identifier, error=str(exc))
+            return SelfReport(), f"summary pass errored: {exc}"
+        # The pass's cost is RECORDED, never compared: the ceiling it reports on
+        # was already crossed and broken out of, and this turn runs after the
+        # loop, so there is no comparison left to re-enter.
+        log("cap-hit summary pass", issue_id=issue.id,
+            issue_identifier=issue.identifier, status=result.status,
+            cost_usd=round(result.cost_usd, 4))
+        if result.status != "succeeded":
+            return SelfReport(), result.error or result.status
+        return parse_self_report(result.text), ""
+
+    async def _post_cap_hit_report(
+        self,
+        issue: Issue,
+        ws: Workspace,
+        runner: AgentRunner,
+        *,
+        cap_hit: str,
+        session_id: str | None,
+        turns_spent: int,
+        cumulative_cost: float,
+    ) -> None:
+        """Post the `## Cap-hit report` comment. Purely additive and fully
+        defensive: this path previously posted nothing and logged
+        `outcome="completed"`, and it must still reach that same exit however
+        badly the report goes. A raise here would convert a capped session into
+        a FAILED one and re-enter the retry/circuit accounting — turning a
+        diagnostic into a routing change, which is #31's job and not this one's.
+        """
+        cfg = self._cfg
+        assert cfg is not None
+        try:
+            report, summary_error = await self._cap_hit_self_report(
+                issue, ws, runner, session_id)
+            branch, commits_ahead = await collect_git_facts(ws.path)
+            entry = self.running.get(issue.id)
+            facts = MechanicalFacts(
+                cap=cap_hit,
+                turns_spent=turns_spent,
+                max_turns=cfg.agent().max_turns,
+                cost_usd=cumulative_cost,
+                budget_usd=runner.max_budget_usd,
+                branch=branch,
+                commits_ahead=commits_ahead,
+                last_event=entry.last_event if entry else "",
+                last_event_at=(
+                    entry.last_event_at.isoformat()
+                    if entry and entry.last_event_at else ""),
+            )
+            body = render_report(facts, report, summary_error=summary_error)
+            tracker, _ = self._components()
+            await tracker.add_issue_comment(issue.id, body)
+            log("cap-hit report posted", issue_id=issue.id,
+                issue_identifier=issue.identifier, cap=cap_hit,
+                self_reported=report.class_field,
+                mechanical=facts.cap_class.value)
+        except Exception as exc:  # noqa: BLE001 — see the docstring
+            log("cap-hit report failed; session ends unreported",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                cap=cap_hit, error=str(exc))
 
     def _on_worker_done(self, issue_id: str, task: asyncio.Task) -> None:
         """core §16.6 worker exit handling."""
@@ -2528,11 +2823,13 @@ class Orchestrator:
             self.parked.add(issue.id)  # durable marker confirmed
             # issue #14, generalized by #31: preserve the one-status-label
             # contract by clearing the orchestrator's own claim labels, so a
-            # parked issue does not keep deriving `in progress`/`fail review`
-            # from a label that sorts before `status:parked`. Done only after
-            # the durable park write succeeds; a failed STRIP is cosmetic (the
-            # issue is already durably parked and the PARK_LABEL gate refuses
-            # it either way), so it never trips the cap-enforcement halt below.
+            # parked issue does not show a card claiming an agent is working it.
+            # Since #167 this is hygiene only — `parked` outranks both labels in
+            # the committed precedence, so derivation says `parked` either way.
+            # Done only after the durable park write succeeds; a failed STRIP is
+            # cosmetic (the issue is already durably parked and the PARK_LABEL
+            # gate refuses it either way), so it never trips the cap-enforcement
+            # halt below.
             strip = [lbl for lbl in PARK_STRIP_LABELS if lbl in issue.labels]
             remaining = [
                 lbl for lbl in issue.labels
@@ -2589,6 +2886,7 @@ class Orchestrator:
         if entry is None:
             return
         entry.last_event_at = event.timestamp
+        entry.last_event = event.event
         if event.event == "session_started":
             sid = event.payload.get("session_id")
             if sid:

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .failure_classification import classify_codex_failure
+from .log import log
 from .types import AgentEvent, CodexConfig, EventCallback, FailureClass, TurnResult
 
 
@@ -110,9 +111,34 @@ class CodexRunner:
         self.cfg = cfg
         self.turn_timeout_ms = cfg.turn_timeout_ms
         self.stall_timeout_ms = cfg.stall_timeout_ms
-        self.max_budget_usd: float | None = None
+        self.max_budget_usd: float | None = cfg.max_budget_usd
+        if self.max_budget_usd is not None:
+            # The ceiling is real policy on the neutral interface, but the
+            # scheduler can only fire it from `TurnResult.cost_usd`, and
+            # `codex exec --json` reports token usage with no dollar figure in
+            # subscription mode (SPEC.md §1) — so this runner's cost is always
+            # 0.0 and the ceiling never trips. Say so once per session rather
+            # than letting a configured ceiling read as an enforced one
+            # (AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert, issue #181).
+            log(
+                "codex budget ceiling configured but codex reports no cost "
+                "telemetry; ceiling cannot fire",
+                provider_id=self.provider_id,
+                max_budget_usd=self.max_budget_usd,
+            )
 
     def _build_argv(self, resume_session_id: str | None) -> list[str]:
+        """Codex's argv carries NO guard: there is no `--settings`/hook flag
+        here because the Codex CLI exposes no PreToolUse-equivalent veto we
+        have been able to verify (issue #135 / AgDR-2026-08-29-codex-has-no-guard-surface-so-dispatch-refuses). The Claude adapter
+        materializes `guard.py` every turn (`runner._write_guard_settings`);
+        this one has nothing to materialize it into, so none of the enumerated
+        Gate-C shapes are denied in a Codex session.
+
+        The compensating control is at dispatch, not here:
+        `runner_selector._codex_runner` refuses to construct this adapter for a
+        project whose stance hands Gate C to an agent. If a Codex guard surface
+        is ever found, that refusal is what should be revisited."""
         argv = shlex.split(self.cfg.command)
         if not argv:
             raise ValueError("codex command must not be empty")

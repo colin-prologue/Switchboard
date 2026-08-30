@@ -22,7 +22,10 @@ Two rules carry the whole safety argument, and both are pinned in
    own "single source of truth for status:* -> state mapping" — rather than
    reimplementing the `status:` strip and the dash->space rewrite. `status:*`
    labels are NOT mutually exclusive in practice (open issues carry two today),
-   and both readers must answer the same way: sorted-first wins.
+   and both readers must answer the same way. Which one wins is the committed
+   precedence in `workflow/transitions.yml` (issue #167) — an explicit ranking,
+   not the alphabet — and deriving through `normalize_status_state` is what
+   makes the board inherit it for free.
 
 2. A DIVERGENCE IS NOT A DRAG. The same field/label mismatch arises from a human
    label edit whose mirror run has not landed yet, and honoring that backwards

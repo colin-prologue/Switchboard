@@ -745,6 +745,7 @@ class Config:
         allowed = {
             "kind",
             "command",
+            "max_budget_usd",
             "turn_timeout_ms",
             "read_timeout_ms",
             "stall_timeout_ms",
@@ -772,6 +773,22 @@ class Config:
                 f"got {type(command).__name__}",
             )
 
+        # Same strictness as the provider-enveloped Claude form: numeric or
+        # null, and a boolean is rejected rather than coerced. Codex has no
+        # legacy top-level block, so there is no lenient path to mirror —
+        # every Codex block is the strict one.
+        budget_raw = raw.get("max_budget_usd")
+        max_budget_usd: float | None
+        if budget_raw is None:
+            max_budget_usd = None
+        elif isinstance(budget_raw, bool) or not isinstance(budget_raw, (int, float)):
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"{path}.max_budget_usd must be numeric or null, got {budget_raw!r}",
+            )
+        else:
+            max_budget_usd = float(budget_raw)
+
         def _timeout(key: str, default: int) -> int:
             value = raw.get(key, default)
             if isinstance(value, bool) or not isinstance(value, int):
@@ -783,6 +800,7 @@ class Config:
 
         return CodexConfig(
             command=command,
+            max_budget_usd=max_budget_usd,
             turn_timeout_ms=_timeout("turn_timeout_ms", defaults.turn_timeout_ms),
             read_timeout_ms=_timeout("read_timeout_ms", defaults.read_timeout_ms),
             stall_timeout_ms=_timeout("stall_timeout_ms", defaults.stall_timeout_ms),

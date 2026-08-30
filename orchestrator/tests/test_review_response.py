@@ -20,6 +20,7 @@ import pytest
 
 from orchestrator.review_response import (
     CAP_MARKER,
+    RELABEL_CAP_MARKER,
     ROUND_CAP,
     format_round_marker,
     has_cap_comment,
@@ -27,7 +28,25 @@ from orchestrator.review_response import (
     needs_response,
     normalize_login,
 )
+from orchestrator.scheduler import (
+    HUMAN_REVIEW_LABEL,
+    IMPLEMENT_ROLE,
+    PARK_LABEL,
+    TODO_LABEL,
+)
 from orchestrator.types import IssueComment, ReviewThread, ReviewThreadComment
+
+from test_integration import (  # the shared fakes; this suite adds no second set
+    RR_BOT,
+    RR_SELF,
+    RR_TMPL,
+    _bind_pr,
+    _build_harness,
+    _enable_app_identity,
+    rr_issue,
+    rr_thread,
+    wait_for,
+)
 
 UTC = timezone.utc
 T0 = datetime(2026, 8, 9, 10, 0, tzinfo=UTC)
@@ -297,3 +316,285 @@ def test_marker_serializes_normalized_logins():
         "<!-- switchboard:response-round n=1 bots=codex-bot "
         "self=switchboard-agent -->"
     )
+
+
+def test_the_two_cap_comments_have_separate_one_shot_guards():
+    """Issue #178: the human path's cap comment is a SECOND one-shot.
+
+    The two say different things — the sub-poll's offers "move the issue back
+    to `status:todo`" as the recovery, which is the action a human at this cap
+    has just taken. A shared guard would let whichever fired first suppress the
+    other's explanation, so the operator would be told nothing at all."""
+    assert RELABEL_CAP_MARKER != CAP_MARKER
+    bot_cap = IssueComment(id="b", login=SELF, body=CAP_MARKER + "\nbot")
+    human_cap = IssueComment(id="h", login=SELF, body=RELABEL_CAP_MARKER + "\nhuman")
+    assert has_cap_comment([bot_cap], self_login=SELF) is True
+    assert has_cap_comment(
+        [bot_cap], self_login=SELF, marker=RELABEL_CAP_MARKER) is False
+    assert has_cap_comment(
+        [human_cap], self_login=SELF, marker=RELABEL_CAP_MARKER) is True
+    assert has_cap_comment([human_cap], self_login=SELF) is False
+    # Same trust rule (PR #134): a third party cannot fake either one.
+    forged = IssueComment(id="f", login="mallory",
+                          body=RELABEL_CAP_MARKER + "\nforged")
+    assert has_cap_comment(
+        [forged], self_login=SELF, marker=RELABEL_CAP_MARKER) is False
+
+
+# =============================================================================
+# The human changes-requested relabel (issue #178 / AgDR-2026-08-29-both-actors-on-the-re-entry-edge-reset-the-budget)
+# =============================================================================
+#
+# Scheduler-level, unlike everything above, and deliberately so: the defect is
+# not in the predicate but in WHICH ACTOR's write reset the session counters,
+# and only the tick loop holds that. `transitions.yml` sanctions two actors on
+# `human-review -> todo`; before #178 only the orchestrator's own path called
+# `_reset_issue_sessions`, so a reviewer's revision request on a ticket with a
+# spent implement budget hit the dispatch cap and forked on the durable
+# `gate:fail-reviewed` marker — opening a fail-review episode when it was
+# absent, parking when it was present. Neither is a re-dispatch, which is what
+# the operator asked for.
+#
+# What these tests are careful about:
+#
+# - **The counter must already be spent.** A fresh-counter test passes while the
+#   fix can never fire: with budget left the old code dispatched anyway.
+# - **The marker must be READABLE on the next round.** The fake's comment log is
+#   write-only, so a test without `_publish_pr_comments` would read n=0 forever
+#   and the cap would appear to bind while no bound existed.
+# - **Every refusal is asserted on the COUNTER, not just the return value.** The
+#   grant's whole effect is a mutation nine other readers observe.
+
+PR_NUMBER = 500
+PR_NODE = f"PR_node_{PR_NUMBER}"
+
+
+def _publish_pr_comments(tracker, pr_number: int = PR_NUMBER) -> None:
+    """Mirror posted PR comments back into the read path (fake fidelity).
+
+    GitHub publishes a posted comment to the conversation; the fake's
+    `comments` log is write-only while `latest_round` reads `fetch_pr_comments`.
+    Without the mirror every round would re-read zero markers, the cap could
+    never bind, and the bound this ticket rests on would be untested.
+    """
+    real_add = tracker.add_issue_comment
+
+    async def add_and_publish(issue_id, body):
+        await real_add(issue_id, body)
+        if issue_id == f"PR_node_{pr_number}":
+            tracker.pr_comments.setdefault(pr_number, []).append(
+                IssueComment(id=f"IC_{len(tracker.comments)}", body=body,
+                             login=RR_SELF, created_at=T0))
+
+    tracker.add_issue_comment = add_and_publish
+
+
+def _relabel_harness(tmp_path, monkeypatch, *, extra_labels=()):
+    """A `status:human-review` issue with a bound PR and the App identity set."""
+    _enable_app_identity(monkeypatch, RR_SELF)
+    orch, tracker, runner, _ = _build_harness(tmp_path, monkeypatch, RR_TMPL)
+    issue = rr_issue(178)
+    issue.labels.extend(extra_labels)
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+    _bind_pr(tracker, 178, PR_NUMBER)
+    _publish_pr_comments(tracker)
+    return orch, tracker, runner, issue
+
+
+def _spend_the_implement_budget(orch, issue) -> None:
+    """The precondition the whole ticket is about — see the section note."""
+    orch.sessions_per_issue[(issue.id, IMPLEMENT_ROLE)] = \
+        orch._cfg.agent().max_sessions_per_issue
+
+
+async def _relabel(tracker, issue, *, add: str, remove: str) -> None:
+    """Exactly what a reviewer's `gh issue edit` does: two label writes, no
+    orchestrator write and no `expected_status` guard."""
+    await tracker.add_labels(issue.id, [add])
+    await tracker.remove_labels(issue.id, [remove])
+
+
+async def _human_requests_changes(orch, tracker, issue) -> list[str]:
+    """One full round trip: park at the gate, be observed there, spend the
+    budget, then have a HUMAN take the edge. Returns what the observer granted."""
+    await _relabel(tracker, issue, add=HUMAN_REVIEW_LABEL, remove=TODO_LABEL)
+    await orch._observe_human_relabels(tracker, [issue])
+    _spend_the_implement_budget(orch, issue)
+    await _relabel(tracker, issue, add=TODO_LABEL, remove=HUMAN_REVIEW_LABEL)
+    return await orch._observe_human_relabels(tracker, [issue])
+
+
+def _round_markers(tracker) -> list[str]:
+    return [body for _id, body in tracker.comments
+            if body.startswith("<!-- switchboard:response-round")]
+
+
+# --- the grant ----------------------------------------------------------------
+
+async def test_a_human_relabel_dispatches_instead_of_parking(
+    tmp_path, monkeypatch
+):
+    """AC 2: with the durable episode marker PRESENT and the implement budget
+    spent, a human relabel re-dispatches — it does not park.
+
+    Driven through `_tick` rather than the observer alone, because the ordering
+    claim is the load-bearing one: the grant must land BEFORE this same tick's
+    cap check, or the operator's revision request still parks once.
+    """
+    orch, tracker, runner, issue = _relabel_harness(
+        tmp_path, monkeypatch, extra_labels=["gate:fail-reviewed"])
+
+    await orch._tick()                      # a gate state: observed, not dispatched
+    assert runner.turns == []
+    assert orch._last_status_state[issue.id] == "human review"
+
+    _spend_the_implement_budget(orch, issue)
+    await _relabel(tracker, issue, add=TODO_LABEL, remove=HUMAN_REVIEW_LABEL)
+
+    await orch._tick()
+    await wait_for(lambda: runner.turns)
+    await wait_for(lambda: not orch.running)
+
+    assert PARK_LABEL not in issue.labels
+    assert issue.id not in orch.parked
+    assert len(runner.turns) == 1
+    # The grant is recorded durably on the PR before the counters move.
+    assert _round_markers(tracker) == [
+        format_round_marker(1, (RR_BOT,), RR_SELF)]
+
+
+async def test_the_bound_binds_at_two_rounds_per_pr(tmp_path, monkeypatch):
+    """AC 3: two granted rounds per PR, then the orchestrator comments instead.
+
+    This is the evasion bound. Resetting a budget in response to a label a human
+    typed means an operator could otherwise refill an issue's allowance by
+    relabelling it, which is the cap's whole purpose defeated.
+    """
+    orch, tracker, _, issue = _relabel_harness(tmp_path, monkeypatch)
+
+    for expected_round in (1, 2):
+        assert await _human_requests_changes(orch, tracker, issue) == ["178"]
+        assert orch.sessions_for_issue(issue.id) == {}
+        assert _round_markers(tracker)[-1] == \
+            format_round_marker(expected_round, (RR_BOT,), RR_SELF)
+
+    # Round three: same actions, no grant — and the counter is left exactly as
+    # it was, so the ordinary cap machinery decides what happens next.
+    assert await _human_requests_changes(orch, tracker, issue) == []
+    assert orch.sessions_for_issue(issue.id) == {IMPLEMENT_ROLE: 2}
+    assert len(_round_markers(tracker)) == ROUND_CAP
+    assert RELABEL_CAP_MARKER in tracker.comments[-1][1]
+    assert PARK_LABEL in tracker.comments[-1][1]   # the recovery it names
+
+    # ...and the cap comment is a one-shot: a fourth relabel adds no noise.
+    before = len(tracker.comments)
+    assert await _human_requests_changes(orch, tracker, issue) == []
+    assert len(tracker.comments) == before
+
+
+async def test_the_sub_polls_own_relabel_is_not_read_as_a_human_relabel(
+    tmp_path, monkeypatch
+):
+    """AC 4: the orchestrator path is unchanged, and specifically it does not
+    pay twice.
+
+    The observer's whole detection rule is "a state change into `todo` I did not
+    record myself". If the sub-poll's own relabel were not attributed, the very
+    next tick would read it as a human's and burn a second round granting a
+    budget that was just granted — halving the cap for the actor that had it.
+    """
+    orch, tracker, _, issue = _relabel_harness(tmp_path, monkeypatch)
+    tracker.pr_review_threads[PR_NUMBER] = [rr_thread((RR_BOT, 0))]
+    _spend_the_implement_budget(orch, issue)
+
+    await orch._observe_human_relabels(tracker, [issue])     # seen at the gate
+    assert await orch._poll_review_responses(tracker) == ["178"]
+    assert orch.sessions_for_issue(issue.id) == {}
+    assert len(_round_markers(tracker)) == 1
+
+    # The issue now reads `todo`, and the observer must stay quiet about it.
+    assert await orch._observe_human_relabels(tracker, [issue]) == []
+    assert len(_round_markers(tracker)) == 1
+
+
+# --- the refusals -------------------------------------------------------------
+
+async def test_a_relabel_with_budget_left_costs_a_round_and_an_api_call_of_nothing(
+    tmp_path, monkeypatch
+):
+    """The common case — an ordinary revision request on a ticket that never hit
+    its cap. Nothing is spent, so a grant would buy nothing and consume one of
+    two scarce rounds. It must also cost zero API calls: this path runs on every
+    tick, and a PR bind + comment fetch per relabel would be pure waste."""
+    orch, tracker, _, issue = _relabel_harness(tmp_path, monkeypatch)
+    await orch._observe_human_relabels(tracker, [issue])
+    await _relabel(tracker, issue, add=TODO_LABEL, remove=HUMAN_REVIEW_LABEL)
+
+    before = tracker.api_calls
+    assert await orch._observe_human_relabels(tracker, [issue]) == []
+    assert tracker.api_calls == before
+    assert _round_markers(tracker) == []
+
+
+async def test_no_bindable_pr_means_no_grant(tmp_path, monkeypatch):
+    """The bound lives in a comment ON THE PR. With no PR there is nowhere to
+    record that a round was spent, and an unrecorded grant is exactly the
+    refill-by-relabelling the cap exists to prevent — so the refusal is the
+    conservative direction, not a gap."""
+    orch, tracker, _, issue = _relabel_harness(tmp_path, monkeypatch)
+    tracker.open_prs.clear()
+
+    assert await _human_requests_changes(orch, tracker, issue) == []
+    assert orch.sessions_for_issue(issue.id) == {IMPLEMENT_ROLE: 2}
+    assert _round_markers(tracker) == []
+
+
+async def test_without_the_app_identity_no_budget_is_granted(
+    tmp_path, monkeypatch, capfd
+):
+    """`latest_round` trusts only markers authored by the normalized
+    `$SB_APP_BOT_LOGIN`. Unset, the count reads 0 forever — so a grant would be
+    UNBOUNDED, which is worse than the bug being fixed. Same posture the
+    sub-poll takes on the same env var, and loud once."""
+    orch, tracker, _, issue = _relabel_harness(tmp_path, monkeypatch)
+    monkeypatch.delenv("SB_APP_BOT_LOGIN", raising=False)
+
+    assert await _human_requests_changes(orch, tracker, issue) == []
+    assert orch.sessions_for_issue(issue.id) == {IMPLEMENT_ROLE: 2}
+    assert "SB_APP_BOT_LOGIN is unset" in capfd.readouterr().err
+
+
+async def test_a_grant_fires_once_per_transition_not_once_per_tick(
+    tmp_path, monkeypatch
+):
+    """The observer records the new state before granting, so an issue sitting
+    at `todo` across many ticks cannot re-grant. Without this the two-round cap
+    would be consumed within seconds of a single relabel."""
+    orch, tracker, _, issue = _relabel_harness(tmp_path, monkeypatch)
+
+    assert await _human_requests_changes(orch, tracker, issue) == ["178"]
+    for _ in range(3):
+        assert await orch._observe_human_relabels(tracker, [issue]) == []
+    assert len(_round_markers(tracker)) == 1
+
+
+async def test_a_restart_forgets_the_transition_and_that_is_harmless(
+    tmp_path, monkeypatch
+):
+    """The detection map is process-lifetime, which looks like the restart
+    weakness #15 describes and is not one: it has exactly the lifetime of
+    `sessions_per_issue`, the state it exists to correct. The issue a fresh
+    process has forgotten is the issue whose budget is already fresh — so it
+    dispatches, which is the outcome the grant exists to produce."""
+    orch, tracker, _, issue = _relabel_harness(tmp_path, monkeypatch)
+    await orch._observe_human_relabels(tracker, [issue])
+    _spend_the_implement_budget(orch, issue)
+    await _relabel(tracker, issue, add=TODO_LABEL, remove=HUMAN_REVIEW_LABEL)
+
+    restarted, _, _, _ = _build_harness(tmp_path, monkeypatch, RR_TMPL)
+    assert restarted._last_status_state == {}
+    assert restarted.sessions_per_issue == {}
+    assert await restarted._observe_human_relabels(tracker, [issue]) == []
+    assert restarted._should_dispatch(issue) is True
+    assert _round_markers(tracker) == []            # and no round was spent

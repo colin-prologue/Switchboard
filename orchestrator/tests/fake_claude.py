@@ -82,7 +82,13 @@ def main() -> None:
         emit({"type": "system", "subtype": "init", "session_id": "sess-123"})
         emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "hello there"}]}})
         emit({"type": "user", "message": {"content": [{"type": "text", "text": "ack"}]}})
-        emit(result_line("success", is_error=False))
+        payload = result_line("success", is_error=False)
+        # issue #16: the model-authored final text. Absent by default, because
+        # the CLI omits `result` on a turn that produced no text and the runner
+        # must survive that; supplied per-test where the text IS the product.
+        if result_text := os.environ.get("FAKE_CLAUDE_RESULT_TEXT"):
+            payload["result"] = result_text
+        emit(payload)
         return
 
     if scenario == "resume":

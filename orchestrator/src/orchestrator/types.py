@@ -238,6 +238,15 @@ class CodexConfig:
         "codex --ask-for-approval never --sandbox workspace-write "
         "--config sandbox_workspace_write.network_access=true"
     )
+    # Per-run cost ceiling, same neutral field the scheduler reads off any
+    # runner (SPEC.md §1). Unlike Claude there is no CLI flag to pass it to —
+    # the ONLY enforcement is the scheduler's cumulative-cost check, and that
+    # check is fed by `TurnResult.cost_usd`, which `codex exec --json` gives no
+    # dollar figure for in subscription mode (SPEC.md §1). Configuring a
+    # ceiling here is therefore inert until Codex reports a cost; the runner
+    # logs that fact at construction rather than pretending to be capped.
+    # See AgDR-2026-08-29-codex-budget-ceiling-is-wired-but-inert (issue #181).
+    max_budget_usd: float | None = None
     turn_timeout_ms: int = 3600000
     read_timeout_ms: int = 30000
     stall_timeout_ms: int = 300000
@@ -371,6 +380,11 @@ class TurnResult:
     cost_usd: float = 0.0
     usage: dict[str, int] = field(default_factory=dict)
     num_turns: int = 0           # provider-internal turn count for the invocation
+    # The turn's final assistant text, bounded (issue #16). Populated only on a
+    # clean success, and read by exactly one caller: the cap-hit summary pass,
+    # whose whole product IS the text. Every other consumer ignores it — a turn
+    # is judged by its side effects on the workspace, not by its prose.
+    text: str = ""
 
 
 EventCallback = Callable[[str, AgentEvent], None]  # (issue_id, event) -> None
