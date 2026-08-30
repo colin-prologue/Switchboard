@@ -139,11 +139,24 @@ def sb_home_with_origin(sb_home: Path, tmp_path: Path) -> Path:
     """Layer a committed skeleton + local bare origin onto the base fixture, at
     the SAME orchestrator/src state — count 0, no marker, no warnings."""
     (sb_home / "workflow").mkdir()
+    # Both audited features are WIRED in this template (issue #172): a silent
+    # launch is what this fixture asserts, and an unwired one legitimately
+    # warns.
     (sb_home / "workflow" / "WORKFLOW.base.md").write_text(
         "---\nrepo: {{REPO}}\nroot: {{WORKSPACE_ROOT}}\n"
-        "agents: {{MAX_AGENTS}}\nconv: {{CONVENTION_ROOT}}\n---\nbody\n")
+        "agents: {{MAX_AGENTS}}\nconv: {{CONVENTION_ROOT}}\n"
+        'fold:\n  operator_logins: ["ada"]\n'
+        'review_response:\n  bot_logins: ["review-bot"]\n---\nbody\n')
+    shutil.copy(REPO_ROOT / "workflow" / "disabling-defaults.yml",
+                sb_home / "workflow" / "disabling-defaults.yml")
     (sb_home / "orchestrator" / "src").mkdir(parents=True)
     (sb_home / "orchestrator" / "src" / "mod.py").write_text("v1\n")
+    # The preflight's unwired audit imports this package with a bare python3.
+    pkg_src = REPO_ROOT / "orchestrator" / "src" / "orchestrator"
+    pkg = sb_home / "orchestrator" / "src" / "orchestrator"
+    pkg.mkdir()
+    shutil.copy(pkg_src / "__init__.py", pkg / "__init__.py")
+    shutil.copy(pkg_src / "disabling_defaults.py", pkg / "disabling_defaults.py")
     (sb_home / ".gitignore").write_text(".run/\n")
     _git(sb_home, "init", "-b", "main", "-q")
     _git(sb_home, "add", "-A")
