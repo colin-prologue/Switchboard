@@ -42,6 +42,7 @@ from orchestrator.failure_taxonomy import CapFailureClass
 from orchestrator.types import TrackerError, TurnResult
 
 from test_integration import (  # the shared fakes; this suite adds no second set
+    CLAUDE_PROVIDERS_BLOCK,
     WORKFLOW_TMPL,
     _build_harness,
     make_issue,
@@ -102,14 +103,15 @@ def _summary(text: str) -> TurnResult:
 
 
 BUDGET_TMPL = WORKFLOW_TMPL.replace(
-    """claude:
-  command: "unused-by-fake-runner"
-  max_turns: 1""",
-    """claude:
-  command: "unused-by-fake-runner"
-  max_budget_usd: 0.05
-  max_turns: 1""",
+    CLAUDE_PROVIDERS_BLOCK,
+    CLAUDE_PROVIDERS_BLOCK.replace(
+        'command: "unused-by-fake-runner"',
+        'command: "unused-by-fake-runner"\n    max_budget_usd: 0.05',
+    ),
 ).replace("max_turns: 1\n  max_retry_backoff_ms", "max_turns: 4\n  max_retry_backoff_ms")
+# A no-op replace here silently deletes the ceiling this suite exists to test
+# (it happened when #184 migrated the template under this branch).
+assert "max_budget_usd: 0.05" in BUDGET_TMPL
 
 # The turn ceiling, reached with no budget configured at all: `max_turns: 2` and
 # a runner that never crosses a (nonexistent) cost ceiling.

@@ -1,4 +1,4 @@
-# AgDR-049 — Tool-lessness is a subtraction on a different flag, and the cap-hit report carries two claims it never reconciles
+# AgDR-2026-08-29 — Tool-lessness is a subtraction on a different flag, and the cap-hit report carries two claims it never reconciles
 
 **Status:** proposed (ratify or overturn at the #16 merge gate)
 **Issue:** #16 — Cap-hit post-mortem: bounded summary pass before a session gives up
