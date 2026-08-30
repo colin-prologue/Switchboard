@@ -380,6 +380,11 @@ class TurnResult:
     cost_usd: float = 0.0
     usage: dict[str, int] = field(default_factory=dict)
     num_turns: int = 0           # provider-internal turn count for the invocation
+    # The turn's final assistant text, bounded (issue #16). Populated only on a
+    # clean success, and read by exactly one caller: the cap-hit summary pass,
+    # whose whole product IS the text. Every other consumer ignores it — a turn
+    # is judged by its side effects on the workspace, not by its prose.
+    text: str = ""
 
 
 EventCallback = Callable[[str, AgentEvent], None]  # (issue_id, event) -> None

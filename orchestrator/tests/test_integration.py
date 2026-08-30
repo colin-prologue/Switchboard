@@ -39,6 +39,7 @@ from orchestrator.fold_apply import (
     body_digest,
     marker_first_line,
 )
+from orchestrator.cap_report import CAP_REPORT_HEADING
 from orchestrator.provider_circuit import CircuitState, ProviderCircuit
 from orchestrator.scheduler import (
     CLAIM_RELEASE_COMMENT,
@@ -625,6 +626,19 @@ async def wait_for(cond, timeout=3.0):
         await asyncio.sleep(0.02)
 
 
+def park_comments(tracker):
+    """Tracker comments minus cap-hit reports (issue #16).
+
+    A capped session now posts its own `## Cap-hit report` alongside whatever
+    the park path writes. The assertions below are about PARK notification
+    behaviour — "notified once, no spam" — so they filter the diagnostic out
+    rather than counting it: the report is additive at this boundary and
+    changes no park routing.
+    """
+    return [c for c in tracker.comments
+            if not c[1].startswith(CAP_REPORT_HEADING)]
+
+
 async def test_gated_states_never_dispatched(harness):
     orch, tracker, runner, _ = harness
     tracker.candidates = [
@@ -746,13 +760,13 @@ async def test_session_cap_parks_issue(harness):
         lambda: orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 2})
     await wait_for(lambda: "node-1" in orch.parked)  # cap 2 exhausted -> parked
 
-    assert len(tracker.comments) == 1                 # exactly one notification
-    assert tracker.comments[0][0] == "node-1"
-    assert "parked" in tracker.comments[0][1].lower()
+    parks = park_comments(tracker)
+    assert len(parks) == 1                            # exactly one notification
+    assert parks[0][0] == "node-1"
+    assert "parked" in parks[0][1].lower()
     # issue #35: the comment names WHICH budget ran out (the label set cannot —
     # there is exactly one park label).
-    assert "implement budget exhausted (2/2 implement sessions)" \
-        in tracker.comments[0][1]
+    assert "implement budget exhausted (2/2 implement sessions)" in parks[0][1]
     # issue #14: the todo dispatch made the claim visible (status:in-progress),
     # then park clears it and adds the durable status:parked marker — the
     # one-status-label contract holds across the transition.
@@ -777,7 +791,7 @@ async def test_session_cap_parks_issue(harness):
 
     await orch._tick()                                # still parked: no re-dispatch
     assert orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 2}
-    assert len(tracker.comments) == 1
+    assert len(park_comments(tracker)) == 1
     assert len(tracker.labels_added) == 3             # not re-labelled past park
 
     # The parking comment bumped updatedAt (FakeTracker mimics GitHub); the
@@ -785,7 +799,7 @@ async def test_session_cap_parks_issue(harness):
     await orch._tick()
     assert "node-1" in orch.parked
     assert orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 2}
-    assert len(tracker.comments) == 1
+    assert len(park_comments(tracker)) == 1
 
     # human removes the status:parked label -> unparked, counter reset, dispatchable
     unparked = make_issue(1)  # labels back to just ["status:todo"]
@@ -851,7 +865,7 @@ async def test_park_label_write_failure_holds_at_cap_without_looping(harness):
     # counter held at cap, NOT reset
     assert orch.sessions_for_issue("node-1") == {IMPLEMENT_ROLE: 2}
     assert len(runner.turns) == 2                      # no bonus sessions past the cap
-    assert len(tracker.comments) == 1                  # notified once, no spam
+    assert len(park_comments(tracker)) == 1            # notified once, no spam
     assert "node-1" not in orch.parked                 # not durably parked (label absent)
 
     # Recovery: once the write succeeds, the next park attempt makes it durable.
@@ -859,7 +873,7 @@ async def test_park_label_write_failure_holds_at_cap_without_looping(harness):
     await orch._tick()
     await wait_for(lambda: "node-1" in orch.parked)
     assert ("node-1", ("status:parked",)) in tracker.labels_added
-    assert len(tracker.comments) == 1                  # still only one comment total
+    assert len(park_comments(tracker)) == 1            # still only one park comment
 
 
 async def test_park_missing_label_halts_dispatch(harness):
@@ -978,7 +992,7 @@ async def test_verify_spend_leaves_implementer_budget_intact(tmp_path, monkeypat
     assert "node-1" in orch.running
     assert orch.sessions_for_issue("node-1") == {VERIFY_ROLE: 2, IMPLEMENT_ROLE: 1}
     assert issue.labels == ["status:todo", "gate:triage-passed"]
-    assert tracker.comments == []            # never parked, never refused
+    assert park_comments(tracker) == []      # never parked, never refused
     assert "node-1" not in orch.parked
 
 
@@ -1044,8 +1058,9 @@ async def test_verify_budget_exhaustion_park_comment_names_the_budget(
     await wait_for(lambda: "node-1" in orch.parked)
 
     assert orch.sessions_for_issue("node-1") == {VERIFY_ROLE: 2}
-    assert len(tracker.comments) == 1
-    assert "verify budget exhausted (2/2 verify sessions)" in tracker.comments[0][1]
+    parks = park_comments(tracker)
+    assert len(parks) == 1
+    assert "verify budget exhausted (2/2 verify sessions)" in parks[0][1]
     # Label set unchanged: the sole park label, no new status:* vocabulary.
     assert tracker.labels_added == [("node-1", ("status:parked",))]
 

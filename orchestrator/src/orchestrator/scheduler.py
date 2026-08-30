@@ -29,7 +29,17 @@ from pathlib import Path
 
 import httpx
 
-from .agent_runner import AgentRunner
+from .agent_runner import AgentRunner, SummaryCapableRunner
+from .cap_report import (
+    BUDGET_CAP,
+    CAP_SUMMARY_PROMPT,
+    TURNS_CAP,
+    MechanicalFacts,
+    SelfReport,
+    collect_git_facts,
+    parse_self_report,
+    render_report,
+)
 from .board_sanity import report_board_state
 from .build_identity import resolve_build_identity
 from .fold import FoldSignal, detect_fold_signals
@@ -69,6 +79,7 @@ from .types import (
     TrackerConfig,
     TrackerError,
     WorkflowError,
+    Workspace,
 )
 from .auth import AppInstallationTokenProvider, StaticTokenProvider
 from .workflow import Config, build_credentials, load_workflow, validate_dispatch
@@ -314,6 +325,9 @@ class RunningEntry:
                                            # failure refund (issue #35)
     session_id: str | None = None
     last_event_at: datetime | None = None  # stall-detection anchor (§8.5)
+    last_event: str = ""                   # its event NAME (issue #16): the
+                                           # anchor already exists, and the
+                                           # cap-hit report wants both halves
     retry_attempt: int | None = None
     circuit_probe_token: int | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -1592,6 +1606,10 @@ class Orchestrator:
         # cap ends the session — the loop is unwinnable no matter how good the
         # message is, because the only party who can act on it never sees it.
         pending_rejection: HandoffRejection | None = None
+        # issue #16: which ceiling ended the loop, or None for every other exit
+        # (handoff, role-pin state change, required-label removal). Only a
+        # ceiling produces a report — the others are not failures to explain.
+        cap_hit: str | None = None
         try:
             while True:
                 if turn_number == 1:
@@ -1726,12 +1744,116 @@ class Orchestrator:
                     log("worker budget ceiling reached; ending session normally",
                         issue_id=issue.id, issue_identifier=issue.identifier,
                         cost_usd=round(cumulative_cost, 4))
+                    cap_hit = BUDGET_CAP
                     break
                 if turn_number >= cfg.agent().max_turns:
+                    cap_hit = TURNS_CAP
                     break
                 turn_number += 1
+            if cap_hit is not None:
+                # issue #16. Runs AFTER the break, so it cannot re-enter the
+                # loop or re-cross the ceiling it just broke out of, and BEFORE
+                # after_run, so the workspace it reads is still the one the
+                # session left. `session_id` is still the live local here —
+                # that liveness is the whole reason this sits inside `_worker`
+                # rather than at the park/fail-review boundary, which sees only
+                # a reason string and a path.
+                await self._post_cap_hit_report(
+                    issue, ws, runner, cap_hit=cap_hit, session_id=session_id,
+                    turns_spent=turn_number, cumulative_cost=cumulative_cost)
         finally:
             await wsm.run_after_run(ws)                            # ignored on failure
+
+    # -- cap-hit report (issue #16) -------------------------------------------
+
+    async def _cap_hit_self_report(
+        self,
+        issue: Issue,
+        ws: Workspace,
+        runner: AgentRunner,
+        session_id: str | None,
+    ) -> tuple[SelfReport, str]:
+        """Run the bounded, tool-less summary pass. Returns (report, error).
+
+        Never raises. Every failure mode here — no session to resume, a provider
+        with no summary pass, a token mint that fails, a budget-dead session
+        that cannot afford one more turn — degrades to an empty report plus a
+        reason string, which `render_report` turns into the mechanical
+        fallback. The quota circularity makes that the EXPECTED outcome on the
+        budget path, not an edge case.
+        """
+        if session_id is None:
+            return SelfReport(), "no live session id"
+        if not isinstance(runner, SummaryCapableRunner):
+            return SelfReport(), f"provider {runner.provider_id} has no summary pass"
+        try:
+            agent_token = await self._agent_token(runner.turn_timeout_ms)
+            result = await runner.run_summary_turn(
+                ws.path, CAP_SUMMARY_PROMPT, session_id,
+                self._on_agent_event, issue.id, agent_token)
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must not raise
+            log("cap-hit summary pass errored", issue_id=issue.id,
+                issue_identifier=issue.identifier, error=str(exc))
+            return SelfReport(), f"summary pass errored: {exc}"
+        # The pass's cost is RECORDED, never compared: the ceiling it reports on
+        # was already crossed and broken out of, and this turn runs after the
+        # loop, so there is no comparison left to re-enter.
+        log("cap-hit summary pass", issue_id=issue.id,
+            issue_identifier=issue.identifier, status=result.status,
+            cost_usd=round(result.cost_usd, 4))
+        if result.status != "succeeded":
+            return SelfReport(), result.error or result.status
+        return parse_self_report(result.text), ""
+
+    async def _post_cap_hit_report(
+        self,
+        issue: Issue,
+        ws: Workspace,
+        runner: AgentRunner,
+        *,
+        cap_hit: str,
+        session_id: str | None,
+        turns_spent: int,
+        cumulative_cost: float,
+    ) -> None:
+        """Post the `## Cap-hit report` comment. Purely additive and fully
+        defensive: this path previously posted nothing and logged
+        `outcome="completed"`, and it must still reach that same exit however
+        badly the report goes. A raise here would convert a capped session into
+        a FAILED one and re-enter the retry/circuit accounting — turning a
+        diagnostic into a routing change, which is #31's job and not this one's.
+        """
+        cfg = self._cfg
+        assert cfg is not None
+        try:
+            report, summary_error = await self._cap_hit_self_report(
+                issue, ws, runner, session_id)
+            branch, commits_ahead = await collect_git_facts(ws.path)
+            entry = self.running.get(issue.id)
+            facts = MechanicalFacts(
+                cap=cap_hit,
+                turns_spent=turns_spent,
+                max_turns=cfg.agent().max_turns,
+                cost_usd=cumulative_cost,
+                budget_usd=runner.max_budget_usd,
+                branch=branch,
+                commits_ahead=commits_ahead,
+                last_event=entry.last_event if entry else "",
+                last_event_at=(
+                    entry.last_event_at.isoformat()
+                    if entry and entry.last_event_at else ""),
+            )
+            body = render_report(facts, report, summary_error=summary_error)
+            tracker, _ = self._components()
+            await tracker.add_issue_comment(issue.id, body)
+            log("cap-hit report posted", issue_id=issue.id,
+                issue_identifier=issue.identifier, cap=cap_hit,
+                self_reported=report.class_field,
+                mechanical=facts.cap_class.value)
+        except Exception as exc:  # noqa: BLE001 — see the docstring
+            log("cap-hit report failed; session ends unreported",
+                issue_id=issue.id, issue_identifier=issue.identifier,
+                cap=cap_hit, error=str(exc))
 
     def _on_worker_done(self, issue_id: str, task: asyncio.Task) -> None:
         """core §16.6 worker exit handling."""
@@ -2764,6 +2886,7 @@ class Orchestrator:
         if entry is None:
             return
         entry.last_event_at = event.timestamp
+        entry.last_event = event.event
         if event.event == "session_started":
             sid = event.payload.get("session_id")
             if sid:
