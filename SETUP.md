@@ -333,6 +333,14 @@ each issue's attempt budget. An issue only parks if it burns
 `max_sessions_per_issue` failures inside a single process lifetime. Durable
 session counts are issue #15.
 
+The same is true of the consecutive transient provider-failure counter
+(`max_transient_failures_per_issue`, default 6), which parks an issue the
+provider keeps refusing to serve: an issue that has accumulated failures short
+of that ceiling starts again from zero after a restart, while one already parked
+stays parked. If you are restarting *because* a provider was flapping, that is
+usually what you want — but it does mean a restart loop can hide the very
+condition this ceiling exists to surface.
+
 ---
 
 ## Stage 6 — Onboard real projects  [SCRIPT, repeat]

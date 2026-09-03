@@ -411,6 +411,29 @@ def test_agent_defaults(tmp_path: Path):
     assert a.max_retry_backoff_ms == 300000
     assert a.max_concurrent_agents_by_state == {}
     assert a.max_sessions_per_issue == 3
+    assert a.max_fail_review_sessions_per_issue == 1
+    # issue #195. The default is deliberately LOOSER than the bound #166
+    # removed — a transient failure used to spend one of the 3 sessions above,
+    # so a ceiling of 6 cannot re-park anything that refund unparked.
+    assert a.max_transient_failures_per_issue == 6
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "many", None, 2.5])
+def test_transient_failure_ceiling_cannot_be_configured_off(tmp_path: Path, bad):
+    """issue #195: same always-on coercion the session caps get. A ceiling
+    that could be set to 0 or disabled would restore the unbounded retry loop
+    this field exists to close."""
+    defn = WorkflowDefinition(
+        config={"agent": {"max_transient_failures_per_issue": bad}},
+        prompt_template="")
+    assert Config(defn, tmp_path).agent().max_transient_failures_per_issue == 6
+
+
+def test_transient_failure_ceiling_is_configurable(tmp_path: Path):
+    defn = WorkflowDefinition(
+        config={"agent": {"max_transient_failures_per_issue": 2}},
+        prompt_template="")
+    assert Config(defn, tmp_path).agent().max_transient_failures_per_issue == 2
 
 
 def test_agent_by_state_normalization_and_invalid_entries_ignored(tmp_path: Path):

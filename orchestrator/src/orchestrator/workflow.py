@@ -547,6 +547,13 @@ class Config:
         if isinstance(max_fail_review, bool) or not isinstance(max_fail_review, int) or max_fail_review <= 0:
             max_fail_review = 1
 
+        # issue #195: the transient provider-failure ceiling, same always-on
+        # coercion. It cannot be configured off — an unbounded retry loop
+        # against a flapping provider is the failure this field exists to stop.
+        max_transient = raw.get("max_transient_failures_per_issue", 6)
+        if isinstance(max_transient, bool) or not isinstance(max_transient, int) or max_transient <= 0:
+            max_transient = 6
+
         return AgentConfig(
             max_concurrent_agents=max_concurrent_agents,
             max_turns=max_turns,
@@ -554,6 +561,7 @@ class Config:
             max_concurrent_agents_by_state=by_state,
             max_sessions_per_issue=max_sessions_per_issue,
             max_fail_review_sessions_per_issue=max_fail_review,
+            max_transient_failures_per_issue=max_transient,
         )
 
     # -- execution providers (SPEC.md §1; AgDR-2026-08-29-retire-the-legacy-claude-block retires AgDR-017's dual-read) -

@@ -247,3 +247,34 @@ These are ours, layered on top, not in the original Symphony spec:
   notify the human at that point. The in-memory `parked` set survives only as
   session-counter bookkeeping for within-run unparks; it is not load-bearing for
   the park decision (AgDR-008 supersedes AgDR-002's in-memory-park weakness).
+- **Transient provider-failure ceiling**
+  (`agent.max_transient_failures_per_issue`, default 6) — the cap above bounds
+  *work*, and deliberately no longer bounds *provider failures*: a circuit
+  failure on a transient class (rate limit, provider unavailable) refunds the
+  session it spent, because a provider outage is shared infrastructure state and
+  must not consume issue allowance (issue #166 / AgDR-026). That refund removed
+  the only thing bounding those retries — the session cap had been doing the job
+  by accident — so an issue whose dispatches failed only on the provider was
+  re-dispatched forever, paced solely by the circuit's 5-minute cooldown. This
+  is the replacement bound: N **consecutive** transient circuit failures on one
+  issue and the orchestrator parks it, through the same `_park` path as the
+  session cap (claim released, workspace preserved, comment, `status:parked`).
+  Three properties carry the design (issue #195):
+  **it counts attempts, never elapsed time** — a wall-clock ceiling would accrue
+  while the circuit was *refusing* dispatch, so one multi-day latched outage
+  would park every waiting issue having made zero attempts, which is exactly the
+  option AgDR-026 rejected; **only the transient classes count** — a latched
+  class (bad credentials, plan limit, exhausted credits) holds the circuit open
+  until an operator fixes the provider and never moves the counter;
+  and **any served dispatch clears it** — a success, or a failure the provider
+  answered, resets to zero, so a long-lived ticket on a merely unreliable
+  provider never accumulates toward a park, and a single long healthy session
+  (which makes one attempt, however many hours it runs) cannot be bounded by
+  this at all. The park comment names the ceiling and says the failures were
+  *not* charged to the work budget, because the whole point of #166 was that
+  those two had been conflated — and it is the only diagnosis channel available,
+  since the cap-hit self-report (issue #16) runs inside a live session and by
+  here the session is dead and the provider that would host it is the thing
+  failing. The counter is process memory like the session counters, so a restart
+  forgives it; the park it produced is durable, because that lives in the label.
+  Unpark clears it with the rest.

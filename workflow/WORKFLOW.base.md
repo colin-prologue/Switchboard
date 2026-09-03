@@ -53,6 +53,14 @@ agent:
   # spent counter. One pass per episode — the verifier reads evidence and posts
   # a verdict; it does not iterate. Invalid values coerce back to 1.
   max_fail_review_sessions_per_issue: 1
+  # Owned extension (issue #195): CONSECUTIVE transient provider failures (rate
+  # limit / provider unavailable) allowed on one issue before it parks. Those
+  # failures are refunded rather than charged to the budgets above (issue #166 —
+  # a provider outage is shared infrastructure state, not this ticket's fault),
+  # which left them with no ceiling at all; this is it. It counts ATTEMPTS, never
+  # elapsed time, so a multi-day outage in which nothing was dispatched parks
+  # nothing. Invalid values coerce back to 6.
+  max_transient_failures_per_issue: 6
 
 # Owned extension (issue #51): operator identity for fold-signal DETECTION.
 # Only 👍/👎 reactions and `/fold` // `/no-fold` comments from these GitHub
