@@ -64,6 +64,10 @@ set -a
 . "$ENV_FILE"
 set +a
 
+# The startup banner. Its SHAPE is a detection surface, not just prose:
+# `orchestrator/fleet_health.py` counts `^[run-project] <slug> ->` to find crash
+# loops (SETUP.md Stage 5b). Change the prefix or the arrow and that detection
+# goes silently blind — update `banner_pattern` in the same commit.
 echo "[run-project] $SLUG -> $SB_GITHUB_REPO (workspaces: $SB_WORKSPACE_ROOT)"
 mkdir -p "$SB_WORKSPACE_ROOT"
 
