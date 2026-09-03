@@ -247,3 +247,26 @@ These are ours, layered on top, not in the original Symphony spec:
   notify the human at that point. The in-memory `parked` set survives only as
   session-counter bookkeeping for within-run unparks; it is not load-bearing for
   the park decision (AgDR-008 supersedes AgDR-002's in-memory-park weakness).
+- **Operator inbox digest** (`inbox_digest.interval_ms`, default 86400000; `0`
+  disables) — on a cadence, the poll tick renders one always-current summary of
+  what is waiting on the human: issues sitting in `gate_states` or the handoff
+  state, every open PR in the repo, parked issues *with their park reasons*, and
+  the `## Fail-review verdict` and `## Cap-hit report` comments posted since the
+  last digest. It lands by **whole-body replacement** on a dedicated
+  find-or-create issue ("Switchboard operator inbox") that carries no `status:*`
+  label, so the dispatcher can never claim it and its own `updatedAt` bumps are
+  inert. Two §11.5 write exceptions, both of the class already sanctioned above:
+  `createIssue` (the ops-log mechanism, second instance) and `updateIssue(body)`
+  (the fold-apply mechanism, second instance). **No comment and no label write
+  on any tracked issue, ever** — that is the invariant, not a side effect: a
+  scheduled comment channel re-enters the OBS-022 self-unpark incident class,
+  and the digest's `updatedAt`-invisibility is bound by test. The write is
+  read-compare-write: unchanged content produces no write at all, and a body
+  changed under the read is refused rather than clobbered (the accepted
+  single-operator TOCTOU residual `fold_apply` names). The "since last digest"
+  watermark is durable **in the digest body itself** and advances only on a
+  verified write, so a restart neither replays old artifacts nor closes the
+  window over unread ones. Every failure is non-fatal to the poll
+  (`board_sanity` posture). It reports what accumulated *for the human*, never
+  whether the fleet is alive — that is the health ticket's beat
+  (AgDR-2026-09-03-the-inbox-digest-is-a-snapshot-not-a-feed; issue #192).

@@ -30,6 +30,7 @@ from .types import (
     FoldConfig,
     ReviewResponseConfig,
     HooksConfig,
+    InboxDigestConfig,
     MixedExecutionConfig,
     TrackerConfig,
     WorkflowDefinition,
@@ -351,6 +352,32 @@ class Config:
                 f"{value!r} (fetch on every tick; use 1 if that is intended)",
             )
         return value
+
+    def inbox_digest(self) -> InboxDigestConfig:
+        """Cadence for the operator inbox digest (issue #192).
+
+        DEFAULT-ONLY, in the shape of `polling.interval_ms` and the `freshness`
+        keys above: it ships in no template, a wrong type silently defaults, and
+        an out-of-range value raises. Nothing about the digest is per-project —
+        it needs no login allowlist and no provisioned label — so a template
+        placeholder would add a composition surface (and a drift check) to carry
+        a number every project wants the same value for.
+
+        `0` disables. It is spelled as a value rather than as an absent block so
+        that switching the digest off is a visible, greppable act.
+        """
+        raw = self._config.get("inbox_digest")
+        raw = raw if isinstance(raw, dict) else {}
+        value = raw.get("interval_ms", 86400000)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return InboxDigestConfig()
+        if value < 0:
+            raise WorkflowError(
+                "workflow_parse_error",
+                f"inbox_digest.interval_ms must be >= 0, got {value!r} "
+                "(use 0 to disable the digest)",
+            )
+        return InboxDigestConfig(interval_ms=value)
 
     # -- fold (issue #51 part a: operator fold-signal detection) ---------------
 
@@ -1079,3 +1106,4 @@ def validate_dispatch(cfg: Config, *, provider_id: str = "claude") -> None:
     cfg.freshness_min_interval_ms()
     cfg.fold()
     cfg.review_response()
+    cfg.inbox_digest()

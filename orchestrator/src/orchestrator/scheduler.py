@@ -44,6 +44,7 @@ from .board_sanity import report_board_state
 from .build_identity import resolve_build_identity
 from .fold import FoldSignal, detect_fold_signals
 from .fold_apply import apply_fold_signal
+from .inbox_digest import PARK_COMMENT_PREFIX, run_digest
 from .log import log
 from .handoff import HandoffRejection, snapshot_evidence, validate_handoff
 from .prompt import render_prompt
@@ -418,6 +419,26 @@ class Orchestrator:
         # ops logs with no network failure involved at all.
         self._ops_issue_id: str | None = None
         self._ops_issue_lock = asyncio.Lock()
+
+        # Operator inbox digest (issue #192). The digest issue is resolved
+        # exactly as the ops log is — cached id, revalidated before reuse
+        # because the body promises "closing it is safe", single-flighted
+        # because two concurrent find-or-creates each miss the other's create.
+        # Its own lock rather than `_ops_issue_lock`: the two resolutions
+        # search for different titles, and sharing one lock would let a digest
+        # cycle's read block a latch notice, which is the one notice that must
+        # not wait behind routine work.
+        self._digest_issue_id: str | None = None
+        self._digest_issue_lock = asyncio.Lock()
+        # Cadence bookkeeping, stamped AT EXEC (the freshness-preflight rule):
+        # a slow or failing digest consumes its interval rather than re-running
+        # every tick. Unset at construction so the first tick renders one.
+        self._digest_last_run_at: datetime | None = None
+        # In-memory FALLBACK watermark only. The durable one rides in the
+        # digest body, which is what survives a restart; this covers the single
+        # case the body cannot — an operator who rewrote the body past its
+        # marker — and is deliberately not consulted otherwise.
+        self._digest_watermark: datetime | None = None
 
         # owned extension state (SPEC.md §4 session cap / parking)
         # Keyed by (issue id, session role) — NOT by issue id alone (issue #35 /
@@ -927,6 +948,90 @@ class Orchestrator:
 
         await self._poll_fold_signals(tracker)
         await self._poll_review_responses(tracker)
+
+        # LAST, and after dispatch for board-sanity's reason: this is a report,
+        # and a report that can delay or halt the work the tick exists to start
+        # is a bigger hazard than the backlog it enumerates. It reuses
+        # `open_issues` — the tick's already-fetched unfiltered set — so the two
+        # label-derived sections cost no extra query.
+        await self._run_inbox_digest(tracker, cfg, open_issues)
+
+    # -- operator inbox digest (issue #192) -------------------------------------
+
+    async def _resolve_digest_issue(self, tracker) -> str:
+        """The digest issue's node id, single-flighted and revalidated.
+
+        The ops-log resolution, verbatim in shape (`_post_latch_notice`): a
+        cached id is re-read before reuse because the digest issue's own body
+        tells the operator that closing it is safe, and a cache that never
+        expires would keep rewriting a closed issue nobody sees.
+        """
+        async with self._digest_issue_lock:
+            if self._digest_issue_id is not None:
+                states = await tracker.fetch_issue_states_by_ids(
+                    [self._digest_issue_id])
+                if not states or states[0].state == "closed":
+                    self._digest_issue_id = None
+                    # The new issue starts a new window: its body carries no
+                    # watermark, and the in-memory fallback is what stops the
+                    # first digest on it from replaying every artifact ever
+                    # posted. Keeping it is the point.
+            if self._digest_issue_id is None:
+                self._digest_issue_id = await tracker.find_or_create_digest_issue()
+        return self._digest_issue_id
+
+    async def _run_inbox_digest(self, tracker, cfg, open_issues: list[Issue]) -> str:
+        """One digest cycle, cadence-gated. Never raises; returns its status.
+
+        Non-fatal by construction, board_sanity's posture: every failure path
+        below returns a status string and logs. The digest reports what
+        accumulated for the operator, so a digest that could stop the fleet
+        would be strictly worse than no digest at all.
+
+        The watermark advances ONLY when a write landed and verified. Every
+        other outcome — unchanged, refused, failed — leaves it where it was, so
+        the window stays open over artifacts nobody has been shown yet.
+        """
+        interval_ms = cfg.inbox_digest().interval_ms
+        if interval_ms <= 0:
+            return "disabled"
+        now = datetime.now(timezone.utc)
+        if self._digest_last_run_at is not None:
+            elapsed_ms = (now - self._digest_last_run_at).total_seconds() * 1000
+            if elapsed_ms < interval_ms:
+                return "throttled"
+        self._digest_last_run_at = now
+
+        try:
+            digest_issue_id = await self._resolve_digest_issue(tracker)
+        except Exception as exc:  # noqa: BLE001 - a report never halts the poll
+            log("inbox digest: could not resolve the digest issue; skipping "
+                "this cycle", error=str(exc))
+            return "unresolved"
+
+        # `now` is captured BEFORE the gather so an artifact posted while this
+        # cycle reads is re-reported next cycle rather than dropped.
+        #
+        # `run_digest` handles every tracker failure itself and returns a
+        # status. The belt around it is for the half it does NOT wrap — its own
+        # rendering — because "non-fatal" has to hold for the whole report, not
+        # just the parts whose failure was anticipated.
+        try:
+            outcome = await run_digest(
+                tracker, cfg.tracker(), open_issues,
+                digest_issue_id=digest_issue_id,
+                now=now,
+                fallback_watermark=self._digest_watermark,
+            )
+        except Exception as exc:  # noqa: BLE001 - a report never halts the poll
+            log("inbox digest: the cycle raised; skipping it this round",
+                error=repr(exc))
+            return "errored"
+        if outcome.watermark is not None:
+            self._digest_watermark = outcome.watermark
+        log("inbox digest cycle", status=outcome.status, detail=outcome.detail,
+            wrote=str(outcome.wrote))
+        return outcome.status
 
     # -- review-response sub-poll (issue #43 / AgDR-037) ------------------------
 
@@ -2791,7 +2896,7 @@ class Orchestrator:
         self._cancel_retry(issue.id)
         tracker, wsm = self._components()
         body = (
-            f"**Switchboard parked this issue** — {reason}.\n\n"
+            f"{PARK_COMMENT_PREFIX}{reason}.\n\n"
             f"The orchestrator will not dispatch it again while it carries the "
             f"`{PARK_LABEL}` label. Remove that label (or move the issue off "
             f"*Parked* on the board) to re-dispatch — EVERY session counter "
