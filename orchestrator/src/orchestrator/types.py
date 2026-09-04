@@ -217,6 +217,17 @@ class AgentConfig:
     # session and the next dispatch parks the issue with no verdict comment.
     # That is deliberate — raising the default is not the fix.
     max_fail_review_sessions_per_issue: int = 1
+    # Owned extension (issue #195): CONSECUTIVE transient provider-circuit
+    # failures allowed on one issue before it parks. Counts attempts, never
+    # elapsed time — a bound that accrued while the circuit was refusing
+    # dispatch would park every waiting issue during one long outage, which is
+    # the option AgDR-026 rejected. Same always-on coercion as the caps above.
+    #
+    # The default is deliberately LOOSER than the accidental bound #166
+    # removed: before that fix a transient failure spent one of
+    # `max_sessions_per_issue` (default 3), so a ceiling at 6 cannot re-park
+    # anything the refund unparked.
+    max_transient_failures_per_issue: int = 6
 
 
 @dataclass

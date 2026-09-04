@@ -4572,3 +4572,260 @@ async def test_a_provider_outage_never_consumes_issue_allowance(
     assert issue.id not in orch.parked
     latched = orch.provider_circuits["claude"].state is CircuitState.OPEN_LATCHED
     assert latched is expect_latched
+
+
+# ---------------------------------------------------------------------------
+# issue #195 — the transient provider-failure ceiling.
+#
+# #166 stopped charging provider failures to the issue's session allowance
+# (AgDR-026: "a provider outage is shared infrastructure state and must not
+# consume issue allowance"). Correct, and it removed the only thing bounding
+# them: `max_sessions_per_issue` had been doing that job by accident. These
+# tests pin the replacement — a ceiling on CONSECUTIVE transient failures,
+# counted per attempt, never per elapsed second.
+# ---------------------------------------------------------------------------
+
+TRANSIENT_CEILING_TMPL = WORKFLOW_TMPL.replace(
+    "  max_sessions_per_issue: 2",
+    "  max_sessions_per_issue: 2\n  max_transient_failures_per_issue: 2",
+)
+
+
+def _transient_harness(tmp_path, monkeypatch, factory, *, hold_on_turn=None):
+    """Harness whose worker outcome is scripted turn by turn, plus a circuit
+    on a fake clock so a test can expire the 5-minute cooldown on demand."""
+    runner = ScriptedRunner(factory, hold_on_turn=hold_on_turn)
+    orch, tracker, _, ws_root = _build_harness(
+        tmp_path, monkeypatch,
+        workflow_tmpl=TRANSIENT_CEILING_TMPL, runner=runner)
+    # Keyed on the RUNNER's provider id (`_dispatch` reads it from there, not
+    # from the selector), with a short cooldown on a fake clock so a test can
+    # expire the real 5-minute wait deliberately instead of sleeping.
+    now = [0.0]
+    circuit = ProviderCircuit(
+        runner.provider_id, cooldown_ms=1000, clock=lambda: now[0])
+    orch.provider_circuits[runner.provider_id] = circuit
+    return orch, tracker, runner, ws_root, circuit, now
+
+
+def _transient_result(*_args, **_kwargs):
+    return TurnResult(
+        status="failed",
+        session_id=None,
+        error="upstream 503",
+        failure_class=FailureClass.PROVIDER_UNAVAILABLE,
+    )
+
+
+async def test_repeated_transient_failures_park_the_issue_at_the_ceiling(
+    tmp_path, monkeypatch,
+):
+    """AC1 + AC2: the bound stops re-dispatch, and its artifact names it.
+
+    A transient park is REPORTLESS by construction — issue #16's cap-hit
+    report fires inside `_worker` while the session is live, and by the time
+    this ceiling trips the session is dead and the provider that would host a
+    self-report is the thing that is failing. So the park comment is the ONLY
+    diagnosis channel, and it has to carry the distinction #166 exists because
+    somebody conflated: provider down vs. work budget spent.
+    """
+    orch, tracker, runner, ws_root, circuit, now = _transient_harness(
+        tmp_path, monkeypatch, _transient_result)
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+
+    await orch._tick()                                   # failure 1
+    await wait_for(lambda: orch.transient_failures.get(issue.id) == 1)
+    assert issue.id in orch.provider_waiting
+    assert issue.id not in orch.parked
+
+    now[0] = 2.0                                         # cooldown expires
+    await orch._resume_provider_waiters(tracker.candidates)   # failure 2 (probe)
+    await wait_for(lambda: orch.transient_failures.get(issue.id) == 2)
+    assert issue.id not in orch.parked, \
+        "the ceiling bounds the NEXT dispatch, not the failure that reaches it"
+
+    now[0] = 4.0
+    await orch._resume_provider_waiters(tracker.candidates)   # -> parks
+    await wait_for(lambda: issue.id in orch.parked)
+
+    assert len(runner.turns) == 2, "no third session ran"
+    assert issue.id not in orch.provider_waiting
+    assert issue.id not in orch.claimed
+
+    parks = park_comments(tracker)
+    assert len(parks) == 1
+    body = parks[0][1]
+    # The bound is NAMED in the artifact that stops the issue (AC1)...
+    assert "failed 2 times in a row" in body
+    assert "ceiling of 2" in body
+    # ...and an operator can tell this from a budget cap-park (AC2).
+    assert "PROVIDER outage" in body
+    assert "not an exhausted work budget" in body
+    assert "budget exhausted" not in body
+    assert "status:parked" in issue.labels
+
+    # NON-GOAL HELD: #166's refund is untouched. Two provider failures, zero
+    # sessions charged — the park happened without the allowance moving.
+    assert orch.sessions_for_issue(issue.id) == {}
+    assert (ws_root / "1").is_dir()                      # workspace preserved
+
+    # AC4 (restart is stated, and this is the statement): the counter is
+    # process memory, like `sessions_per_issue`. The PARK is durable — the
+    # label lives on the tracker — so a restart re-reads a parked issue and
+    # leaves it parked, but a restart BEFORE the ceiling forgives the count.
+    orch.transient_failures.clear()
+    assert orch.transient_failures == {}
+
+    await orch._tick()                                   # still parked
+    assert len(runner.turns) == 2
+    assert len(park_comments(tracker)) == 1
+
+
+async def test_a_transient_failure_that_then_succeeds_never_reaches_the_ceiling(
+    tmp_path, monkeypatch,
+):
+    """AC5, the middle case: the bound counts CONSECUTIVE failures.
+
+    An issue that flaps, recovers, does work, and flaps again must not
+    accumulate toward a park — otherwise a long-lived ticket on a merely
+    unreliable provider parks for reasons that have nothing to do with either
+    the provider's current state or its own budget.
+    """
+    def factory(n, _resume):
+        if n in (1, 3):
+            return _transient_result()
+        return TurnResult(status="succeeded", session_id=f"sess-{n}",
+                          cost_usd=0.01, num_turns=1)
+
+    orch, tracker, runner, _, circuit, now = _transient_harness(
+        tmp_path, monkeypatch, factory)
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+
+    await orch._tick()                                   # turn 1: transient
+    await wait_for(lambda: orch.transient_failures.get(issue.id) == 1)
+
+    now[0] = 2.0
+    await orch._resume_provider_waiters(tracker.candidates)   # turn 2: success
+    await wait_for(lambda: orch.transient_failures.get(issue.id) is None)
+    assert circuit.state is CircuitState.CLOSED
+
+    # A third dispatch fails transiently again. With a per-issue lifetime count
+    # this would be the second failure and the ceiling of 2 would park it.
+    await wait_for(lambda: len(runner.turns) == 3)       # continuation -> turn 3
+    await wait_for(lambda: orch.transient_failures.get(issue.id) == 1)
+    assert issue.id not in orch.parked, \
+        "an intervening success must reset the consecutive count"
+    assert park_comments(tracker) == []
+
+
+async def test_a_long_healthy_session_is_never_bounded_by_the_transient_ceiling(
+    tmp_path, monkeypatch,
+):
+    """AC3: a bound on transient failures must not bound successful work.
+
+    The distinction the ticket has to resolve — "this provider keeps failing"
+    vs "this work is legitimately long" — is why this counts ATTEMPTS. A
+    single session running for hours makes zero attempts, so it cannot move
+    the counter no matter how long it runs. When such an issue does eventually
+    park, it parks on its SESSION budget, with the session budget's wording.
+    """
+    def factory(n, _resume):
+        return TurnResult(status="succeeded", session_id=f"sess-{n}",
+                          cost_usd=0.01, num_turns=1)
+
+    orch, tracker, runner, _, _, _ = _transient_harness(
+        tmp_path, monkeypatch, factory, hold_on_turn=1)
+    issue = make_issue(1, fail_reviewed=True)   # #31 episode bound seeded: park
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+
+    await orch._tick()
+    await wait_for(lambda: len(runner.turns) == 1)   # the turn is in flight
+
+    # The long session is in flight. Poll repeatedly — every tick is a chance
+    # for a time-based bound to fire, and none of them may.
+    for _ in range(5):
+        await orch._tick()
+    assert orch.transient_failures == {}
+    assert issue.id not in orch.parked
+    assert len(runner.turns) == 1
+
+    runner.release.set()
+    await wait_for(lambda: issue.id in orch.parked)      # session cap 2, not this
+
+    body = park_comments(tracker)[0][1]
+    assert "implement budget exhausted (2/2 implement sessions)" in body
+    assert "PROVIDER outage" not in body                 # the two are distinct
+    assert orch.transient_failures == {}
+
+
+async def test_a_latched_outage_never_accrues_toward_the_transient_ceiling(
+    tmp_path, monkeypatch,
+):
+    """The disqualifier folded in from #194, in test form.
+
+    A latched class (bad credentials, plan limit, exhausted credits) holds the
+    circuit open until an operator fixes the provider. Counting those would
+    park every waiting issue during one multi-day outage in which ZERO
+    attempts occurred — the "park every affected issue" option AgDR-026
+    rejected, wearing a counter instead of a timer.
+    """
+    def factory(_n, _resume):
+        return TurnResult(
+            status="failed", session_id=None, error="401",
+            failure_class=FailureClass.PROVIDER_AUTHENTICATION)
+
+    orch, tracker, runner, _, circuit, _ = _transient_harness(
+        tmp_path, monkeypatch, factory)
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+
+    await orch._tick()
+    await wait_for(lambda: issue.id in orch.provider_waiting)
+    assert circuit.state is CircuitState.OPEN_LATCHED
+
+    for _ in range(5):
+        await orch._tick()
+    assert orch.transient_failures == {}, \
+        "a latched outage is the operator's to fix, not the issue's to pay for"
+    assert issue.id not in orch.parked
+    assert len(runner.turns) == 1                        # circuit blocks the rest
+
+
+async def test_unparking_clears_the_transient_counter(tmp_path, monkeypatch):
+    """`_park`'s comment promises every counter resets on unpark. A transient
+    counter that survived would make that promise a lie AND make the documented
+    remedy a no-op: the operator removes the label and the issue re-parks on
+    the very next dispatch."""
+    orch, tracker, runner, _, _, now = _transient_harness(
+        tmp_path, monkeypatch, _transient_result)
+    issue = make_issue(1)
+    tracker.candidates = [issue]
+    tracker.states = {issue.id: issue}
+
+    await orch._tick()
+    await wait_for(lambda: orch.transient_failures.get(issue.id) == 1)
+    now[0] = 2.0
+    await orch._resume_provider_waiters(tracker.candidates)
+    await wait_for(lambda: orch.transient_failures.get(issue.id) == 2)
+    now[0] = 4.0
+    await orch._resume_provider_waiters(tracker.candidates)
+    await wait_for(lambda: issue.id in orch.parked)
+
+    body = park_comments(tracker)[0][1]
+    assert "transient provider-failure counter" in body, \
+        "the park comment must name the counter it promises to reset"
+
+    unparked = make_issue(1)                    # human removed status:parked
+    tracker.candidates = [unparked]
+    tracker.states = {issue.id: unparked}
+    await orch._tick()
+
+    assert issue.id not in orch.parked
+    assert orch.transient_failures.get(issue.id) != 2, \
+        "unpark must clear the ceiling, or the remedy the comment names is inert"
