@@ -300,6 +300,25 @@ class ReviewResponseConfig:
     bot_logins: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class InboxDigestConfig:
+    """Cadence for the operator inbox digest (issue #192).
+
+    ON BY DEFAULT, unlike `FoldConfig`/`ReviewResponseConfig` — and the
+    difference is the whole point of the field. Those two gate on an identity
+    the orchestrator cannot invent (which login is the operator? which is the
+    bot?), so shipping them off is the only honest default. The digest needs no
+    identity: it enumerates what is already public on the board and writes to an
+    issue it creates itself. A digest shipped off would be the exact
+    shipped-but-unwired shape issue #172 exists to report, on the one feature
+    whose entire purpose is to stop things going unnoticed.
+
+    `interval_ms <= 0` disables it — the explicit opt-out, not a default.
+    """
+
+    interval_ms: int = 86400000  # ~one digest per wave/day
+
+
 @dataclass
 class MixedExecutionConfig:
     """Validated Stage 6 mixed-mode envelope for provider selection."""

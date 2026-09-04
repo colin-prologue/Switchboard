@@ -165,6 +165,17 @@ class FakeTracker:
         self.ops_issue_calls = 0
         self.ops_issue_id: str | None = None
         self.ops_issues_created = 0
+        # --- operator inbox digest seams (issue #192) -----------------------
+        # Same find-or-create shape as the ops log, kept as its OWN store
+        # because the two are different issues resolved by different titles —
+        # a shared slot would let a test pass while the feature posted its
+        # digest into the ops log, which is the one place it must never write.
+        self.digest_issue_id: str | None = None
+        self.digest_issues_created = 0
+        self.digest_issue_calls = 0
+        self.digest_issue_error: TrackerError | None = None
+        self.repo_open_prs: list[dict] = []
+        self.repo_prs_error: TrackerError | None = None
         # ONE-SHOT divergence injection: perturbs the STORED bytes for exactly
         # one write. The only way a derive-faithful fake can exercise the
         # verify-after-write branch (AC 1) without lying about anything else.
@@ -264,6 +275,42 @@ class FakeTracker:
             self.states[self.ops_issue_id] = make_issue(900 + self.ops_issues_created)
             self.states[self.ops_issue_id].id = self.ops_issue_id
         return self.ops_issue_id
+
+    async def find_or_create_digest_issue(self):
+        # issue #192: the ops-log mechanism, second instance. The created issue
+        # goes into `states` (so the cached-id revalidation can read it) but
+        # NOT into `candidates` — the real one carries no `status:*` label, so
+        # the dispatcher never sees it, and a fake that put it in the
+        # dispatchable set would model an issue the real feature cannot create.
+        self.api_calls += 1
+        self.digest_issue_calls += 1
+        if self.digest_issue_error is not None:
+            raise self.digest_issue_error
+        if self.digest_issue_id is None:
+            self.digest_issues_created += 1
+            suffix = "" if self.digest_issues_created == 1 else f"-{self.digest_issues_created}"
+            self.digest_issue_id = f"digest-issue-node-id{suffix}"
+            issue = make_issue(950 + self.digest_issues_created)
+            issue.id = self.digest_issue_id
+            issue.labels = []  # no status:* label, ever — that IS the mechanism
+            issue.state = ""
+            issue.description = "seed body, no digest written yet"
+            self.states[self.digest_issue_id] = issue
+        return self.digest_issue_id
+
+    def close_digest_issue(self):
+        """Operator closes the inbox without restarting the orchestrator."""
+        if self.digest_issue_id is not None:
+            self.states[self.digest_issue_id].state = "closed"
+            self.digest_issue_id = None
+
+    async def fetch_open_prs_repo_wide(self):
+        # issue #192: repo-wide, head-ref-blind — deliberately a different
+        # store from `open_prs`, which is keyed by head ref.
+        self.api_calls += 1
+        if self.repo_prs_error is not None:
+            raise self.repo_prs_error
+        return [dict(pr) for pr in self.repo_open_prs]
 
     async def add_issue_comment(self, issue_id, body):
         self.api_calls += 1

@@ -275,6 +275,30 @@ query($threadId: ID!, $cursor: String) {
 # active set, so the ops log is never dispatched to an agent.
 OPS_ISSUE_TITLE = "Switchboard ops log"
 
+# issue #192: the operator inbox digest's own surface. Same find-or-create-by-
+# TITLE mechanism and the same no-`status:*`-label property as the ops log, for
+# the same two reasons (works with no prior setup; the dispatcher can never
+# claim it). A SEPARATE issue rather than a section of the ops log because the
+# two have incompatible write modes: latch notices are append-only comments by
+# design (a stopped system's only signal must not be overwritable), and the
+# digest is a whole-body replacement.
+DIGEST_ISSUE_TITLE = "Switchboard operator inbox"
+
+# fetch_open_prs_repo_wide: the digest's PR section (issue #192). `fetch_open_prs`
+# is head-ref-scoped (built for handoff evidence) and so structurally cannot
+# answer "what PRs are open in this repo". Reads were never the §11.5
+# restriction; only writes are.
+OPEN_PRS_QUERY = """
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: [OPEN], first: 50, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
+      nodes { number title url isDraft headRefName createdAt updatedAt }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
 REPOSITORY_ID_QUERY = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) { id }
@@ -614,27 +638,61 @@ class GitHubTracker:
         nowhere when a project skipped its setup is the failure mode this whole
         change exists to remove.
         """
+        return await self._find_or_create_titled_issue(
+            OPS_ISSUE_TITLE,
+            "Switchboard posts operator-facing notices here — conditions "
+            "that stop work and that only a human can clear.\n\n"
+            "This issue carries no `status:*` label on purpose, so the "
+            "orchestrator never dispatches it. Closing it is safe; the "
+            "next notice opens a new one.",
+        )
+
+    async def find_or_create_digest_issue(self) -> str:
+        """Node id of this repo's operator inbox, creating it if absent (#192).
+
+        The ops log's mechanism, second instance — hence the shared helper
+        rather than a second copy of the search-then-create walk. The seed body
+        is deliberately NOT a digest: the first cycle replaces it wholesale, and
+        a placeholder that looked like an empty inbox would be indistinguishable
+        from a digest that ran and found nothing.
+        """
+        return await self._find_or_create_titled_issue(
+            DIGEST_ISSUE_TITLE,
+            "Switchboard rewrites this body on a schedule with what is waiting "
+            "for you: issues sitting at a gate, open pull requests, parked "
+            "issues and why, and the fail-review verdicts and cap-hit reports "
+            "posted since the last digest.\n\n"
+            "This issue carries no `status:*` label on purpose, so the "
+            "orchestrator never dispatches it. Closing it is safe; the next "
+            "digest opens a new one. Editing the body by hand is safe too — "
+            "your edit stands until the next cycle re-renders over it.\n\n"
+            "_No digest has been written yet._",
+        )
+
+    async def _find_or_create_titled_issue(self, title: str, body: str) -> str:
+        """Node id of the OPEN issue with exactly `title`, created if absent.
+
+        Identified by TITLE, not by a label — a label would have to be resolved
+        (and created when absent) before the issue can be made, and both callers
+        exist precisely so they work on a repo nobody prepared. Not idempotent
+        under a lost create response; that residual is accepted (AgDR-046) and
+        single-flighted by the caller.
+        """
         owner, name = self._split_repo()
         raw_issues = await self._paginate(
             CANDIDATE_ISSUES_QUERY, {"owner": owner, "name": name, "states": ["OPEN"]}
         )
         for raw in raw_issues:
             issue = self._normalize_issue(raw)
-            if issue.title.strip() == OPS_ISSUE_TITLE:
+            if issue.title.strip() == title:
                 return issue.id
         repo = await self._request(REPOSITORY_ID_QUERY, {"owner": owner, "name": name})
         created = await self._request(
             CREATE_ISSUE_MUTATION,
             {
                 "repositoryId": repo["repository"]["id"],
-                "title": OPS_ISSUE_TITLE,
-                "body": (
-                    "Switchboard posts operator-facing notices here — conditions "
-                    "that stop work and that only a human can clear.\n\n"
-                    "This issue carries no `status:*` label on purpose, so the "
-                    "orchestrator never dispatches it. Closing it is safe; the "
-                    "next notice opens a new one."
-                ),
+                "title": title,
+                "body": body,
             },
         )
         return created["createIssue"]["issue"]["id"]
@@ -733,6 +791,50 @@ class GitHubTracker:
                     "id": node_id if isinstance(node_id, str) else None,
                     "number": number, "head_sha": head_sha, "closes": closes,
                 })
+        return out
+
+    async def fetch_open_prs_repo_wide(self) -> list[dict]:
+        """Every open PR in the repo (issue #192: the digest's PR section).
+
+        Returns `[{"number", "title", "url", "is_draft", "head_ref",
+        "updated_at"}]`, oldest first. Read-only, and deliberately NOT a
+        generalization of `fetch_open_prs`: that one is head-ref-scoped, selects
+        the closing-issue references the handoff validator needs, and paginates
+        them per PR — a repo-wide sweep of that selection would spend a nested
+        page per PR to answer a question the digest never asks.
+        """
+        owner, name = self._split_repo()
+        out: list[dict] = []
+        after: str | None = None
+        while True:
+            data = await self._request(
+                OPEN_PRS_QUERY, {"owner": owner, "name": name, "after": after}
+            )
+            conn = ((data.get("repository") or {}).get("pullRequests")) or {}
+            nodes = conn.get("nodes")
+            page_info = conn.get("pageInfo")
+            if nodes is None or page_info is None:
+                raise TrackerError(
+                    "github_unknown_payload", "missing pullRequests nodes/pageInfo"
+                )
+            for node in nodes:
+                if not isinstance(node, dict) or not isinstance(node.get("number"), int):
+                    continue
+                out.append({
+                    "number": node["number"],
+                    "title": node.get("title") or "",
+                    "url": node.get("url"),
+                    "is_draft": bool(node.get("isDraft")),
+                    "head_ref": node.get("headRefName") or "",
+                    "updated_at": _parse_iso8601(node.get("updatedAt")),
+                })
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if after is None:
+                raise TrackerError(
+                    "github_missing_end_cursor", "hasNextPage true but endCursor missing"
+                )
         return out
 
     async def fetch_pr_comments(self, pr_number: int) -> list[IssueComment]:
