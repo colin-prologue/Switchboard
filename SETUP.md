@@ -293,38 +293,116 @@ timestamped, so splitting them would make it impossible to line a traceback up
 with the startup banner it followed. There is no rotation — the file grows
 without bound, which is accepted for now (issue #12).
 
-### Reading it: two failure modes, one of which launchd cannot see
+### Health: run the check, don't remember to grep
+
+Supervision restarts crashes. It does not **detect** degradation, and one of the
+four degraded states below is invisible to `KeepAlive` by construction. The
+primary path is one mechanical check:
+
+```bash
+bash scripts/fleet-health.sh              # every registered/installed slug
+bash scripts/fleet-health.sh $SLUG        # just one
+```
+
+It is an **external observer**: a standalone process that reads only the log
+files, the `.run/` markers and `launchctl` state, makes no network calls, and
+still produces a complete report with every orchestrator dead. Findings go to
+stderr one line each — state, slug, evidence, the remedy command — and the whole
+fleet result lands in `.run/fleet-health.json`. Exit status is **0 all clear, 1
+at least one degraded slug**, so an interval job can escalate on the status
+alone.
+
+Install it as an interval job — cron is the one-liner:
+
+```bash
+mkdir -p ~/Library/Logs/switchboard
+crontab -e
+# */10 * * * * bash /path/to/switchboard/scripts/fleet-health.sh \
+#   >> "$HOME/Library/Logs/switchboard/fleet-health.log" 2>&1
+```
+
+Or a LaunchAgent of its own, if you prefer launchd end to end: the same plist
+shape as the per-project template above with `StartInterval` set to `600`, no
+`KeepAlive`, and `ProgramArguments` of `/bin/bash` plus the script path. Note
+the check runs under launchd too, and so is subject to the same class of silent
+death it watches for — it cannot certify itself. Reading its log is what closes
+that loop.
+
+Ten minutes is a reasonable cadence: the rate detections need a window long
+enough to contain ticks, and the check refuses to advance its own baseline
+across a window shorter than a minute — so running it by hand between interval
+firings never fabricates or clears a finding.
+
+It has no production baseline yet. Every threshold is a flag
+(`--crash-banners`, `--wedge-ratio`, `--marker-age-hours`, `--poll-interval-s`,
+`--min-window-s`); the first false alarm or missed wedge is the signal to tune
+one, not to stop running it.
+
+### What it mechanizes: four degraded states
+
+The greps below are what the check does, written out. Read them to understand a
+finding — but the check is what actually looks.
 
 **Restarts are unbounded.** launchd has no `MaxRestarts`; `ThrottleInterval`
 only rate-limits respawns. The template sets 60s, which is ≥ the 30s poll
 interval, so a crash loop can never outpace one dispatch cycle — but it will
-keep going forever. Detection is on you, via the log:
+keep going forever.
 
-- **Crash loop** — the startup banner
+- **`CRASH-LOOP`** — the startup banner
   `[run-project] <slug> -> <repo> (workspaces: …)` repeating every ~60 seconds.
   ```bash
   grep -c '^\[run-project\] '"$SLUG"' ->' ~/Library/Logs/switchboard/$SLUG.log
   ```
   More than one line per intentional restart means the process is dying and
-  being respawned.
+  being respawned. The check compares this count against its previous
+  observation, because a large count on a long-lived fleet is history, not a
+  loop.
 
-- **Wedged ticks — `KeepAlive` cannot detect this one.** The scheduler swallows
-  every per-tick exception by design (`scheduler.py:450-451`, *"a tick must
-  never kill the service"*), so the more likely degraded state is not a crash at
-  all: the process stays alive and healthy-looking while every tick fails. You
-  get **one** startup banner and then `tick error` forever. No restart policy
-  can see this. Grep for it:
+- **`WEDGED` — `KeepAlive` cannot detect this one.** The scheduler swallows
+  every per-tick exception by design (`scheduler.py`, *"a tick must never kill
+  the service"*), so the more likely degraded state is not a crash at all: the
+  process stays alive and healthy-looking while every tick fails. You get
+  **one** startup banner and then `tick error` forever. No restart policy can
+  see this. Grep for it — and **anchor the pattern**:
   ```bash
-  grep -c 'tick error' ~/Library/Logs/switchboard/$SLUG.log
+  grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z tick error( |$)' \
+    ~/Library/Logs/switchboard/$SLUG.log
   ```
-  A non-zero and growing count with no new banner is a wedged process. Restart
-  it by hand — and note `stop` alone leaves it DOWN, because this agent sets
-  `SuccessfulExit: false` (a clean stop is a successful exit, so launchd does
-  not respawn it; this section says so above):
+  A bare substring match is wrong here: handled in-tick failures log lines like
+  `candidate fetch failed; skipping dispatch this tick error="transport error:
+  ReadTimeout"`, which contain the phrase and are not the record. On this
+  repo's own log that substring over-counted 94 to 0. What matters is also the
+  **rate**, not the count: transport flakes happen several times a day and the
+  check reports them as a notice; wedged means the count grew at the tick
+  cadence with no new banner.
+
+  Restart it by hand — and note `stop` alone leaves it DOWN, because this agent
+  sets `SuccessfulExit: false` (a clean stop is a successful exit, so launchd
+  does not respawn it; this section says so above):
   ```bash
   launchctl stop com.switchboard.$SLUG
   launchctl start com.switchboard.$SLUG
   ```
+
+- **`STALE-CODE`** — the freshness preflight drops
+  `.run/$SLUG/restart-needed.json` when the loaded code is behind origin, and
+  surfaces it at launch. A healthy long-running process never relaunches, so
+  the marker can sit unread for days. The check reports a marker older than four
+  hours, and cross-checks it against the `sha=` the running process stated in
+  its own `orchestrator starting` record — which is the better signal, because
+  it describes the code actually loaded rather than what the preflight last
+  observed. Same stop-then-start remedy.
+
+- **`DOWN`** — a loaded-but-stopped job is a durable silent state, for the same
+  `SuccessfulExit: false` reason. The check compares an installed
+  `~/Library/LaunchAgents/com.switchboard.$SLUG.plist` against `launchctl list`:
+  ```bash
+  launchctl list com.switchboard.$SLUG   # no "PID" line = loaded but not running
+  ```
+
+The check never restarts, signals or unloads anything — deliberately. The
+remedy pair above has a trap (stop alone leaves it DOWN), and a degraded process
+paused in place is evidence; a reflexively restarted one is evidence destroyed.
 
 One more thing worth knowing before you restart anything: parked issues stay
 parked across a restart (`status:parked` is a durable label), but the
@@ -332,6 +410,14 @@ per-issue **session counter is process memory only**, so every restart refunds
 each issue's attempt budget. An issue only parks if it burns
 `max_sessions_per_issue` failures inside a single process lifetime. Durable
 session counts are issue #15.
+
+The same is true of the consecutive transient provider-failure counter
+(`max_transient_failures_per_issue`, default 6), which parks an issue the
+provider keeps refusing to serve: an issue that has accumulated failures short
+of that ceiling starts again from zero after a restart, while one already parked
+stays parked. If you are restarting *because* a provider was flapping, that is
+usually what you want — but it does mean a restart loop can hide the very
+condition this ceiling exists to surface.
 
 ---
 

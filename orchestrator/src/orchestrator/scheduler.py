@@ -59,6 +59,7 @@ from .review_response import (
     normalize_login,
 )
 from .provider_circuit import (
+    TRANSIENT_FAILURE_CLASSES,
     CircuitState,
     CircuitTransition,
     ProviderCircuit,
@@ -447,6 +448,25 @@ class Orchestrator:
         # budget untouched. Read it through `sessions_for_issue()`; a bare-id
         # lookup is always a miss.
         self.sessions_per_issue: dict[tuple[str, str], int] = {}
+        # issue #195: CONSECUTIVE transient provider-circuit failures per issue
+        # id — the ceiling #166 removed when it (correctly) stopped charging
+        # those failures to `sessions_per_issue`. Keyed by issue id ALONE, not
+        # by (issue, role): the thing being bounded is the provider's health
+        # against this ticket, and the refund already keeps the role budgets
+        # out of it. In-process only, exactly like `sessions_per_issue` — a
+        # restart forgives the count (issue #15 is iceboxed), though the park
+        # it produces is durable because `_park` writes a tracker label.
+        #
+        # DELIBERATELY NOT reset by `_reset_issue_sessions`, so neither the
+        # human-review re-entry grant nor the review-response sub-poll (issue
+        # #178 / #43) touches it. Not an oversight and not a judgement call
+        # either way: reaching `status:human-review` REQUIRES a session that
+        # succeeded, and success already pops this counter below. Both of
+        # those resets therefore run against a counter that is provably zero,
+        # and wiring them in would add a call site whose behaviour no test
+        # could distinguish from doing nothing. Unpark is the one reset that
+        # is real, and it clears this explicitly at its own site.
+        self.transient_failures: dict[str, int] = {}
         self.parked: set[str] = set()  # issue ids DURABLY parked this run (label
                                        # write confirmed); counter-reset bookkeeping
                                        # only — the durable state is the PARK_LABEL
@@ -614,6 +634,47 @@ class Orchestrator:
             return agent.max_fail_review_sessions_per_issue
         return agent.max_sessions_per_issue
 
+    # -- transient provider-failure ceiling (issue #195) -------------------------
+
+    def _count_transient_failure(
+        self,
+        issue_id: str,
+        identifier: str,
+        failure_class: FailureClass,
+    ) -> int:
+        """Book one transient provider failure against `issue_id`.
+
+        Only the TRANSIENT classes count. A latched class (bad credentials,
+        plan limit, exhausted credits) leaves the count alone rather than
+        raising it: the circuit stays open until an operator fixes the
+        provider, so no re-dispatch is happening and the issue has nothing to
+        be bounded against. Counting those would park every waiting issue for
+        an outage the operator is already the fix for — the shape AgDR-026
+        rejected.
+
+        Returns the new count so the caller can log it; the count is the whole
+        diagnosis channel here, because a transient park is reportless by
+        construction (the cap-hit report of issue #16 fires inside `_worker`,
+        and by the time this bound trips the session is gone and the provider
+        that would host a self-report is the component that is failing).
+        """
+        if failure_class not in TRANSIENT_FAILURE_CLASSES:
+            return self.transient_failures.get(issue_id, 0)
+        count = self.transient_failures.get(issue_id, 0) + 1
+        self.transient_failures[issue_id] = count
+        cap = self._transient_cap()
+        if count >= cap:
+            log("transient provider-failure ceiling reached; the issue parks on "
+                "its next dispatch attempt", issue_id=issue_id,
+                issue_identifier=identifier, transient_failures=count,
+                transient_cap=cap, failure_class=failure_class.value)
+        return count
+
+    def _transient_cap(self) -> int:
+        cfg = self._cfg
+        assert cfg is not None
+        return cfg.agent().max_transient_failures_per_issue
+
     def _provider_circuit(self, provider_id: str) -> ProviderCircuit:
         circuit = self.provider_circuits.get(provider_id)
         if circuit is None:
@@ -695,6 +756,10 @@ class Orchestrator:
         # fields (SETUP.md:293 anchors tracebacks to this banner). `sha`/`dirty`
         # say which build is running, so a healthy start stops being silent
         # about code age. Never raises; unresolvable is "unknown", not a refusal.
+        # issue #193: `fleet_health.py` reads this record name and its `sha=`
+        # field as the direct stale-code signal — what the process actually
+        # loaded, versus what the preflight last observed. Renaming either
+        # demotes that detection to marker-age-only.
         sha, dirty = resolve_build_identity()
         log("orchestrator starting", workflow=str(self.workflow_path),
             repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()),
@@ -717,6 +782,11 @@ class Orchestrator:
                 try:
                     await self._tick()
                 except Exception as exc:  # a tick must never kill the service (§14.2)
+                    # The swallow is why "wedged" exists as a state: the process
+                    # stays alive while every tick fails, and no restart policy
+                    # can see it. `fleet_health.py` detects it by counting THIS
+                    # record name, anchored to the timestamp — rename it and the
+                    # only detector of the wedge goes blind.
                     log("tick error", error=repr(exc))
                 interval = (self._cfg.polling_interval_ms() if self._cfg else 30000) / 1000
                 try:
@@ -1491,6 +1561,11 @@ class Orchestrator:
             self.parked.discard(issue.id)
             self._park_notified.discard(issue.id)
             self._reset_issue_sessions(issue.id)
+            # issue #195: the transient counter clears here too, and it is not
+            # optional — `_park`'s own comment promises every counter resets on
+            # unpark, and a counter that survived would re-park the issue on
+            # the very next dispatch, making the documented remedy a no-op.
+            self.transient_failures.pop(issue.id, None)
             log("issue unparked (status:parked label removed)",
                 issue_id=issue.id, issue_identifier=issue.identifier)
         if not self._state_slots_available(issue.state):
@@ -1537,6 +1612,32 @@ class Orchestrator:
             await self._refuse_missing_marker(issue, missing)
             return DispatchOutcome(DispatchResult.REFUSED, runner.provider_id)
         self._marker_refused.discard(issue.id)  # eligible again -> re-arm the notice
+
+        # issue #195: the transient provider-failure ceiling, enforced HERE so
+        # every dispatch entry (poll tick, retry timer, provider-waiter resume)
+        # funnels through one check — the same reason the session cap lives in
+        # `_dispatch` rather than at each caller.
+        #
+        # AHEAD of the session cap on purpose. An issue can be at both bounds
+        # at once, and the session cap's implement branch routes to the
+        # fail-review verifier (issue #31) — a verifier dispatched against a
+        # flapping provider strands exactly the way the sessions being counted
+        # here stranded. When the provider is what is failing, no agent is the
+        # answer: park and let a human look.
+        transient = self.transient_failures.get(issue.id, 0)
+        transient_cap = self._transient_cap()
+        if transient >= transient_cap:
+            await self._park(
+                issue,
+                f"the execution provider failed {transient} times in a row on "
+                f"transient errors (rate limit / provider unavailable), hitting "
+                f"the ceiling of {transient_cap}. This is a PROVIDER outage, "
+                f"not an exhausted work budget: none of those failures were "
+                f"charged to this issue's session allowance, and no session "
+                f"ever reached the work. Check the provider before unparking",
+            )
+            return DispatchOutcome(DispatchResult.REFUSED, runner.provider_id)
+
         # The cap is always positive (workflow.py coerces invalid values back
         # to the default) — parking cannot be configured off.
         # The cap is per ROLE (issue #35 / AgDR-033): the role is derived from the
@@ -1977,6 +2078,12 @@ class Orchestrator:
 
         exc = task.exception()
         if exc is None:
+            # issue #195: the provider served this issue, so the consecutive
+            # run ends here. Clearing on success is what keeps the bound a
+            # ceiling on OUTAGES rather than on the ticket's lifetime — an
+            # issue that flaps, recovers, works, and flaps again never
+            # accumulates toward the park.
+            self.transient_failures.pop(issue_id, None)
             transition = self._provider_circuit(entry.provider_id).record_success()
             self._start_recovery_notice(transition)
             self._log_circuit_transition(transition, entry)
@@ -2001,6 +2108,8 @@ class Orchestrator:
             self._start_latch_notice(transition, entry)
             if circuit.is_circuit_failure(failure_class):
                 self._refund_issue_session(entry.session_key)
+                transient = self._count_transient_failure(
+                    issue_id, entry.identifier, failure_class)
                 self.provider_waiting[issue_id] = ProviderWaitEntry(
                     identifier=entry.identifier,
                     issue=entry.issue,
@@ -2011,8 +2120,14 @@ class Orchestrator:
                     issue_identifier=entry.identifier,
                     provider_id=entry.provider_id, session_id=entry.session_id,
                     outcome="failed", failure_class=failure_class.value,
-                    retry_disposition="provider_wait", error=str(exc))
+                    retry_disposition="provider_wait",
+                    transient_failures=transient, error=str(exc))
                 return
+            # issue #195: a non-circuit failure means the provider ANSWERED —
+            # the session reached the work and failed there. Same reset as
+            # success: what this bound counts is a provider that will not
+            # serve the issue at all.
+            self.transient_failures.pop(issue_id, None)
             attempt = (entry.retry_attempt or 0) + 1
             self._schedule_retry(issue_id, entry.identifier, attempt=attempt,
                                  delay_ms=self._failure_backoff_ms(attempt))
@@ -2900,8 +3015,9 @@ class Orchestrator:
             f"The orchestrator will not dispatch it again while it carries the "
             f"`{PARK_LABEL}` label. Remove that label (or move the issue off "
             f"*Parked* on the board) to re-dispatch — EVERY session counter "
-            f"(`{VERIFY_ROLE}`, `{IMPLEMENT_ROLE}` and `{FAIL_REVIEW_ROLE}`) "
-            f"resets on unpark. Unparking alone does NOT re-arm the "
+            f"(`{VERIFY_ROLE}`, `{IMPLEMENT_ROLE}` and `{FAIL_REVIEW_ROLE}`), "
+            f"and the consecutive transient provider-failure counter, reset on "
+            f"unpark. Unparking alone does NOT re-arm the "
             f"fail-review diagnosis: this issue keeps its `{FAIL_REVIEW_MARKER}` "
             f"marker if it already had one, and an unparked issue that caps "
             f"again will park rather than open a second episode. Remove "
