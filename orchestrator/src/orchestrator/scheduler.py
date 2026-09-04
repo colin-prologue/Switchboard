@@ -674,6 +674,10 @@ class Orchestrator:
         # fields (SETUP.md:293 anchors tracebacks to this banner). `sha`/`dirty`
         # say which build is running, so a healthy start stops being silent
         # about code age. Never raises; unresolvable is "unknown", not a refusal.
+        # issue #193: `fleet_health.py` reads this record name and its `sha=`
+        # field as the direct stale-code signal — what the process actually
+        # loaded, versus what the preflight last observed. Renaming either
+        # demotes that detection to marker-age-only.
         sha, dirty = resolve_build_identity()
         log("orchestrator starting", workflow=str(self.workflow_path),
             repo=cfg.tracker().repo, workspace_root=str(cfg.workspace_root()),
@@ -696,6 +700,11 @@ class Orchestrator:
                 try:
                     await self._tick()
                 except Exception as exc:  # a tick must never kill the service (§14.2)
+                    # The swallow is why "wedged" exists as a state: the process
+                    # stays alive while every tick fails, and no restart policy
+                    # can see it. `fleet_health.py` detects it by counting THIS
+                    # record name, anchored to the timestamp — rename it and the
+                    # only detector of the wedge goes blind.
                     log("tick error", error=repr(exc))
                 interval = (self._cfg.polling_interval_ms() if self._cfg else 30000) / 1000
                 try:
