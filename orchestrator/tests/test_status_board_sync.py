@@ -267,6 +267,28 @@ def test_human_gate_exits_into_orchestrator_territory_are_not_honored():
     assert not is_honored_drag("plan-review", "in-progress", repo=SELF_REPO)
 
 
+def test_the_clean_review_requeue_edge_is_not_a_board_drag():
+    """Issue #198 added `human-review -> review` to the table, and the generic
+    filter would otherwise have honored it: `human review` is a legal drag
+    SOURCE, and `review` is not in the active set this derivation reads
+    (`load_active_states` reads `WORKFLOW.base.md` unconditionally — the KNOWN
+    GAP in `transitions.yml` — and base has no `review` state at all).
+
+    Honoring it would let a drag mint the stance's `handoff_label`, the one
+    label the orchestrator writes only after validating handoff evidence — the
+    identical argument that already excludes `human review` as a destination.
+    At `base` the dragged ticket would land in a state nothing dispatches.
+    """
+    import orchestrator.status_board as sb
+
+    assert not is_honored_drag("human-review", "review", repo=SELF_REPO)
+    assert not is_honored_drag("human review", "review", repo=SELF_REPO)
+    assert ("human review", "review") not in honored_drags(repo=SELF_REPO)
+    # ...and the exclusion is on the DESTINATION, so it holds for any future
+    # row landing in `review`, not just this one.
+    assert "review" in sb.EXCLUDED_TO_EXTRA
+
+
 def test_dashed_and_spaced_spellings_agree():
     assert normalize_state("in-progress") == "in progress"
     assert is_honored_drag("plan-review", "drafting", repo=SELF_REPO)
