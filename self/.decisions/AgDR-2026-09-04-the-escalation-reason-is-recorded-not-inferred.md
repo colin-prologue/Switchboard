@@ -132,6 +132,18 @@ is the shape a genuinely new commit still gets afresh.
   same coupling `switchboard:response-round` already carries.
 - **The findings path is unchanged.** The requeue lives entirely in the
   `if not owed` branch that previously returned False.
+- **The declared surfaces move too, and one of them is not inert.** The edge is
+  recorded in `workflow/transitions.yml` and in METHODOLOGY's writers table —
+  this is the second orchestrator-written edge out of `human-review`, and an
+  orchestrator transition living only in code is the drift those surfaces exist
+  to prevent. But `edges` is *read*: `status_board.honored_drags` derives the
+  honored board-drag set from it, and the generic filter would have honored the
+  new row — `human review` is a legal drag source, and `review` is absent from
+  the active set that derivation reads (the KNOWN GAP: `load_active_states`
+  reads `WORKFLOW.base.md` unconditionally). So `review` joins
+  `EXCLUDED_TO_EXTRA`, on the argument already made there for `human review`:
+  it is the other `handoff_label`, written only after evidence validation, and
+  never by a drag. The honored set stays at three.
 
 ## Weakest point
 

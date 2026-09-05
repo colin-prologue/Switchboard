@@ -102,7 +102,17 @@ EXCLUDED_FROM_STATES = frozenset({"triage", "in progress", "fail review", "parke
 # dispatchable, touch the orchestrator's claim state, park, hand an issue to
 # Gate C (`human review` is orchestrator-owned, written only after evidence
 # validation), or close it (`closed` has no column at all).
-EXCLUDED_TO_EXTRA = frozenset({"parked", "closed", "human review"})
+#
+# `review` is the SAME argument as `human review`, not a new one: it is the
+# other `handoff_label` (the `prototype` stance's), written only after the same
+# evidence validation, and now also by the clean-review requeue (issue #198).
+# The exclusion is needed because the generic filter would otherwise honor the
+# requeue row that issue added — `human review` is a legal drag source, and
+# `review` is absent from the active set this derivation reads (the KNOWN GAP
+# in `transitions.yml`: `load_active_states` reads `WORKFLOW.base.md`
+# unconditionally, and base has no `review` state at all, so the very projects
+# where the drag is meaningless are the ones that would have honored it).
+EXCLUDED_TO_EXTRA = frozenset({"parked", "closed", "human review", "review"})
 
 
 def normalize_state(value: str) -> str:
