@@ -35,6 +35,7 @@ from orchestrator.types import (
     CommentReaction,
     Issue,
     IssueComment,
+    PullRequestReview,
     ReviewThread,
     ReviewThreadComment,
     TrackerConfig,
@@ -247,6 +248,44 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
             pageInfo { hasNextPage endCursor }
           }
         }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+# fetch_pr_reviews / fetch_pr_reactions: the CLEAN-review read surface (issue
+# #198). Neither shape was readable before — no query in this file selected the
+# `reviews` connection at all, and `PR_COMMENTS_QUERY` deliberately selects no
+# reactions — so the return path from the human gate needs both.
+#
+# `commit { oid }` is the load-bearing field: it is what pins a clean review to
+# the head sha under review, and without it a review of a superseded commit
+# would requeue a ticket whose diff has moved on. `submittedAt` is selected for
+# the log line only; nothing decides on it.
+PR_REVIEWS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviews(first: 50, after: $after) {
+        nodes { id state submittedAt author { login } commit { oid } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+# Reactions ON THE PULL REQUEST itself — the object a bot reacts to when its
+# approval IS the 👍. Same `user { login }` shape as the issue-comment reaction
+# nodes (`ISSUE_COMMENTS_QUERY`); reactions carry no `author`.
+PR_REACTIONS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reactions(first: 100, after: $after) {
+        nodes { id content createdAt user { login } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -955,6 +994,96 @@ class GitHubTracker:
                 )
             )
         return threads
+
+    async def _paginate_pr_connection(
+        self, query: str, pr_number: int, field: str
+    ) -> list[dict[str, Any]]:
+        """Every node of one paginated `pullRequest.<field>` connection.
+
+        Shared by the two clean-review reads (issue #198), which differ only in
+        the query and the field name. Same fail-loud posture as the sibling PR
+        readers: a missing connection is a payload error, and `hasNextPage` with
+        no cursor raises rather than silently truncating — a truncated read here
+        would report "the bot has not reviewed yet" about a bot that has.
+        """
+        owner, name = self._split_repo()
+        nodes: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            data = await self._request(
+                query,
+                {"owner": owner, "name": name, "number": int(pr_number), "after": after},
+            )
+            pr = (data.get("repository") or {}).get("pullRequest")
+            if pr is None:
+                raise TrackerError(
+                    "github_unknown_payload",
+                    f"pull request #{pr_number} not found in repository payload",
+                )
+            conn = pr.get(field)
+            if not isinstance(conn, dict):
+                raise TrackerError(
+                    "github_unknown_payload",
+                    f"missing 'pullRequest.{field}' connection",
+                )
+            page_nodes = conn.get("nodes")
+            page_info = conn.get("pageInfo")
+            if page_nodes is None or page_info is None:
+                raise TrackerError(
+                    "github_unknown_payload", f"missing PR {field} nodes/pageInfo"
+                )
+            nodes.extend(n for n in page_nodes if isinstance(n, dict))
+            if not page_info.get("hasNextPage"):
+                return nodes
+            after = page_info.get("endCursor")
+            if after is None:
+                raise TrackerError(
+                    "github_missing_end_cursor", "hasNextPage true but endCursor missing"
+                )
+
+    async def fetch_pr_reviews(self, pr_number: int) -> list[PullRequestReview]:
+        """Submitted reviews on one PR, oldest first (issue #198). Read-only."""
+        out: list[PullRequestReview] = []
+        for raw in await self._paginate_pr_connection(
+            PR_REVIEWS_QUERY, pr_number, "reviews"
+        ):
+            author = raw.get("author") or {}
+            login = author.get("login") if isinstance(author, dict) else None
+            commit = raw.get("commit") or {}
+            oid = commit.get("oid") if isinstance(commit, dict) else None
+            out.append(
+                PullRequestReview(
+                    id=str(raw.get("id") or ""),
+                    login=login.strip().lower() if isinstance(login, str) else None,
+                    state=str(raw.get("state") or ""),
+                    commit_oid=oid if isinstance(oid, str) else None,
+                    submitted_at=_parse_iso8601(raw.get("submittedAt")),
+                )
+            )
+        return out
+
+    async def fetch_pr_reactions(self, pr_number: int) -> list[CommentReaction]:
+        """Reactions on the PR itself, oldest first (issue #198). Read-only.
+
+        The login field is `user`, not `author` — the same schema trap
+        `ISSUE_COMMENTS_QUERY` documents, and the reason both shapes normalize
+        through one helper here.
+        """
+        out: list[CommentReaction] = []
+        for raw in await self._paginate_pr_connection(
+            PR_REACTIONS_QUERY, pr_number, "reactions"
+        ):
+            user = raw.get("user") or {}
+            login = user.get("login") if isinstance(user, dict) else None
+            out.append(
+                CommentReaction(
+                    id=str(raw.get("id") or ""),
+                    content=str(raw.get("content") or ""),
+                    login=login.strip().lower() if isinstance(login, str) else None,
+                    created_at=_parse_iso8601(raw.get("createdAt")),
+                )
+            )
+        return out
 
     async def set_sole_status_label(
         self,

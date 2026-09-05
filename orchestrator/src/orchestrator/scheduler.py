@@ -52,11 +52,17 @@ from .review_response import (
     CAP_MARKER,
     RELABEL_CAP_MARKER,
     ROUND_CAP,
+    clean_review_signal,
+    format_requeue_marker,
     format_round_marker,
     has_cap_comment,
+    latest_escalation,
     latest_round,
     needs_response,
     normalize_login,
+    requeue_recorded,
+    sha_matches,
+    unresolved_bot_threads,
 )
 from .provider_circuit import (
     TRANSIENT_FAILURE_CLASSES,
@@ -298,6 +304,27 @@ RELABEL_CAP_COMMENT = (
     "indefinitely.\n\n"
     "If the issue parks for an exhausted budget, removing `" + PARK_LABEL +
     "` is the deliberate operator unpark and does restore every budget.\n\n"
+    "_Posted by Switchboard (AI orchestrator)._"
+)
+
+# Posted once per head sha when a clean bot review returns a ticket from the
+# human gate to QA (issue #198). It is BOTH the operator's explanation and the
+# loop bound: its marker is what stops a second requeue onto the same clean
+# review after a QA session escalates again at the same sha.
+#
+# It names the SIGNAL it acted on ("review" vs "reaction") because those are the
+# two shapes a bot's clean verdict takes and they are not equally strong — a
+# reaction is pinned to the head sha only indirectly, so an operator auditing a
+# wrong requeue needs to know which one fired without reading the logs.
+REQUEUE_COMMENT = (
+    "{marker}\n"
+    "**Switchboard returned this issue to review.** It was escalated to the "
+    "human gate because `{bot}` had not yet reviewed `{sha}`. That review has "
+    "now landed clean — no findings, no unresolved threads (signal: "
+    "`{signal}`) — so the reason for the escalation is gone and the issue is "
+    "back at `{label}` for the QA pass it was waiting on.\n\n"
+    "This happens at most once per commit. If the QA session escalates again "
+    "on this same commit, the issue stays at the human gate.\n\n"
     "_Posted by Switchboard (AI orchestrator)._"
 )
 
@@ -1237,7 +1264,12 @@ class Orchestrator:
             if needs_response(t, bot_logins=bot_logins, self_login=self_login)
         ]
         if not owed:
-            return False
+            # No findings to answer. The OTHER reason a PR's issue can be sitting
+            # here is that QA escalated WAITING for this bot — and a clean review
+            # produces no thread for `needs_response` to see (issue #198).
+            return await self._maybe_requeue_clean_review(
+                tracker, issue, pr, threads, bot_logins, self_login
+            )
 
         comments = await tracker.fetch_pr_comments(pr_number)
         rounds, _ = latest_round(comments, self_login=self_login)
@@ -1285,6 +1317,112 @@ class Orchestrator:
             issue_id=issue.id, issue_identifier=issue.identifier,
             pr_number=pr_number, round=rounds + 1, owed=len(owed),
             threads=",".join(t.id for t in owed))
+        return True
+
+    async def _maybe_requeue_clean_review(
+        self,
+        tracker: GitHubTracker,
+        issue: Issue,
+        pr: dict,
+        threads: list[ReviewThread],
+        bot_logins: tuple[str, ...],
+        self_login: str,
+    ) -> bool:
+        """Return a ticket to QA when the bot review it was waiting on came back
+        clean (issue #198).
+
+        The escalation is the QA role's fail-closed act: a review bot that has
+        not reviewed the current head sha means "do not SHIP", so the ticket goes
+        to the human gate. It had no return path — a clean review opens no
+        threads, so the findings half of this sub-poll cannot see it, and the
+        ticket sat at a gate waiting for an operator relabel.
+
+        FOUR refusals before any write, each fail-closed:
+
+        - **The stance's Gate C is a human's.** Then `status:review` is not a
+          state anything dispatches and requeueing into it would strand the
+          ticket somewhere worse than the gate it is already at. Checked FIRST,
+          so a gated-stance project spends zero extra API calls here forever.
+        - **No escalation marker.** Nothing records why a ticket entered the
+          human gate, so the label alone cannot tell this escalation from an
+          operator relabel, an escalation-list judgment, or an orchestrator
+          handoff. No marker, no requeue — which is exactly today's behaviour,
+          and the operator inbox digest already surfaces it.
+        - **The marker's sha is not the head sha.** The head moved after the
+          escalation, so what the marker describes is not the diff in front of
+          us — and the reaction shape's sha pinning is inherited from this
+          check (see `clean_review_signal`).
+        - **This sha was already requeued.** The receipt is the loop bound: a QA
+          session that escalates again at the same sha against the same clean
+          review must not be requeued onto it a second time.
+        """
+        cfg = self._cfg
+        assert cfg is not None
+        t = cfg.tracker()
+        if not t.agent_owns_gate_c():
+            return False
+        pr_number, pr_id, head_sha = pr["number"], pr["id"], pr.get("head_sha")
+
+        comments = await tracker.fetch_pr_comments(pr_number)
+        escalation = latest_escalation(comments, self_login=self_login)
+        if escalation is None:
+            return False
+        if not sha_matches(escalation.sha, head_sha):
+            log("review requeue: escalation marker is for a superseded commit; "
+                "leaving the ticket at the human gate",
+                issue_identifier=issue.identifier, pr_number=pr_number,
+                marker_sha=escalation.sha, head_sha=head_sha)
+            return False
+        if requeue_recorded(comments, self_login=self_login, sha=head_sha):
+            return False
+        if escalation.bot not in {
+                b for b in (normalize_login(x) for x in bot_logins) if b}:
+            log("review requeue: the escalation names a bot outside "
+                "review_response.bot_logins, so its review cannot be trusted "
+                "as the cross-model half; leaving the ticket at the human gate",
+                issue_identifier=issue.identifier, pr_number=pr_number,
+                marker_bot=escalation.bot, bot_logins=",".join(bot_logins))
+            return False
+
+        still_open = unresolved_bot_threads(threads, bot_login=escalation.bot)
+        if still_open:
+            # Not owed a reply (the bot has our answer) but not clean either.
+            # Resolving is the human's act and the stance treats an unresolved
+            # thread as unfinished work, so this stays parked.
+            return False
+
+        reviews = await tracker.fetch_pr_reviews(pr_number)
+        reactions = await tracker.fetch_pr_reactions(pr_number)
+        signal = clean_review_signal(
+            reviews=reviews, reactions=reactions, bot_login=escalation.bot,
+            head_sha=head_sha, since=escalation.created_at,
+        )
+        if signal is None:
+            # The ordinary "still pending" case: the bot has not finished. The
+            # escalation was correct and stays in force.
+            return False
+
+        # Receipt BEFORE the relabel, the ordering both sibling paths use: a
+        # crash between them costs one requeue opportunity, while the reverse
+        # order leaves a requeue the one-shot bound can never account for.
+        await tracker.add_issue_comment(
+            pr_id, REQUEUE_COMMENT.format(
+                marker=format_requeue_marker(head_sha), bot=escalation.bot,
+                sha=head_sha[:7], signal=signal, label=t.handoff_label),
+        )
+        await tracker.set_sole_status_label(
+            issue.id, t.handoff_label, expected_status=(HUMAN_REVIEW_LABEL,)
+        )
+        # Attribute the write to OURSELVES, same as the sub-poll's own relabel
+        # (issue #178): `_observe_human_relabels` reads `_last_status_state` to
+        # tell a human's edge from the orchestrator's, and an unattributed write
+        # would look like a human's.
+        self._last_status_state[issue.id] = t.handoff_state()
+        self._tick_wakeup.set()
+        log("review requeue: clean bot review returned the ticket to QA",
+            issue_id=issue.id, issue_identifier=issue.identifier,
+            pr_number=pr_number, bot=escalation.bot, signal=signal,
+            head_sha=head_sha, to=t.handoff_label)
         return True
 
     # -- human changes-requested relabels (issue #178) --------------------------

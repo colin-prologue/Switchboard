@@ -54,12 +54,33 @@ class CommentReaction:
     reaction-channel fold signal. `content` is GitHub's enum verbatim
     (`THUMBS_UP` / `THUMBS_DOWN` / …); `login` is the reacting user's login,
     read from the `user { login }` field (reactions have no `author`).
+
+    Reused verbatim for reactions on a PULL REQUEST (issue #198), which are the
+    same four fields off the same `Reactable` interface — a second dataclass
+    would differ only in its name.
     """
 
     id: str
     content: str
     login: str | None
     created_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class PullRequestReview:
+    """One submitted review on a PR (issue #198: the clean-review return path).
+
+    `commit_oid` is `commit { oid }` — the head sha the review actually looked
+    at, and the ONLY field that can tell a clean review of the current diff from
+    a clean review of a superseded one. `state` is GitHub's enum verbatim
+    (`APPROVED` / `COMMENTED` / `CHANGES_REQUESTED` / `DISMISSED` / `PENDING`).
+    """
+
+    id: str
+    login: str | None
+    state: str
+    commit_oid: str | None = None
+    submitted_at: datetime | None = None
 
 
 @dataclass(frozen=True)

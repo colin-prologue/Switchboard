@@ -210,6 +210,16 @@ cross-model check is missing. Waiting is not your job and neither is proceeding
 without it: the whole point of naming a bot is that its absence should stop a
 merge rather than pass silently.
 
+**Record why you escalated.** This one flavour of ESCALATE is the only one with
+a way back: the bot may post its review minutes after you hand off, and if that
+review is clean the orchestrator returns the issue to `status:review` rather
+than leaving it at a human gate nobody needs to attend. It can do that only if
+it knows the escalation was a *wait* — nothing else on the board records why an
+issue entered the human gate, and a label cannot tell your wait apart from an
+operator's relabel or an escalation-list finding. So this escalation takes one
+extra step before the relabel; the ESCALATE verdict below has the exact
+command.
+
 You are not re-litigating its findings. Where you disagree with a resolved
 finding, note the disagreement in your verdict and let it merge; a disagreement
 worth blocking on is an ESCALATE.
@@ -282,12 +292,38 @@ round.
   gh issue edit {{ issue.identifier }} --repo colin-prologue/civ-life --remove-label status:review --add-label status:todo
   ```
 
-- **ESCALATE** — the diff contains something on the escalation list, or a
-  finding has survived two rounds. Post your reasoning and hand it to a human:
+- **ESCALATE** — the diff contains something on the escalation list, a finding
+  has survived two rounds, or the configured review bot has not reviewed this
+  head sha. Post your reasoning and hand it to a human:
 
   ```
   gh issue edit {{ issue.identifier }} --repo colin-prologue/civ-life --remove-label status:review --add-label status:human-review
   ```
+
+  **If — and only if — you are escalating because the review bot has not
+  reviewed this head sha**, post this marker comment on the PR *before* the
+  relabel, substituting the real head sha:
+
+  ```
+  gh pr comment <pr> --repo colin-prologue/civ-life --body "<!-- switchboard:escalated-pending-review sha=<head-sha> bot=chatgpt-codex-connector -->
+  Escalated to the human gate waiting on a cross-model review of <head-sha> by chatgpt-codex-connector. If that review lands clean, Switchboard returns this issue to review automatically.
+
+  _Posted by an AI agent (QA role)._"
+  ```
+
+  The first line is read by a machine, not a human, so it is a contract: an
+  HTML comment, exactly that shape, `sha=` before `bot=`, nothing above it. Use
+  the head oid you fetched in step 1 (`headRefOid`); an abbreviation of seven or
+  more characters matches too. Post it before the relabel, not after — the
+  relabel is the last thing you do.
+
+  Getting this wrong is safe: a missing or malformed marker means no automatic
+  return, which is exactly what happened before this path existed, and the
+  operator's inbox already lists the issue.
+
+  Do **not** post this marker for the other two ESCALATE reasons. An
+  escalation-list finding and a finding surviving two rounds are a human's to
+  judge, and a clean bot review answers neither.
 
 ### The escalation list — what may not be decided without a human
 
