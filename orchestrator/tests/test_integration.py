@@ -40,6 +40,10 @@ from orchestrator.fold_apply import (
     marker_first_line,
 )
 from orchestrator.cap_report import CAP_REPORT_HEADING
+from orchestrator.review_response import (
+    format_escalation_marker,
+    format_requeue_marker,
+)
 from orchestrator.provider_circuit import CircuitState, ProviderCircuit
 from orchestrator.scheduler import (
     CLAIM_RELEASE_COMMENT,
@@ -58,6 +62,7 @@ from orchestrator.types import (
     IssueComment,
     FailureClass,
     Issue,
+    PullRequestReview,
     ReviewThread,
     ReviewThreadComment,
     TrackerConfig,
@@ -146,6 +151,16 @@ class FakeTracker:
         # query for it (repository.issue(number:) is null for a PR).
         self.pr_review_threads: dict[int, list] = {}  # PR number -> ReviewThread
         self.pr_comments: dict[int, list] = {}        # PR number -> IssueComment
+        # issue #198 clean-review read surface. Two MORE maps rather than fields
+        # on the existing ones, because the real tracker needs two more queries:
+        # no query selected `reviews` at all, and `PR_COMMENTS_QUERY`
+        # deliberately selects no reactions. Fidelity set (OBS-023): a review
+        # stores the commit oid it reviewed and its state enum — never a
+        # hard-coded "this one is clean" — and a reaction stores its content
+        # enum, reacting login, and `createdAt`. `clean_review_signal` derives
+        # the verdict from those on every assertion.
+        self.pr_reviews: dict[int, list] = {}         # PR number -> PullRequestReview
+        self.pr_reactions: dict[int, list] = {}       # PR number -> CommentReaction
         # Every network-shaped read/write bumps this. The disable-path AC is
         # "ZERO API calls", which is only assertable if the fake counts them.
         self.api_calls = 0
@@ -364,6 +379,14 @@ class FakeTracker:
     async def fetch_pr_comments(self, pr_number):
         self.api_calls += 1
         return list(self.pr_comments.get(int(pr_number), []))
+
+    async def fetch_pr_reviews(self, pr_number):
+        self.api_calls += 1
+        return list(self.pr_reviews.get(int(pr_number), []))
+
+    async def fetch_pr_reactions(self, pr_number):
+        self.api_calls += 1
+        return list(self.pr_reactions.get(int(pr_number), []))
 
     async def set_sole_status_label(
             self, issue_id, label,
@@ -3702,6 +3725,76 @@ def _bind_pr(tracker, issue_number: int, pr_number: int = 500, closes=None):
 def _rr_harness(tmp_path, monkeypatch, *, login=RR_SELF, tmpl=RR_TMPL):
     _enable_app_identity(monkeypatch, login)
     return _build_harness(tmp_path, monkeypatch, workflow_tmpl=tmpl)
+
+
+# --- the clean-review return path (issue #198) --------------------------------
+#
+# `RR_TMPL` is a GATED stance: its handoff target is `status:human-review`, a
+# state nothing dispatches. The return path is meaningless there — requeueing
+# into `status:review` would move a ticket somewhere nothing picks it up, which
+# is worse than the gate it already sits at. So the requeue's own tests need a
+# stance whose Gate C an AGENT owns, and `RR_TMPL` stays exactly as it was so
+# the gated-stance refusal is testable against the unmodified original.
+
+RR_QA_TMPL = RR_TMPL.replace(
+    'active_states: ["todo", "in progress"]',
+    'active_states: ["todo", "in progress", "review"]\n'
+    '  handoff_label: "status:review"',
+)
+
+RR_HEAD_SHA = "a" * 40          # what `_bind_pr` binds as the PR's head oid
+RR_OLD_SHA = "b" * 40           # a superseded commit
+RR_T0 = datetime(2026, 8, 9, 10, 0, tzinfo=UTC)
+
+
+def rr_escalation(
+    *, sha=RR_HEAD_SHA, bot=RR_BOT, login=RR_SELF, minutes=0, id_="IC_esc",
+    prefix="",
+):
+    """The marker a QA session posts when it escalates WAITING for a review.
+
+    Built from `format_escalation_marker` rather than a hand-typed string, so a
+    test cannot pass against a marker shape the stance prompt no longer tells
+    the QA session to write. `prefix` exists for the one test that pushes the
+    marker off the first line.
+    """
+    return IssueComment(
+        id=id_, login=login,
+        body=prefix + format_escalation_marker(sha, bot) + "\nEscalated, waiting.",
+        created_at=RR_T0 + timedelta(minutes=minutes),
+    )
+
+
+def rr_review(*, login=RR_BOT, state="APPROVED", oid=RR_HEAD_SHA, minutes=10,
+              id_="PRR_1"):
+    """One submitted review. Fidelity set: the commit it looked at and its state
+    enum — the two fields `clean_review_signal` derives cleanliness from."""
+    return PullRequestReview(
+        id=id_, login=login, state=state, commit_oid=oid,
+        submitted_at=RR_T0 + timedelta(minutes=minutes),
+    )
+
+
+def rr_reaction(*, login=RR_BOT, content="THUMBS_UP", minutes=10, id_="RX_1"):
+    """One reaction on the PR — the OTHER clean-completion shape."""
+    return CommentReaction(
+        id=id_, content=content, login=login,
+        created_at=RR_T0 + timedelta(minutes=minutes),
+    )
+
+
+def _requeue_harness(tmp_path, monkeypatch, *, tmpl=RR_QA_TMPL, issue_number=198):
+    """A human-review issue whose bound PR carries a pending-review escalation.
+
+    Deliberately stops SHORT of any clean signal: every test below adds exactly
+    the one it is about, so no test can pass on a signal it did not set.
+    """
+    orch, tracker, runner, _ = _rr_harness(tmp_path, monkeypatch, tmpl=tmpl)
+    issue = rr_issue(issue_number)
+    tracker.candidates = [issue]
+    pr = _bind_pr(tracker, issue_number)
+    tracker.pr_comments[pr] = [rr_escalation()]
+    return orch, tracker, runner, issue, pr
 
 
 async def test_review_trigger_relabels_and_writes_a_full_round_marker(

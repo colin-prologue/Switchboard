@@ -232,6 +232,36 @@ edges:
       rather than re-dispatching. ONE round budget serves both actors, so
       alternating them cannot buy more than the 2 rounds.
 
+  - from: human-review
+    to: review
+    actor: orchestrator
+    trigger: clean-review-requeue
+    note: >-
+      the SECOND orchestrator edge out of the gate (issue #198), and the
+      counterpart of an escalation this table never described: at an
+      agent-owned Gate C the QA role fails closed on a review bot that has not
+      reviewed the current head sha, relabelling `review -> human-review`. That
+      was one-way — a clean review opens no thread, so the `needs_response`
+      half of the review-response sub-poll saw nothing and the ticket sat at
+      the gate awaiting an operator relabel.
+      The requeue keys on a durable `switchboard:escalated-pending-review`
+      marker the escalating session posts, NEVER on the label: a ticket at this
+      gate for any other reason (operator relabel, orchestrator handoff, an
+      escalation-list judgment) carries no marker and is not touched, and a
+      missing marker fails closed to that same untouched behaviour. Both
+      clean shapes count — a formal review with no findings and a bare +1 —
+      and both are pinned to the head sha, so a clean review of a superseded
+      commit does not requeue. Bounded at one requeue per head sha by a
+      durable receipt comment.
+      Unlike its `-> todo` sibling this edge grants no budget and opens no
+      session: `review` is a gate the QA role is dispatched into, so the
+      returning ticket resumes the pass it was already waiting on. The
+      orchestrator attributes the write to itself so the human-relabel observer
+      cannot mistake it for an operator's and mint a round.
+      Reachable only where the stance's `handoff_label` is `status:review`; a
+      gated stance is refused before any read. See
+      AgDR-2026-09-04-the-escalation-reason-is-recorded-not-inferred.
+
   # === fail-review: post-failure diagnosis (ACTIVE since #31) =================
   # Pre-encoded by #29 as `active: false` / `requires: "#20b"`; #31 shipped the
   # verifier, so these are live. The `actor:` annotations were also corrected:

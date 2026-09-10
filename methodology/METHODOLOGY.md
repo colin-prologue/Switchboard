@@ -34,6 +34,14 @@ Both Gate C states can coexist on one board: `prototype` hands off to
 on its escalation list. `status:human-review` is inactive at every stance by
 design — it is the human gate, and a gate is a state nobody dispatches.
 
+Inactive is not the same as terminal, though, and two of those escalations have
+an automated way back (both in the writers table below): a bot review that opens
+findings re-enters dispatch at `status:todo`, and one escalation reason — *the
+review bot has not finished yet* — returns to `status:review` on its own once
+that review lands clean. Neither dispatches the gate state itself; both are the
+orchestrator relabelling out of it because the reason for the wait is recorded
+and has expired.
+
 Dependencies use GitHub's native **blocked-by**; Symphony won't dispatch a
 `status:todo` issue while any blocker is unresolved.
 
@@ -55,6 +63,7 @@ has.
 | the stance's `handoff_label` — `status:human-review` by default, `status:review` at `prototype` | the **orchestrator** | after provider-turn success + validated handoff evidence (issue #61 / AgDR-028; workers only write `.run/handoff-evidence.json`). The *target* is config (AgDR-039); the validation before writing it is unchanged |
 | `status:review` → `status:todo` \| `status:human-review` | the **QA agent** | on its FIX verdict (back for another pass) or ESCALATE (something on the escalation list, or a finding surviving two rounds). On SHIP it merges and writes no label — the merge closes the issue |
 | `status:human-review` → `status:todo` | **humans** *or* the **orchestrator** — **two actors, one edge** (`transitions.yml`) | the human path is a changes-requested verdict: the reviewer relabels and the ticket re-enters dispatch without re-triage. The orchestrator path is the review-response sub-poll, when a bound PR carries an unresolved bot review thread whose last bot comment postdates Switchboard's reply (issue #43 / AgDR-037; `scheduler.py`). Either way it is an ordinary implement-role session and the `gate:triage-passed` marker survives. **Both actors reset the session counters**, so the re-dispatched round starts with a fresh implement budget whoever asked for it — bounded at 2 budget-granting rounds per PR by one durable marker comment the two actors share (AgDR-2026-08-29-both-actors-on-the-re-entry-edge-reset-the-budget) |
+| `status:human-review` → `status:review` | the **orchestrator** | the clean-review requeue, and the *second* orchestrator edge out of this gate (issue #198; `scheduler.py`). At an agent-owned Gate C the QA agent escalates here when the configured review bot has not reviewed the current head sha — correct at the moment of the check, but one-way, because a clean review opens no thread for the sub-poll's `needs_response` half to see. The return keys on a durable escalation marker the escalating session posts, **never on the label**: a ticket here for any other reason carries none and is not touched, and a missing marker fails closed to that. Both clean shapes count (a formal review with no findings, and a bare 👍), both pinned to the head sha, bounded at one requeue per commit by a receipt comment. Unlike the row above it **grants no budget and opens no session** — `status:review` is a gate the QA role is dispatched into, so the ticket resumes the pass it was waiting on (AgDR-2026-09-04-the-escalation-reason-is-recorded-not-inferred) |
 | `status:drafting` → `status:triage` | the **orchestrator** | fold apply: the operator approved a triage verdict, the body was rewritten under a base-sha1 CAS, and the ticket goes back for re-triage (issue #126 / AgDR-035; `fold_apply.py`) |
 | `status:todo` → `status:in-progress`, its revert, and `status:parked` | the **orchestrator** | claim taken / claim died / session cap |
 

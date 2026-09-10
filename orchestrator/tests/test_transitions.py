@@ -171,6 +171,42 @@ def test_both_actors_on_the_re_entry_edge_reset_the_implement_budget():
     assert "ONE round budget serves both actors" in note
 
 
+# --- the clean-review requeue: the SECOND orchestrator edge out of the gate ---
+
+def test_human_review_to_review_edge_is_the_clean_review_requeue():
+    """Issue #198. The sibling of the re-entry edge above, and the reason this
+    row has to exist: the orchestrator now writes TWO edges out of the human
+    gate, and a state edge an orchestrator takes that is recorded only in code
+    is precisely the drift this table exists to prevent.
+
+    Distinct from `human-review -> todo` in destination AND in consequence: this
+    one returns the ticket to the QA pass it was waiting on rather than
+    re-dispatching an implement session, so it grants NO budget. Exact equality
+    per convention.
+    """
+    edges = [e for e in _edges()
+             if e["from"] == "human-review" and e["to"] == "review"]
+    assert len(edges) == 1, f"expected exactly one requeue edge, got {edges}"
+    edge = edges[0]
+    assert edge["actor"] == "orchestrator"
+    assert edge["trigger"] == "clean-review-requeue"
+    assert set(edge) == {"from", "to", "actor", "trigger", "note"}
+
+
+def test_the_requeue_edge_records_what_bounds_it():
+    """The three properties a reader of this table cannot get anywhere else, and
+    each of which is a defect if it silently stops being true: the requeue keys
+    on the escalation MARKER (not the label), it is pinned to the head SHA, and
+    unlike its `-> todo` sibling it resets no budget."""
+    edge = [e for e in _edges()
+            if e["from"] == "human-review" and e["to"] == "review"][0]
+    note = edge["note"]
+    assert "#198" in note
+    assert "marker" in note
+    assert "head sha" in note
+    assert "no budget" in note
+
+
 def test_review_response_adds_no_new_state_and_no_requires_marker():
     """The decision's load-bearing claim: no new state, no new gate.
 

@@ -30,14 +30,23 @@ DONE = none does. One predicate, so trigger and termination cannot diverge.
 - The worker's own replies cannot self-retrigger (wrong login), and a style
   dismissal terminates the loop with no push at all (the reply postdates the bot
   comment).
+
+THE RETURN PATH (issue #198)
+----------------------------
+`needs_response` sees findings. A CLEAN bot review has none — no threads at all
+— so the same sub-poll needs a second, disjoint question for the ticket that
+escalated to the human gate *waiting* for that review: has the thing it was
+waiting for arrived? That half lives in the second section below and keys on a
+durable escalation-reason marker, never on the label alone.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .types import IssueComment, ReviewThread
+from .types import CommentReaction, IssueComment, PullRequestReview, ReviewThread
 
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -200,6 +209,206 @@ def latest_round(
             if n >= best:
                 best, best_body = n, comment.body
     return best, best_body
+
+
+# =============================================================================
+# The return path from the human gate (issue #198)
+# =============================================================================
+#
+# The QA role escalates `status:review -> status:human-review` when the review
+# bot has not reviewed the current head sha yet — correct, and until now
+# one-way: a bot that then posted a CLEAN review (no findings, so no threads,
+# so nothing `needs_response` can see) left the ticket parked at a human gate
+# that automation had promised to make unnecessary.
+#
+# Why a marker and not the label: nothing records WHY a ticket entered
+# human-review, and the label alone cannot tell a pending-bot-review escalation
+# from an operator relabel, a gated-stance handoff, or an escalation-list
+# judgment. So the reason is written down AT ESCALATION TIME by the session that
+# escalates, and no marker means no requeue — failing closed to today's visible
+# strand rather than guessing.
+
+# Written by the QA session (the stance prompt embeds this literal), read by the
+# sub-poll. A two-sided contract, like the round marker above: any change to the
+# shape is a change to `workflow/stances/WORKFLOW.prototype.md` too.
+_ESCALATION_MARKER_RE = re.compile(
+    r"<!--\s*switchboard:escalated-pending-review\s+"
+    r"sha=([0-9a-fA-F]{7,40})\s+bot=(\S+)\s*-->"
+)
+
+# Written by the sub-poll after it requeues, read by the sub-poll. The requeue
+# is a ONE-SHOT PER HEAD SHA: a QA session that escalates again at the same sha
+# would otherwise be requeued again on the same clean review, forever.
+_REQUEUE_MARKER_RE = re.compile(
+    r"<!--\s*switchboard:requeued-clean-review\s+sha=([0-9a-fA-F]{7,40})\s*-->"
+)
+
+# Review states that can carry a clean verdict. CHANGES_REQUESTED is excluded
+# even with zero threads — it says on its face that the work is not done — and
+# DISMISSED/PENDING are not verdicts at all. COMMENTED is included because it is
+# what a review bot posts when it has a summary and no findings; requiring
+# APPROVED would re-create the indefinite wait one layer down for every bot that
+# does not formally approve.
+CLEAN_REVIEW_STATES = frozenset({"APPROVED", "COMMENTED"})
+
+THUMBS_UP = "THUMBS_UP"
+THUMBS_DOWN = "THUMBS_DOWN"
+
+
+@dataclass(frozen=True)
+class PendingReviewEscalation:
+    """What a QA session recorded when it escalated for a pending bot review."""
+
+    sha: str
+    bot: str
+    created_at: datetime | None
+
+
+def format_escalation_marker(sha: str, bot_login: str) -> str:
+    """The normative first line of a pending-review escalation comment."""
+    return (
+        "<!-- switchboard:escalated-pending-review "
+        f"sha={sha.strip().lower()} bot={normalize_login(bot_login) or ''} -->"
+    )
+
+
+def format_requeue_marker(sha: str) -> str:
+    """The normative first line of the sub-poll's requeue receipt."""
+    return f"<!-- switchboard:requeued-clean-review sha={sha.strip().lower()} -->"
+
+
+def sha_matches(a: str | None, b: str | None) -> bool:
+    """Whether two commit shas name the same commit, abbreviation-tolerantly.
+
+    Git's own rule: an abbreviation of at least 7 hex digits matches the full
+    oid it prefixes. The marker is worker-authored free text, so a session that
+    writes an abbreviated sha must not silently lose the return path — while a
+    DIFFERENT commit still fails, which is the property AC 3 rests on.
+    """
+    if not a or not b:
+        return False
+    x, y = a.strip().lower(), b.strip().lower()
+    if len(x) < 7 or len(y) < 7:
+        return False
+    return x.startswith(y) or y.startswith(x)
+
+
+def latest_escalation(
+    comments: list[IssueComment], *, self_login: str | None
+) -> PendingReviewEscalation | None:
+    """The most recent pending-review escalation marker, or None.
+
+    Same trust and first-line rules as `latest_round`: the marker counts only
+    when authored by the normalized Switchboard identity (otherwise any
+    commenter could name a bot of their choosing and drive the requeue), and
+    only on the comment's first line (so a comment QUOTING one is not one).
+    LAST wins rather than max-of-a-counter: these markers carry no ordinal, and
+    a PR can accumulate one per escalation round.
+    """
+    me = normalize_login(self_login)
+    found: PendingReviewEscalation | None = None
+    for comment in comments:
+        if not _authored_by(comment, me):
+            continue
+        match = _ESCALATION_MARKER_RE.match(_first_line(comment.body))
+        if match:
+            bot = normalize_login(match.group(2))
+            if bot is None:
+                continue
+            found = PendingReviewEscalation(
+                sha=match.group(1).lower(), bot=bot, created_at=comment.created_at
+            )
+    return found
+
+
+def requeue_recorded(
+    comments: list[IssueComment], *, self_login: str | None, sha: str
+) -> bool:
+    """Whether this head sha was already requeued once (the one-shot bound)."""
+    me = normalize_login(self_login)
+    for comment in comments:
+        if not _authored_by(comment, me):
+            continue
+        match = _REQUEUE_MARKER_RE.match(_first_line(comment.body))
+        if match and sha_matches(match.group(1), sha):
+            return True
+    return False
+
+
+def unresolved_bot_threads(
+    threads: list[ReviewThread], *, bot_login: str
+) -> list[ReviewThread]:
+    """Threads the named bot opened or joined that are still unresolved.
+
+    STRICTER than `not needs_response(...)`: a thread Switchboard has already
+    replied to is not owed a response but is still unresolved, and the stance
+    prompt is explicit that an unresolved thread means the work is not finished.
+    A clean review is one with nothing left open, so this is the conjunct that
+    keeps the findings path (`needs_response`) untouched by the return path.
+    """
+    bot = normalize_login(bot_login)
+    if bot is None:
+        return []
+    return [
+        t for t in threads
+        if not t.is_resolved
+        and any(normalize_login(c.login) == bot for c in t.comments)
+    ]
+
+
+def clean_review_signal(
+    *,
+    reviews: list[PullRequestReview],
+    reactions: list[CommentReaction],
+    bot_login: str,
+    head_sha: str,
+    since: datetime | None,
+) -> str | None:
+    """Which clean-completion signal the bot posted for `head_sha`, or None.
+
+    TWO shapes, because a review bot's approval has two (issue #198 / the codex
+    reality): a FORMAL review with no findings, and a bare 👍 where that is what
+    the bot does instead. Keying on only one re-creates the indefinite wait.
+
+    Each is pinned to the current head sha in the only way its shape allows:
+
+    - a formal review carries the commit it reviewed, so it is compared
+      directly — a clean review of a superseded commit is not a signal;
+    - a reaction carries no commit at all, so it is pinned INDIRECTLY, by the
+      caller: the escalation marker's sha must still be the head sha, and the
+      reaction must postdate that marker. Under those two conditions the head
+      has not moved since the escalation, so a reaction after it is a reaction
+      about this commit. With no `since` to compare against, the reaction shape
+      is refused rather than guessed at.
+
+    A 👎 from the same bot after the escalation vetoes both shapes: whatever it
+    means, it is not "this is clean".
+    """
+    bot = normalize_login(bot_login)
+    if bot is None:
+        return None
+
+    fresh = [
+        r for r in reactions
+        if normalize_login(r.login) == bot
+        and since is not None
+        and r.created_at is not None
+        and r.created_at > since
+    ]
+    if any(r.content == THUMBS_DOWN for r in fresh):
+        return None
+
+    for review in reviews:
+        if normalize_login(review.login) != bot:
+            continue
+        if (review.state or "").upper() not in CLEAN_REVIEW_STATES:
+            continue
+        if sha_matches(review.commit_oid, head_sha):
+            return "review"
+
+    if any(r.content == THUMBS_UP for r in fresh):
+        return "reaction"
+    return None
 
 
 def has_cap_comment(
