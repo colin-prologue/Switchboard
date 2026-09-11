@@ -69,11 +69,17 @@ Three things this fixes in place:
    it. The original Phase 2 would have cleared edges mechanically; this record
    says the system already tolerates them and the record of an edge is worth
    more than a tidy graph.
-2. **The body write stays with the fold loop.** The steward never edits a
-   ticket body directly. It posts a `## Triage verdict`-shaped comment with a
-   `body-sha1:` line and a `<!-- fold:proposal -->` block, and the operator's
-   approval applies it through the existing `apply_fold_signal` path. One
-   write authority for bodies, unchanged from AgDR-035.
+2. **The body write stays with the fold loop, and so does activation.** The
+   steward never edits a ticket body directly. It posts a `## Triage
+   verdict`-shaped comment with a `body-sha1:` line and a `<!-- fold:proposal
+   -->` block, and the operator's approval applies it through the existing
+   `apply_fold_signal` path — one write authority for bodies, unchanged from
+   AgDR-035. Activation is not a second write authority layered on top:
+   `apply_fold_signal` has no guard requiring the proposal to differ from the
+   current body, so a fold proposal that reproduces a READY ticket's body
+   verbatim, once 👍'd, performs the same `drafting → triage, actor: fold`
+   edge every other fold performs. Duty 3 (readiness) and duty 4 (activation)
+   are judgment and ordering, not a separate write; the write is duty 1's.
 3. **#39's mechanism becomes a cadence rule, its notification becomes the
    rationale, and its cursor becomes a comment timestamp.** The steward is due
    after N merges to main (N = 10) or 7 days, whichever first. Its rationale is
@@ -81,13 +87,16 @@ Three things this fixes in place:
    GitHub's own notification — the thing the digest body cannot do — and the
    timestamp of that comment is the cursor. GitHub is the durable store; the
    orchestrator gains no state file.
+4. **Because activation costs the operator a reaction rather than a session,
+   the steward's own dispatch does too.** Nothing in the steward's duties
+   requires the operator present once activation no longer does. It is
+   dispatched by an external cron/launchd job evaluating duty 7's cadence rule
+   — precedent `fleet-health.sh`, never `scheduler.py`'s poll loop — and the
+   operator's participation is reading the rationale and reacting to the
+   proposals in it, whenever they next look.
 
 The Phase 1 analyzer is untouched: still manually invoked, still proposals-only,
 available to the steward as an evidence tool.
-
-**How the steward is invoked is left open on the ticket**, with a
-recommendation: operator-invoked, with the cadence rule as a condition the
-steward checks and reports rather than a trigger that fires it.
 
 ## Rejected alternatives (steelmanned)
 
@@ -119,6 +128,16 @@ steward checks and reports rather than a trigger that fires it.
   the current reality. Rejected because a habit with no ticket has no
   acceptance criteria, no cadence, and no rationale trail — the four-day decay
   of rewritten tickets is what the habit already produced.
+- **Operator-invoked session performs activation directly, in-session.** This
+  ticket's first draft, same day. Steelman: the steward's duties end in
+  operator judgment, so a session the operator is present for is the one that
+  finishes its own work, and no approval channel needs inventing. Rejected on
+  review because it conflated two separate questions — starting the steward,
+  and approving what it proposes — and answered both with "the operator must
+  be there" when only the second needed an answer at all, and the fold loop
+  already answers it. Requiring a live session for activation when activation
+  is just another fold spends the operator's presence on a step that costs
+  nothing more than the reaction it already requires for a body correction.
 
 ## Blast radius
 
@@ -140,29 +159,38 @@ steward checks and reports rather than a trigger that fires it.
   digest module and is unaffected; nothing in the orchestrator reads that
   issue's comments.
 - **`AgDR-048`:** §4's named-but-unspecified ritual now has a ticket and a
-  shape. §1's control-surface claim gains a case: the steward's activation
-  relabel is the existing `drafting → triage, actor: human` edge, performed by
-  the operator's session.
+  shape. §1's control-surface claim gains a case, and a sharper one than first
+  drafted: the steward's activation is not the `actor: human` edge performed
+  in a session, it is the existing `actor: fold` edge, approved by an
+  operator's reaction wherever they are. The control surface stays
+  session-mediated in the sense that matters — every write traces to an
+  operator action — without requiring a session for this one.
 
 ## Weakest point
 
-**A dispatched session with a cadence held by memory is the same accepted
-risk `AgDR-048` already carries, repeated.** "One orchestrator per repo" is
-enforced by nothing; "the steward runs every ten merges" is enforced by
-nothing either. The 2026-08-29 incident — ten PRs unnoticed for six hours — is
-direct evidence that memory-held cadences lapse, and this record adds a second
-one. The recommendation on the ticket (operator-invoked) chooses finishability
-over guaranteed occurrence, and if the steward is simply not run for a month,
-the backlog decays exactly as before and nothing reports it.
-
-The cheap hardening is one read-only line in the inbox digest — merges to main
-since the last steward rationale — computed from data the digest already
-fetches. It is deliberately not decided here, because it makes the digest a
-consumer of the inbox issue's own comments, which is a new coupling the digest
-record explicitly avoided. **The prediction to re-read:** if the first three
-steward runs are each more than two weeks apart, the invocation answer is
-wrong, and the fix is the launchd-dispatched variant (with proposals accruing
-for the operator's next session), not a scheduler tick.
+**Scheduled dispatch removes the one thing that used to force a look, and
+inherits the inbox digest's own accepted gap in exchange.** The first draft of
+this record named memory-held cadence — "the steward runs every ten merges" is
+enforced by nothing — as the central risk, on the premise that the operator
+would be starting the session anyway. That premise is gone: activation now
+costs a reaction, not a session, so nothing about running the steward requires
+the operator's presence, and the recommendation moved to cron/launchd
+dispatch. The residual risk is not that the steward fails to run — a
+cron/launchd job enforces the cadence mechanically, the way `fleet-health.sh`
+already does — it is that a rationale posted with nobody reading it is
+indistinguishable from one that was never posted.
+`AgDR-2026-09-03-the-inbox-digest-is-a-snapshot-not-a-feed` already accepted
+this exact gap for the digest itself ("the digest notifies nobody... it is
+still a pull surface"), and a steward rationale on that same issue inherits it
+outright. The 2026-08-29 incident (ten PRs unnoticed for six hours) happened
+under the fully manual system, which argues this is not a new failure mode —
+but the manual system had one forcing function this one removes: starting the
+steward used to require the operator to be there in the first place. **The
+prediction to re-read:** if a steward rationale sits un-reacted-to for more
+than the 7-day cadence ceiling on three separate cycles, the pull-surface gap
+is live, not theoretical, and the fix is the same one named for the digest —
+a merges/proposals-pending line pushed somewhere the operator already looks —
+not a return to operator-invoked dispatch.
 
 Second: the steward's proposals are `## Triage verdict`-shaped comments
 authored by the operator login, indistinguishable from verifier verdicts to
@@ -170,7 +198,11 @@ the fold poll. That is what makes them apply with zero new code, and it is
 also what makes them apply if the operator reacts 👍 to the wrong comment. The
 binding rules in `fold.py` (explicit `/fold` with `body-sha1:` outranks a
 reaction) are the mitigation; they were designed for one verdict per round,
-not for a steward that may post proposals on several tickets in one pass.
+not for a steward that may post proposals — several of them now doing double
+duty as activations — on several tickets in one pass. Reusing the fold channel
+for activation raises this risk's stakes without changing its mechanics: a
+misdirected 👍 now moves a ticket to `status:triage`, not just corrects a
+citation.
 
 ## References
 
