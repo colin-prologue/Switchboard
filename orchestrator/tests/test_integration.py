@@ -3170,6 +3170,52 @@ async def test_completed_fold_re_emitted_after_a_re_triage_round_writes_nothing(
     assert "STRANDED" not in err            # the quiet case stays quiet
 
 
+async def test_restart_after_fold_and_needs_work_in_app_mode_writes_nothing(
+        tmp_path, monkeypatch, capfd):
+    """Issue #12, 2026-09-10: the same round-trip as above, but under the App
+    identity with the thread shaped as the REAL tracker returns it.
+    `$SB_APP_BOT_LOGIN` is set in the `<slug>[bot]` form (SETUP.md) while
+    GraphQL returns a Bot author's BARE login (`tracker.py`'s
+    PR_REVIEW_THREADS_QUERY note). Marker-first compared the two raw, never
+    recognised the bot's own marker, and the restart re-emission resumed into a
+    duplicate marker, a drafting -> triage relabel, and a wasted triage session.
+    The tests above author markers as `...[bot]` with the env unset, so the
+    author filter never met a real login."""
+    orch, tracker, issue = _fold_harness(tmp_path, monkeypatch)
+    _enable_app_identity(monkeypatch, "switchboard-agent[bot]")
+    before = body_digest(ORIGINAL_BODY)
+    tracker.issue_comments["126"] = [
+        _verdict("IC_v", sha1=before, proposal=REVISED_BODY, thumbs_up=True)]
+
+    await _fold_poll(orch, tracker)
+    assert _status_labels(issue) == ["status:triage"]
+    marker_body = _marker_comments(tracker)[0]
+    after = body_digest(issue.description)
+
+    tracker.issue_comments["126"] = tracker.issue_comments["126"] + [
+        IssueComment(id="IC_marker", body=marker_body,
+                     login="switchboard-agent",          # bare, as fetched
+                     created_at=datetime(2026, 8, 1, 13, tzinfo=UTC)),
+        IssueComment(id="IC_v2",
+                     body=f"## Triage verdict\nbody-sha1: {after}\n\n"
+                          "NEEDS WORK — round 2 findings.",
+                     login="switchboard-agent",
+                     created_at=datetime(2026, 8, 1, 14, tzinfo=UTC))]
+    issue.labels = ["status:drafting"]
+    _recompute_state_from_labels(issue)
+    orch.fold_signals_seen.clear()          # restart
+    baseline = (len(tracker.body_writes), len(tracker.comments))
+
+    await _fold_poll(orch, tracker)
+    err = capfd.readouterr().err
+
+    assert (len(tracker.body_writes), len(tracker.comments)) == baseline
+    assert _status_labels(issue) == ["status:drafting"]   # NOT re-relabelled
+    assert "status=already_folded" in err
+    assert "status=resumed" not in err
+    assert orch.fold_signals_seen == {"RE_IC_v:1:IC_v"}   # consumed
+
+
 async def test_stranded_fold_marker_present_no_newer_verdict_is_loud(
         tmp_path, monkeypatch, capfd):
     """Codex review (PR #132): a commit-ambiguous marker post (`addComment`
