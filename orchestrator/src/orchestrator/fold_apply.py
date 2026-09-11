@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 
 from .fold import FoldSignal, is_verdict_comment, parse_body_sha1
 from .log import log
+from .review_response import normalize_login
 from .types import Issue, IssueComment, TrackerError
 
 # --- pinned literals ---------------------------------------------------------
@@ -186,10 +187,15 @@ def is_fold_marker(
     otherwise suppress a legitimate approved fold as `already_folded`.
     Unconfigured (GITHUB_TOKEN mode), any author is accepted — the
     single-operator premise.
+
+    Both sides go through `normalize_login`: `$SB_APP_BOT_LOGIN` is set as
+    `<slug>[bot]` while GraphQL returns a Bot author's BARE login, so a raw
+    compare never recognises the bot's own marker and a restart re-emission
+    resumes into a duplicate marker + relabel (issue #12, 2026-09-10).
     """
     if not comment.body.strip():
         return False
-    if bot_login and (comment.login or "").strip().lower() != bot_login.strip().lower():
+    if bot_login and normalize_login(comment.login) != normalize_login(bot_login):
         return False
     first = comment.body.lstrip().splitlines()[0]
     return first.startswith(f"{FOLD_MARKER_PREFIX}{bound_comment_id} ")

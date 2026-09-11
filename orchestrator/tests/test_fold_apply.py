@@ -214,6 +214,21 @@ def test_trailing_space_stops_a_prefix_collision_between_comment_ids():
     assert not is_fold_marker(marker, "IC_abc")
 
 
+def test_bot_author_check_is_blind_to_the_bot_suffix_and_case():
+    """GraphQL returns a Bot author's BARE login (`switchboard-agent`) while
+    `$SB_APP_BOT_LOGIN` is set as `switchboard-agent[bot]` (SETUP.md). Compared
+    raw, marker-first never recognised the bot's own marker (issue #12,
+    2026-09-10). A non-bot author must still be refused."""
+    line = marker_first_line("IC_bound", "a" * 40, "b" * 40)
+    fetched = IssueComment(id="IC_m", body=line, login="switchboard-agent",
+                           created_at=datetime(2026, 8, 1, tzinfo=UTC))
+    assert is_fold_marker(fetched, "IC_bound", bot_login="switchboard-agent[bot]")
+    assert is_fold_marker(fetched, "IC_bound", bot_login="Switchboard-Agent")
+    spoof = IssueComment(id="IC_s", body=line, login="mallory",
+                         created_at=datetime(2026, 8, 1, tzinfo=UTC))
+    assert not is_fold_marker(spoof, "IC_bound", bot_login="switchboard-agent[bot]")
+
+
 def test_whitespace_only_comment_body_is_not_a_marker_and_does_not_raise():
     """`fold.py:118`'s guard idiom: `splitlines()[0]` on "   " IndexErrors."""
     assert is_fold_marker(_comment("   \n  "), "IC_bound") is False
