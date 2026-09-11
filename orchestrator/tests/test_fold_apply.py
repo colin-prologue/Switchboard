@@ -229,6 +229,17 @@ def test_bot_author_check_is_blind_to_the_bot_suffix_and_case():
     assert not is_fold_marker(spoof, "IC_bound", bot_login="switchboard-agent[bot]")
 
 
+def test_configured_login_that_normalizes_empty_trusts_no_marker():
+    """Codex review (PR #206): a truthy `$SB_APP_BOT_LOGIN` that normalizes to
+    nothing (`[bot]`, whitespace) must not let a deleted author's null login
+    compare equal to it. Fail closed: no marker is trusted."""
+    line = marker_first_line("IC_bound", "a" * 40, "b" * 40)
+    ghost = IssueComment(id="IC_g", body=line, login=None,
+                         created_at=datetime(2026, 8, 1, tzinfo=UTC))
+    assert not is_fold_marker(ghost, "IC_bound", bot_login="[bot]")
+    assert not is_fold_marker(ghost, "IC_bound", bot_login="   ")
+
+
 def test_whitespace_only_comment_body_is_not_a_marker_and_does_not_raise():
     """`fold.py:118`'s guard idiom: `splitlines()[0]` on "   " IndexErrors."""
     assert is_fold_marker(_comment("   \n  "), "IC_bound") is False

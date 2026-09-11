@@ -191,12 +191,16 @@ def is_fold_marker(
     Both sides go through `normalize_login`: `$SB_APP_BOT_LOGIN` is set as
     `<slug>[bot]` while GraphQL returns a Bot author's BARE login, so a raw
     compare never recognises the bot's own marker and a restart re-emission
-    resumes into a duplicate marker + relabel (issue #12, 2026-09-10).
+    resumes into a duplicate marker + relabel (issue #12, 2026-09-10). A
+    configured login that normalizes to nothing (`[bot]`, whitespace) fails
+    CLOSED — otherwise a deleted author's null login would compare equal.
     """
     if not comment.body.strip():
         return False
-    if bot_login and normalize_login(comment.login) != normalize_login(bot_login):
-        return False
+    if bot_login:
+        me = normalize_login(bot_login)
+        if me is None or normalize_login(comment.login) != me:
+            return False
     first = comment.body.lstrip().splitlines()[0]
     return first.startswith(f"{FOLD_MARKER_PREFIX}{bound_comment_id} ")
 
