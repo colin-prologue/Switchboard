@@ -202,13 +202,32 @@ not for a steward that may post proposals — several of them now doing double
 duty as activations — on several tickets in one pass. Reusing the fold channel
 for activation raises this risk's stakes without changing its mechanics: a
 misdirected 👍 now moves a ticket to `status:triage`, not just corrects a
-citation.
+citation. A per-cycle cap (K = 5, added 2026-09-13) narrows this by bounding
+how many tickets can be in the batch at all — it does not touch the
+mechanics above; a misdirected 👍 within a capped batch is exactly as
+consequential as before.
+
+Third, added 2026-09-13 from a cross-ticket review: the second paragraph's
+"several proposals in one pass" risk is sharpened by #209
+(`status:drafting`), filed specifically because triage-verdict and PR-body
+comments had gotten too dense to parse reliably — three rounds of triage on
+#12 alone. A cadence-dispatched steward turns dispatch into "react to a
+comment" at the exact moment reading bandwidth is the known-scarce resource;
+the per-cycle cap answers the *volume* of that risk, not the *density* of
+each proposal, which #209 is separately trying to fix. #209 does not, as
+scoped, touch a steward that is not code yet, so #38 now carries a native
+`blockedBy` edge to it — gating this ticket's own implementation dispatch,
+not the invocation design decided here, on a leaner convention existing to
+build against. Gating the *design* itself on #209 was considered and
+declined: #209 cannot reach an artifact that has not been authored, so that
+would hold up a decision for a reason that only bears on its eventual build.
 
 ## References
 
 - Issues #37 (Phase 1, merged), #38 (this ticket, rewritten), #39 (closed,
   absorbed), #106 (repository-scoped references, closed), #126 (fold apply),
-  #192 (inbox digest), #193 (fleet health).
+  #192 (inbox digest), #193 (fleet health), #209 (collapse-the-evidence
+  readability fix; #38's native `blockedBy` dependency, added 2026-09-13).
 - `AgDR-012` (proposals-only before mutation), `AgDR-034`/`AgDR-035` (fold
   detect / apply), `AgDR-039` (per-project stance ladder — why the auto class
   is bound to a stance-safety bar), `AgDR-045` (gate states are declared),
