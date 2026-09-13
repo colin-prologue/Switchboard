@@ -226,14 +226,15 @@ def test_needs_decision_boundary_against_needs_work_is_stated():
     assert "unmade human decision" in out
 
 
-def test_fast_path_covers_all_five_table_rows():
+def test_fast_path_covers_all_six_table_rows():
     out = _verifier_prompt()
     assert "Unchanged-body fast-path" in out
     table = out.split("Unchanged-body fast-path", 1)[1]
     rows = [l for l in table.splitlines() if l.startswith("| ")]
     joined = "\n".join(rows)
     # NEEDS WORK / SPLIT -> drafting + marker cleared; NEEDS DECISION -> decision;
-    # PASS -> todo + marker in the same command; no-hash -> full review.
+    # PASS -> todo + marker in the same command; no-hash -> full review;
+    # no-stated-class (a steward proposal, issue #38) -> full review.
     assert joined.count(
         "--remove-label status:triage,gate:triage-passed --add-label status:drafting"
     ) == 2
@@ -243,6 +244,18 @@ def test_fast_path_covers_all_five_table_rows():
     assert no_hash and "full review" in no_hash[0], (
         "the retrofit fall-through row must send pre-#55 verdicts to a full review"
     )
+    no_class = [r for r in rows if "no verdict class" in r]
+    assert no_class and "full review" in no_class[0], (
+        "a comment carrying the verdict heading with no stated class (e.g. a "
+        "queue-steward activation proposal, issue #38) must not be mistaken "
+        "for a prior verdict by the fast path"
+    )
+    # Step 0's routing prose must also say to check for a stated class before
+    # trusting the fast path, not just the table row existing in isolation.
+    # Normalized for the source file's soft line-wrapping.
+    flat = " ".join(out.split())
+    assert "confirm the most recent" in flat
+    assert "states one of the four classes" in flat
 
 
 def test_every_verdict_carries_the_body_sha1_block():
