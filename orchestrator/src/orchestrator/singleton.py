@@ -17,6 +17,12 @@ identity, keyed on the workflow's PARENT DIRECTORY: `WORKFLOW.md` and
 `WORKFLOW.pilot-codex.md` in one project resolve to the SAME lock, so the pilot
 and production self-orchestrators are mutually exclusive. Keying on the filename
 would hand them separate locks and reproduce the incident.
+
+This flock rides the local filesystem — it does NOT stop a second machine's
+checkout from dispatching the same project. `AgDR-2026-09-13-one-machine-owns-
+dispatch-per-project` covers the multi-machine case (Switchboard now runs on
+both a Mac and a WSL desktop): that's a manual single-dispatcher-per-project
+convention, not a lock, and this file is not enough on its own to keep it true.
 """
 
 from __future__ import annotations
