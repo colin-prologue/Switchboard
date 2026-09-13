@@ -53,14 +53,17 @@ On 2026-09-10 the operator decided to consolidate #38 and #39 into that ritual.
 
 **One ticket, one role: the queue steward.** #38 is rewritten as a
 recurring **dispatched session** — not a scheduler tick — with seven duties:
-re-verify bodies against HEAD and refresh them via fold proposals; maintain
-`blockedBy` edges including body-implied ordering; assess readiness
+re-verify `status:drafting` / `status:decision` bodies against HEAD and
+refresh them via fold proposals (the only states `apply_fold_signal` accepts
+— a stale citation on a `todo` / `in progress` / `human-review` ticket is
+named in the rationale as advisory only, with no fold write path for it);
+maintain `blockedBy` edges including body-implied ordering; assess readiness
 (READY / NEEDS-SPEC) before activation; order activation with a posted
 rationale; sweep label vocabulary; carry the original graph-edge duties
 (stale-edge and promotable detection) as one duty among these; and run on a
 cadence rule. #39 is closed as not planned and absorbed.
 
-Three things this fixes in place:
+Five things this fixes in place:
 
 1. **The auto class is bound to the `board_sanity` bar** — *only what no
    stance could make legitimate; detect, never revert.* The steward reports
@@ -69,31 +72,69 @@ Three things this fixes in place:
    it. The original Phase 2 would have cleared edges mechanically; this record
    says the system already tolerates them and the record of an edge is worth
    more than a tidy graph.
-2. **The body write stays with the fold loop, and so does activation.** The
+2. **The body write stays with the fold loop, and so does activation —
+   posted under a distinguishable identity, with a named fallback.** The
    steward never edits a ticket body directly. It posts a `## Triage
    verdict`-shaped comment with a `body-sha1:` line and a `<!-- fold:proposal
    -->` block, and the operator's approval applies it through the existing
    `apply_fold_signal` path — one write authority for bodies, unchanged from
-   AgDR-035. Activation is not a second write authority layered on top:
-   `apply_fold_signal` has no guard requiring the proposal to differ from the
-   current body, so a fold proposal that reproduces a READY ticket's body
-   verbatim, once 👍'd, performs the same `drafting → triage, actor: fold`
-   edge every other fold performs. Duty 3 (readiness) and duty 4 (activation)
-   are judgment and ordering, not a separate write; the write is duty 1's.
-3. **#39's mechanism becomes a cadence rule, its notification becomes the
-   rationale, and its cursor becomes a comment timestamp.** The steward is due
-   after N merges to main (N = 10) or 7 days, whichever first. Its rationale is
-   posted as a comment on the "Switchboard operator inbox" issue, which rides
-   GitHub's own notification — the thing the digest body cannot do — and the
-   timestamp of that comment is the cursor. GitHub is the durable store; the
-   orchestrator gains no state file.
-4. **Because activation costs the operator a reaction rather than a session,
-   the steward's own dispatch does too.** Nothing in the steward's duties
-   requires the operator present once activation no longer does. It is
-   dispatched by an external cron/launchd job evaluating duty 7's cadence rule
-   — precedent `fleet-health.sh`, never `scheduler.py`'s poll loop — and the
-   operator's participation is reading the rationale and reacting to the
-   proposals in it, whenever they next look.
+   AgDR-035. Nothing in `detect_fold_signals` requires the *proposal* comment
+   to be operator-authored — only the approval (a reaction or `/fold`
+   comment) must come from an operator login (`fold.py:196`, command
+   channel; `:238`, reaction channel; the `verdicts` list itself at `:172`
+   carries no author filter) — so the steward posts under the GitHub App
+   identity (`switchboard-agent`, AgDR-009) rather than the operator's own
+   login. This is load-bearing for point 3 below: GitHub does not notify an
+   account of its own activity, so a rationale comment posted as the
+   operator would never reach the operator. Activation is not a second write
+   authority layered on top: `apply_fold_signal` has no guard requiring the
+   proposal to differ from the current body, so a fold proposal that
+   reproduces a READY ticket's body verbatim, once 👍'd, performs the same
+   `drafting → triage, actor: fold` edge every other fold performs.
+   **Exception:** a ticket whose current body already contains a literal
+   fold-sentinel string — this ticket is itself an example — cannot receive
+   a no-op activation fold: `WORKFLOW.base.md`'s own hard rule 3 requires
+   *omitting* the proposal block when the body quotes either sentinel, to
+   avoid a truncated or malformed payload. For that narrow class the steward
+   names it in the rationale, and the existing `actor: human` manual relabel
+   is the fallback — no new mechanism is added for it. Duty 3 (readiness)
+   and duty 4 (activation) are judgment and ordering, not a separate write;
+   the write is duty 1's.
+3. **#39's mechanism becomes a cadence rule, and its notification becomes a
+   genuinely delivered comment, not a pull surface.** The steward is due
+   after N merges to main (N = 10) or 7 days, whichever first, and its
+   cursor is the timestamp of its last rationale comment — GitHub is the
+   durable store, no orchestrator state file. The rationale is posted as a
+   comment on the "Switchboard operator inbox" issue and opens with an
+   explicit `@<operator-login>` mention (the login already lives in
+   `FoldConfig.operator_logins`) — GitHub notifies a directly-mentioned user
+   regardless of watch or subscription state, which is the more bulletproof
+   half of point 2's identity fix, not a substitute for it: a self-authored
+   mention still generates no notification, so both the App identity and the
+   explicit mention are required together.
+4. **Most of the steward's duties don't require the operator present — the
+   write-gated ones, specifically.** Every write that mutates a ticket's
+   body or its activation state goes through the fold-approval gate above,
+   and none of those need the operator in a session. Duty 2 (`blockedBy`
+   edge maintenance) is the named exception: it is a direct, unilateral
+   write via the REST dependencies endpoint, ungated by any operator
+   reaction — the same pattern `scripts/new-ticket.sh --blocked-by` already
+   uses today without approval. This is accepted, not overlooked: a
+   mechanical edge write triggered only by prose already present in the
+   ticket body carries far less blast radius than a body rewrite or an
+   activation, and the precedent for running it unattended already exists.
+   Because the write-gated duties don't need the operator present and duty 2
+   never did, the steward's own dispatch doesn't either. It is dispatched by
+   an external cron/launchd job evaluating duty 7's cadence rule — precedent
+   `fleet-health.sh`, never `scheduler.py`'s poll loop — and the operator's
+   participation is reading the rationale and reacting to the proposals in
+   it, whenever they next look.
+5. **The per-cycle cap is a binding rule, not weakest-point commentary.** No
+   more than K = 5 fold proposals are posted in one cycle, selected by the
+   posted activation order. A READY ticket beyond the cap is named READY in
+   the rationale and carries no proposal that cycle; it is prioritized
+   *first* in the next cycle's selection, ahead of newly-READY tickets, so a
+   steady stream of new arrivals cannot perpetually bump a deferred ticket.
 
 The Phase 1 analyzer is untouched: still manually invoked, still proposals-only,
 available to the steward as an evidence tool.
@@ -109,13 +150,18 @@ available to the steward as an evidence tool.
   record that the dependency was ever asserted. An automation whose output
   nobody consumes is a maintenance surface with no return.
 - **Keep #39 open as the eventual automation of the steward.** Honest about
-  the direction, and the churn trigger is a sensible cadence. Rejected because
-  it keeps alive the two things the audit found unfounded — a durable cursor
-  store in the orchestrator and a notification substrate — for a session whose
-  every output needs an operator's approval anyway. A scheduled steward with
-  nobody present accrues unread proposals; the cadence rule captures what #39
-  was for without the machinery. If unattended runs are ever wanted, the
-  precedent is `fleet-health.sh` under launchd, not a scheduler tick.
+  the direction, and the churn trigger is a sensible cadence. Rejected — but
+  not because unattended dispatch itself is unwanted; this record ultimately
+  chooses exactly that (Decision point 4). What's rejected is #39's specific
+  *mechanism*: an orchestrator-owned churn trigger backed by a durable cursor
+  store and scheduler-tick wiring, both of which the audit found unfounded and
+  neither of which this record needs — the cadence rule is met by a comment
+  timestamp, and dispatch is an external cron/launchd job, precedent
+  `fleet-health.sh`, never `scheduler.py`'s poll loop. The distinction is who
+  owns the schedule: #39 wired it into the orchestrator process; this record
+  keeps it entirely outside, so "unattended" here never means "a new
+  always-on component," only "a periodic external invocation of a session
+  that was already designed to run without the operator's presence."
 - **Fold the duties into the triage verifier.** The verifier already
   re-verifies citations, already produces fold proposals, and already runs
   per-ticket. Rejected because the verifier is per-ticket and adversarial; the
@@ -146,18 +192,32 @@ available to the steward as an evidence tool.
   left in place as the record. No other ticket changes state.
 - **Intent and records:** `self/.switchboard/intents/graph-review.md`'s
   three-phase plan and `AgDR-012`'s phase gating are historical for Phases 2
-  and 3. Phase 1 and its binding constraints (read `blockedBy` only, never
-  `trackedIssues`; proposals-only; one ledger issue) are unchanged and are
-  inherited by the steward.
+  and 3. Only Phase 1's *read* semantics are inherited unchanged (`blockedBy`
+  only, never `trackedIssues`). Its write constraint is explicitly **not**
+  inherited: the intent's "proposals-only... exactly one artifact... NEVER
+  edits another ticket's body, labels, edges, or milestones"
+  (`self/.switchboard/intents/graph-review.md:37-39`) describes Phase 1
+  specifically, and the same document calls mutation "Phase 2+" (`:14`) —
+  the steward *is* that layer. It writes to individual ticket bodies (via
+  fold), `blockedBy` edges (directly), and the inbox issue (rationale):
+  several surfaces, not one ledger, by design.
 - **Code:** none. `graph_review.py`, `fold.py`, `fold_apply.py`,
   `board_sanity.py`, `inbox_digest.py`, and the scheduler are not touched by
   this decision. The steward's future artifact is a prompt or skill, and a
-  session that uses `gh` as the operator login.
+  session that authenticates as the GitHub App installation (`AgDR-009`) to
+  post as `switchboard-agent` — not the operator's own `gh` login, per
+  Decision point 2. Minting and exporting that installation token to the
+  session's `gh` is new tooling work for the steward's own launch script; it
+  reuses `auth.py`'s existing installation-token provider rather than adding
+  orchestrator code, but it is not zero effort, and the earlier framing of
+  this ticket understated that.
 - **Inbox issue:** gains a second writer class — steward rationale comments
-  from the operator login, alongside the orchestrator's body rewrites. The
-  digest record's invariant ("the digest writes no comment") is about the
-  digest module and is unaffected; nothing in the orchestrator reads that
-  issue's comments.
+  from the GitHub App identity, opening with an explicit operator mention,
+  alongside the orchestrator's body rewrites. Posting under a distinct
+  identity is what makes the comment a real notification (Decision point 2);
+  the digest record's invariant ("the digest writes no comment") is about
+  the digest module and is unaffected; nothing in the orchestrator reads
+  that issue's comments.
 - **`AgDR-048`:** §4's named-but-unspecified ritual now has a ticket and a
   shape. §1's control-surface claim gains a case, and a sharper one than first
   drafted: the steward's activation is not the `actor: human` edge performed
@@ -168,33 +228,47 @@ available to the steward as an evidence tool.
 
 ## Weakest point
 
-**Scheduled dispatch removes the one thing that used to force a look, and
-inherits the inbox digest's own accepted gap in exchange.** The first draft of
-this record named memory-held cadence — "the steward runs every ten merges" is
-enforced by nothing — as the central risk, on the premise that the operator
-would be starting the session anyway. That premise is gone: activation now
-costs a reaction, not a session, so nothing about running the steward requires
-the operator's presence, and the recommendation moved to cron/launchd
-dispatch. The residual risk is not that the steward fails to run — a
-cron/launchd job enforces the cadence mechanically, the way `fleet-health.sh`
-already does — it is that a rationale posted with nobody reading it is
-indistinguishable from one that was never posted.
-`AgDR-2026-09-03-the-inbox-digest-is-a-snapshot-not-a-feed` already accepted
-this exact gap for the digest itself ("the digest notifies nobody... it is
-still a pull surface"), and a steward rationale on that same issue inherits it
-outright. The 2026-08-29 incident (ten PRs unnoticed for six hours) happened
-under the fully manual system, which argues this is not a new failure mode —
-but the manual system had one forcing function this one removes: starting the
-steward used to require the operator to be there in the first place. **The
-prediction to re-read:** if a steward rationale sits un-reacted-to for more
-than the 7-day cadence ceiling on three separate cycles, the pull-surface gap
-is live, not theoretical, and the fix is the same one named for the digest —
-a merges/proposals-pending line pushed somewhere the operator already looks —
-not a return to operator-invoked dispatch.
+**Scheduled dispatch removes the one thing that used to force a look; the
+mitigation is a real notification, not the digest's inherited gap this
+record originally claimed.** The first draft named memory-held cadence —
+"the steward runs every ten merges" is enforced by nothing — as the central
+risk, on the premise that the operator would be starting the session anyway.
+That premise is gone: activation now costs a reaction, not a session, and the
+recommendation moved to cron/launchd dispatch. A later draft of this section
+then claimed the steward's rationale "inherits" the inbox digest's own
+accepted notify-nobody gap
+(`AgDR-2026-09-03-the-inbox-digest-is-a-snapshot-not-a-feed`). That claim
+conflated two different GitHub behaviors and was wrong: the digest's write is
+a *body edit*, which never notifies regardless of author; the steward's
+rationale is a *comment*, which notifies subscribers — provided it is not
+self-authored. Decision point 2 fixes exactly this by posting as the App
+identity rather than the operator's own login, and point 3 adds an explicit
+`@`-mention, which notifies the operator even without a prior subscription.
+The residual risk is narrower than either earlier draft stated: it is not
+that no notification path exists, and not a memory-held cadence — a
+cron/launchd job enforces that mechanically, the way `fleet-health.sh`
+already does. It is the ordinary human gap between "was notified" and "acted
+on it," compounded by whatever GitHub notification filtering the operator
+has configured (muted repos, digest-only email, a filtered inbox) that this
+record has no visibility into. The 2026-08-29 incident (ten PRs unnoticed for
+six hours) happened under the fully manual system and involved no
+notification at all, so it is weak evidence for this specific residual — but
+it is the only precedent this record has, and the manual system did have one
+forcing function this one removes: starting the steward used to require the
+operator to be there. **The prediction to re-read:** if a steward rationale
+sits un-reacted-to for more than the 7-day cadence ceiling on three separate
+cycles *despite* the mention and identity fix landing correctly, the gap is
+attention or notification filtering, not delivery, and the fix is on the
+operator's notification settings or an escalating channel — not a return to
+operator-invoked dispatch, and not another comment-based mechanism.
 
 Second: the steward's proposals are `## Triage verdict`-shaped comments
-authored by the operator login, indistinguishable from verifier verdicts to
-the fold poll. That is what makes them apply with zero new code, and it is
+authored by the App identity (`switchboard-agent`) — the same identity every
+orchestrator-dispatched agent turn already posts under (`AgDR-009` Decision
+1), so this is not a new class of comment to the fold poll, just a new
+caller of it. `is_verdict_comment` checks the heading only, not authorship
+(`fold.py:116-119`), so the steward's proposals are indistinguishable from
+verifier verdicts. That is what makes them apply with zero new code, and it is
 also what makes them apply if the operator reacts 👍 to the wrong comment. The
 binding rules in `fold.py` (explicit `/fold` with `body-sha1:` outranks a
 reaction) are the mitigation; they were designed for one verdict per round,
