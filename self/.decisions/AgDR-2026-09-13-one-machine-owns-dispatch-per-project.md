@@ -33,12 +33,16 @@ dispatch daemon for either.**
 Concretely:
 
 1. Both `com.switchboard.switchboard-self` and `com.switchboard.civ-life`
-   LaunchAgents on this Mac were stopped and durably disabled via
-   `launchctl disable gui/<uid>/com.switchboard.<slug>` — confirmed via
-   `launchctl print-disabled`. A bare `launchctl unload` was tried first and
-   rejected: both plists carry `RunAtLoad=true` plus `KeepAlive`, so an unload
-   with no `-w`/`disable` survives only until the next login or reboot, at
-   which point launchd reloads the plist from disk and starts it again.
+   LaunchAgents on this Mac were stopped, then their plists moved out of
+   `~/Library/LaunchAgents/` into a sibling `~/Library/LaunchAgents.disabled/`
+   directory — launchd never loads a plist it can't see, so this survives
+   reboot without depending on any override state. Two earlier mechanisms
+   were tried and rejected first: a bare `launchctl unload` (both plists carry
+   `RunAtLoad=true` plus `KeepAlive`, so an unload with no `-w`/`disable`
+   survives only until the next login or reboot), and `launchctl disable`
+   persisted via launchd's override database (reverted — see Weakest point —
+   after codex review on this record's own PR caught that it breaks the
+   fleet-health observer).
 2. This Mac keeps filing tickets and writing specs/plans interactively.
    That path is unaffected — it was never routed through the orchestrator
    daemon, and nothing here changes it.
@@ -67,7 +71,7 @@ what happens on a network partition, a second failure-mode class layered on
 top of the one `singleton.py`'s docstring already spent a paragraph
 explaining. With one operator and two machines, the cost of that
 infrastructure currently exceeds the cost of a convention that's binary and
-cheap to audit (`launchctl print-disabled`, one command, two lines). Revisit
+cheap to audit (`ls ~/Library/LaunchAgents.disabled/`, one command). Revisit
 if a third machine, or an unattended multi-operator setup, makes the
 convention actually hard to keep straight.
 
@@ -98,8 +102,9 @@ where the actual waste happens.
 
 ## Blast radius
 
-- Two LaunchAgents disabled on this Mac (`com.switchboard.switchboard-self`,
-  `com.switchboard.civ-life`). No code changed, no schema changed.
+- Two LaunchAgents moved out of `~/Library/LaunchAgents/` on this Mac
+  (`com.switchboard.switchboard-self`, `com.switchboard.civ-life`), into
+  `~/Library/LaunchAgents.disabled/`. No code changed, no schema changed.
 - Interactive workflows on this Mac (ticket filing, spec/plan writing,
   triage-by-hand) are untouched — none of them go through the orchestrator.
 - `status:triage` is itself a dispatched state (verifier session), not manual
@@ -111,14 +116,23 @@ where the actual waste happens.
 
 ## Weakest point
 
-**The disabled bit lives in launchd's override database, not in the plist
-file or this repo.** `launchctl print-disabled` is the only place that
-truth is visible; reading the plist, or this repo, shows nothing wrong.
-A future session that runs `launchctl load`/`bootstrap` on either plist —
-reasonably expecting it to start — will get a silent no-op, not an error,
-and may conclude dispatch is running on this Mac when it isn't. Re-enable
-path, if this Mac ever needs to take dispatch back: `launchctl enable
-gui/<uid>/com.switchboard.<slug>` before loading.
+**`launchctl disable` was tried first and is wrong for this repo specifically.**
+It persists correctly across reboot, but codex review on this record's own PR
+(#218) caught the actual defect: `orchestrator/src/orchestrator/fleet_health.py`'s
+`_down()` check only skips a slug when its plist file is absent
+(`if not plist.is_file(): return []`); everything else it infers from
+`launchctl list`, which fails identically for "disabled" and "crashed". A
+disabled-but-installed plist is therefore permanently `STATE_DOWN` /
+`LEVEL_DEGRADED` to fleet-health the moment anyone installs it on this Mac —
+turning an intentional standby state into a recurring false alarm that masks
+real failures, which is the one thing that check exists to not do. Moving the
+plist out of `~/Library/LaunchAgents/` instead avoids this because
+`plist.is_file()` becomes false, the same path a genuinely never-installed
+slug takes. The tradeoff: moving loses the discoverability an in-place
+`disabled` marker would have given a `launchctl list`-only observer — there
+is now nothing under `~/Library/LaunchAgents/` to even notice. Mitigated by
+this record being the source of truth for where the plists went
+(`~/Library/LaunchAgents.disabled/`) and why.
 
 **There is still no enforced invariant, only a convention.** Nothing stops a
 third machine — or this Mac, re-enabled without this record being read first
@@ -146,3 +160,7 @@ produce again.
   own text.
 - `scripts/list-projects.sh` — confirmed both machines registered for both
   `switchboard-self` and `civ-life` at decision time.
+- `orchestrator/src/orchestrator/fleet_health.py` (`_down()`, `probe_launchctl`,
+  issue #193) — the observer this record's mechanism has to stay legible to;
+  codex review on PR #218 caught the `launchctl disable` interaction before
+  merge.
