@@ -53,10 +53,13 @@ On 2026-09-10 the operator decided to consolidate #38 and #39 into that ritual.
 
 **One ticket, one role: the queue steward.** #38 is rewritten as a
 recurring **dispatched session** — not a scheduler tick — with seven duties:
-re-verify `status:drafting` / `status:decision` bodies against HEAD and
-refresh them via fold proposals (the only states `apply_fold_signal` accepts
-— a stale citation on a `todo` / `in progress` / `human-review` ticket is
-named in the rationale as advisory only, with no fold write path for it);
+re-verify `status:drafting` bodies against HEAD and refresh them via fold
+proposals — the only state `apply_fold_signal` actually writes to;
+`FOLD_POLL_STATES` also watches `status:decision`, but `apply_fold_signal`
+refuses it outright (`skipped_decision_state`, zero writes — folding an
+unanswered decision is deliberately illegal), so a stale citation on a
+`status:decision`, `todo`, `in progress`, or `human-review` ticket is named
+in the rationale as advisory only, with no fold write path for any of them;
 maintain `blockedBy` edges including body-implied ordering; assess readiness
 (READY / NEEDS-SPEC) before activation; order activation with a posted
 rationale; sweep label vocabulary; carry the original graph-edge duties
@@ -97,7 +100,18 @@ Five things this fixes in place:
    *omitting* the proposal block when the body quotes either sentinel, to
    avoid a truncated or malformed payload. For that narrow class the steward
    names it in the rationale, and the existing `actor: human` manual relabel
-   is the fallback — no new mechanism is added for it. Duty 3 (readiness)
+   is the fallback — no new mechanism is added for it. **A second collision,
+   found the same way: a no-op activation comment carries the verdict
+   heading but no verdict class, and once it relabels the ticket to
+   `status:triage`, it becomes the comment the *next* triage session's own
+   Step 0 fast path reads as "the most recent verdict."** That fast path
+   previously had no row for a verdict-shaped comment with no stated class —
+   every no-op activation would have hit an unhandled case in someone else's
+   prompt. Fixed directly, not deferred: `workflow/WORKFLOW.base.md` (mirrored
+   to `projects/switchboard-self/WORKFLOW.md`) gained one row routing that
+   case to a full review, the same posture as the existing missing-hash
+   fallback. This is the one `orchestrator/tests` change and the one shared
+   prompt-file change this record makes; see Blast radius. Duty 3 (readiness)
    and duty 4 (activation) are judgment and ordering, not a separate write;
    the write is duty 1's.
 3. **#39's mechanism becomes a cadence rule, and its notification becomes a
@@ -201,9 +215,17 @@ available to the steward as an evidence tool.
   the steward *is* that layer. It writes to individual ticket bodies (via
   fold), `blockedBy` edges (directly), and the inbox issue (rationale):
   several surfaces, not one ledger, by design.
-- **Code:** none. `graph_review.py`, `fold.py`, `fold_apply.py`,
-  `board_sanity.py`, `inbox_digest.py`, and the scheduler are not touched by
-  this decision. The steward's future artifact is a prompt or skill, and a
+- **Code:** `orchestrator/src` untouched — `graph_review.py`, `fold.py`,
+  `fold_apply.py`, `board_sanity.py`, `inbox_digest.py`, and the scheduler
+  are not touched by this decision. One exception, landed with this record:
+  `workflow/WORKFLOW.base.md` and `projects/switchboard-self/WORKFLOW.md`
+  (a shared prompt file, not orchestrator code) gained one fast-path table
+  row so a steward's no-op activation comment — which carries the `##
+  Triage verdict` heading but no verdict class — cannot be mistaken by the
+  *next* triage session's own Step 0 for a prior verdict it should re-route
+  on. Pinned by `orchestrator/tests/test_prompt.py::
+  test_fast_path_covers_all_six_table_rows`; full suite (1351 tests) passes.
+  The steward's future artifact is otherwise a prompt or skill, and a
   session that authenticates as the GitHub App installation (`AgDR-009`) to
   post as `switchboard-agent` — not the operator's own `gh` login, per
   Decision point 2. Minting and exporting that installation token to the

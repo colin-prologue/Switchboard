@@ -384,12 +384,17 @@ with nothing to compare against, which is the loop this mechanic exists to stop.
 
   Then link the children.
 
-**Unchanged-body fast-path (only when Step 0 found matching hashes).** Post ONE
-referral comment — first line `## Triage verdict`, second line the same
-`body-sha1:` block, then a single line naming the prior verdict's class and
-linking that comment ("body unchanged since <url>; re-routing per its
-<CLASS> verdict") — then re-route immediately per the class below. No rubric, no
-re-review, no new findings, no second opinion. Each row's flags complete
+**Unchanged-body fast-path (only when Step 0 found matching hashes).** Before
+routing, confirm the most recent `## Triage verdict` comment actually states
+one of the four classes below somewhere in its text — a comment carrying that
+heading with no stated class (e.g. an automated re-verification or activation
+proposal, not a triage verdict) is not a prior verdict and routes to the last
+table row, same as a missing hash. Otherwise, post ONE referral comment —
+first line `## Triage verdict`, second line the same `body-sha1:` block, then
+a single line naming the prior verdict's class and linking that comment
+("body unchanged since <url>; re-routing per its <CLASS> verdict") — then
+re-route immediately per the class below. No rubric, no re-review, no new
+findings, no second opinion. Each row's flags complete
 `gh issue edit {{ issue.identifier }} --repo colin-prologue/Switchboard …`:
 
 | prior verdict class | fast-path re-route flags |
@@ -399,6 +404,7 @@ re-review, no new findings, no second opinion. Each row's flags complete
 | PASS | `--remove-label status:triage --add-label status:todo,gate:triage-passed` (one command, marker included) |
 | SPLIT | `--remove-label status:triage,gate:triage-passed --add-label status:drafting` |
 | no parseable `body-sha1:` line on the latest verdict | **not a fast-path case** — do the full review (retrofit fall-through) |
+| the latest `## Triage verdict` comment states no verdict class (e.g. a steward proposal) | **not a fast-path case** — do the full review |
 
 The fast-path comment carries no `## In brief` block, and neither does PASS.
 Both are mechanical: PASS says "it passed" in one line, and the fast-path adds
