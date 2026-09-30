@@ -64,7 +64,14 @@ STANCE="prototype" VERIFY_CMD="" VERIFY_TOOLS="" REVIEW_BOT="" OPERATOR_LOGIN=""
 # must still get one — so this distinguishes "not specified" from "specified as
 # prototype", which a bare value comparison cannot.
 STANCE_EXPLICIT=0
-WORKSPACE_BASE="${SB_WORKSPACE_BASE:-$HOME/Developer/switchboard-workspaces}"
+DEFAULT_WORKSPACE_BASE='$HOME/Developer/switchboard-workspaces'
+if [ -n "${SB_WORKSPACE_BASE:-}" ]; then
+  WORKSPACE_BASE="$SB_WORKSPACE_BASE"
+  PERSISTED_WORKSPACE_BASE="$SB_WORKSPACE_BASE"
+else
+  WORKSPACE_BASE="$HOME/Developer/switchboard-workspaces"
+  PERSISTED_WORKSPACE_BASE="$DEFAULT_WORKSPACE_BASE"
+fi
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -77,7 +84,7 @@ while [ $# -gt 0 ]; do
     --review-bot)      REVIEW_BOT="$2"; shift 2;;
     --operator-login)  OPERATOR_LOGIN="$2"; shift 2;;
     --max-agents)      MAX_AGENTS="$2"; shift 2;;
-    --workspace-base)  WORKSPACE_BASE="$2"; shift 2;;
+    --workspace-base)  WORKSPACE_BASE="$2"; PERSISTED_WORKSPACE_BASE="$2"; shift 2;;
     --convention-root) CONVENTION_ROOT="$2"; shift 2;;
     --self)            CONVENTION_ROOT="self"; IS_SELF=1; [ -n "$SLUG" ] || SLUG="switchboard-self"; shift 1;;
     *) echo "unknown arg: $1" >&2; exit 2;;
@@ -120,6 +127,7 @@ sed_repl_escape() { printf '%s' "${1-}" | sed -e 's/[\\&|]/\\&/g'; }
 
 PROJ_DIR="$SB_HOME/projects/$SLUG"
 WORKSPACE_ROOT="$WORKSPACE_BASE/$SLUG"
+PERSISTED_WORKSPACE_ROOT="$PERSISTED_WORKSPACE_BASE/$SLUG"
 mkdir -p "$PROJ_DIR" "$WORKSPACE_ROOT"
 
 # Stance -> template. 'base' keeps the pre-stance path for already-registered
@@ -168,7 +176,7 @@ SB_PROJECT_SLUG=$SLUG
 SB_WORKFLOW_STANCE=$STANCE
 SB_GITHUB_REPO=$REPO
 SB_BASE_BRANCH=$BASE
-SB_WORKSPACE_ROOT=$WORKSPACE_ROOT
+SB_WORKSPACE_ROOT=$PERSISTED_WORKSPACE_ROOT
 SB_CONVENTION_ROOT=$CONVENTION_PREFIX
 SB_VERIFY_CMD=$(shq "$VERIFY_CMD")
 SB_VERIFY_TOOLS=$(shq "$VERIFY_TOOLS")
@@ -195,7 +203,7 @@ case "$VERIFY_CMD$VERIFY_TOOLS$REVIEW_BOT$OPERATOR_LOGIN" in
 esac
 sed \
   -e "s|{{REPO}}|$(sed_repl_escape "$REPO")|g" \
-  -e "s|{{WORKSPACE_ROOT}}|$(sed_repl_escape "$WORKSPACE_ROOT")|g" \
+  -e "s|{{WORKSPACE_ROOT}}|$(sed_repl_escape "$PERSISTED_WORKSPACE_ROOT")|g" \
   -e "s|{{MAX_AGENTS}}|$(sed_repl_escape "$MAX_AGENTS")|g" \
   -e "s|{{CONVENTION_ROOT}}|$(sed_repl_escape "$CONVENTION_PREFIX")|g" \
   -e "s|{{BASE_BRANCH}}|$(sed_repl_escape "$BASE")|g" \
