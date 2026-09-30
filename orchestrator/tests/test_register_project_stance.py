@@ -132,6 +132,19 @@ def test_shared_stance_templates_select_sonnet_5_5(template: Path) -> None:
     """Every normally selectable Claude workflow uses the approved model ID."""
     assert "--model claude-sonnet-5-5" in template.read_text(encoding="utf-8")
 
+
+TRACKED_PROJECT_BINDINGS = (
+    REPO_ROOT / "projects" / "switchboard-self" / "project.env",
+    REPO_ROOT / "projects" / "civ-life" / "project.env",
+)
+
+@pytest.mark.parametrize(
+    "binding", TRACKED_PROJECT_BINDINGS, ids=lambda p: p.parent.name
+)
+def test_tracked_workspace_root_is_home_relative(binding: Path) -> None:
+    """Bindings must be usable on the Linux host that owns dispatch."""
+    assert "SB_WORKSPACE_ROOT=" + chr(36) + "HOME/Developer/switchboard-workspaces/" in binding.read_text(encoding="utf-8")
+
 @pytest.mark.parametrize(
     "placeholder", ["{{OPERATOR_LOGIN_YAML}}", "{{REVIEW_BOT_YAML}}"]
 )
