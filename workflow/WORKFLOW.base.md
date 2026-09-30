@@ -124,7 +124,7 @@ review_response:
 providers:
   claude:
     kind: claude-cli
-    command: "claude -p --model claude-opus-5 --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
+    command: "claude -p --model claude-sonnet-5-5 --verbose --output-format stream-json --permission-mode acceptEdits --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
     # 20 -> 100 (2026-07-06, AgDR-013) -> 20 (2026-08-26, rejection sweep).
     #
     # The raise was a stopgap, and AgDR-013 said so: it rejected "keep 20, add

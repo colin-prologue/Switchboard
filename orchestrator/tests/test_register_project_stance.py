@@ -124,6 +124,14 @@ SHARED_STANCE_TEMPLATES = (
 )
 
 
+
+@pytest.mark.parametrize(
+    "template", SHARED_STANCE_TEMPLATES, ids=lambda p: p.name
+)
+def test_shared_stance_templates_select_sonnet_5_5(template: Path) -> None:
+    """Every normally selectable Claude workflow uses the approved model ID."""
+    assert "--model claude-sonnet-5-5" in template.read_text(encoding="utf-8")
+
 @pytest.mark.parametrize(
     "placeholder", ["{{OPERATOR_LOGIN_YAML}}", "{{REVIEW_BOT_YAML}}"]
 )

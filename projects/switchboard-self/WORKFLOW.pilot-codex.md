@@ -51,7 +51,7 @@ routing:
 providers:
   claude:
     kind: claude-cli
-    command: "claude -p --verbose --output-format stream-json --permission-mode acceptEdits --model claude-opus-5 --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
+    command: "claude -p --verbose --output-format stream-json --permission-mode acceptEdits --model claude-sonnet-5-5 --allowedTools \"Bash(git:*)\" \"Bash(gh:*)\" \"Bash(uv run --project orchestrator python -m pytest:*)\" \"Bash(uv run --project orchestrator pytest:*)\""
     max_turns: 100
     max_budget_usd: 5
     turn_timeout_ms: 3600000
