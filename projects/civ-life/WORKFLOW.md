@@ -45,7 +45,7 @@ polling:
   interval_ms: 30000
 
 workspace:
-  root: "/Users/colindwan/Developer/switchboard-workspaces/civ-life"
+  root: "$HOME/Developer/switchboard-workspaces/civ-life"
 
 hooks:
   after_create: |
