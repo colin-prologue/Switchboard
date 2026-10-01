@@ -127,9 +127,10 @@ gh_clean auth status >/dev/null 2>&1 || fail "gh is not authenticated"
 # This limited preflight intentionally performs no checkout update, GitHub
 # write, or process launch.  It only establishes title availability.
 if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
-  CURRENT_COUNT="$(CHECKPOINT_TITLE="$TITLE" gh_clean api --paginate --slurp \
+  CURRENT_COUNT="$(CHECKPOINT_TITLE="$TITLE" gh_clean api --paginate \
     "repos/$REPO/issues?state=all&per_page=100" --jq \
-    '[.[][] | select(.pull_request | not) | select(.title == env.CHECKPOINT_TITLE)] | length')"
+    '[.[] | select(.pull_request | not) | select(.title == env.CHECKPOINT_TITLE)] | length' \
+    | awk '/^[0-9]+$/ { total += $1; seen = 1; next } { bad = 1 } END { if (bad || !seen) exit 1; print total + 0 }')"
   [ "$CURRENT_COUNT" = "0" ] || fail "checkpoint already exists: $TITLE"
   printf 'RESULT: PREFLIGHT TITLE AVAILABLE (run-id=%s; no checkout update, GitHub writes, or process launch).\n' "$RUN_ID"
   exit 0
@@ -170,9 +171,10 @@ for issue in $PREREQ_ISSUES; do
   [ "$STATE" = "CLOSED" ] || fail "prerequisite issue #$issue is $STATE, not CLOSED"
 done
 
-CURRENT_COUNT="$(CHECKPOINT_TITLE="$TITLE" gh_clean api --paginate --slurp \
+CURRENT_COUNT="$(CHECKPOINT_TITLE="$TITLE" gh_clean api --paginate \
   "repos/$REPO/issues?state=all&per_page=100" --jq \
-  '[.[][] | select(.pull_request | not) | select(.title == env.CHECKPOINT_TITLE)] | length')"
+  '[.[] | select(.pull_request | not) | select(.title == env.CHECKPOINT_TITLE)] | length' \
+  | awk '/^[0-9]+$/ { total += $1; seen = 1; next } { bad = 1 } END { if (bad || !seen) exit 1; print total + 0 }')"
 [ "$CURRENT_COUNT" = "0" ] || fail "checkpoint already exists: $TITLE"
 
 CODEX_LABELED="$(gh_clean issue list --repo "$REPO" --state open \
