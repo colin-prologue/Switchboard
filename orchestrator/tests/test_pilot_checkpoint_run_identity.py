@@ -96,7 +96,13 @@ def test_preflight_checks_title_before_pull_and_has_no_side_effects(pilot_env):
     assert result.returncode == 0, result.stderr
     assert "PREFLIGHT TITLE AVAILABLE" in result.stdout
     recorded = calls(pilot_env)
-    assert any(line.startswith("gh api ") and "--paginate" in line and "state=all" in line for line in recorded)
+    assert any(
+        line.startswith("gh api ")
+        and "--paginate" in line
+        and "--slurp" not in line
+        and "state=all" in line
+        for line in recorded
+    )
     assert not any(" pull " in line or "issue create" in line or line.startswith("uv ") for line in recorded)
 
 
