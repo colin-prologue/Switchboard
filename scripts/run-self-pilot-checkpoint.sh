@@ -4,7 +4,8 @@
 # pilot workflow. The production Claude-only binding is untouched and is the
 # rollback: `scripts/run-project.sh switchboard-self`.
 #
-# Usage: scripts/run-self-pilot-checkpoint.sh <explicit-codex|rollback> [--dry-run]
+# Usage: scripts/run-self-pilot-checkpoint.sh explicit-codex --run-id <lowercase-id> [--dry-run|--preflight]
+#        scripts/run-self-pilot-checkpoint.sh rollback [--dry-run]
 #   explicit-codex  file + dispatch the one agent:codex pilot issue (docs-only)
 #   rollback        demonstrate rollback: print/exec the unchanged Claude-only
 #                   launch after asserting no pilot orchestrator is running
@@ -24,25 +25,50 @@ APP_ENV="$HOME/.config/switchboard/app.env"
 PREREQ_ISSUES="47 57 61 109"
 PHASE="${1:-}"
 DRY_RUN=0
+PREFLIGHT_ONLY=0
+RUN_ID=""
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Reject anything that is not exactly --dry-run BEFORE any live action: a
-# mistyped flag must fail loudly, never silently launch against the live
-# repository (PR #117 review).
-if [ "$#" -gt 2 ]; then
-  fail "too many arguments; usage: $0 <explicit-codex|rollback> [--dry-run]"
-fi
-if [ -n "${2:-}" ]; then
-  case "$2" in
-    --dry-run) DRY_RUN=1 ;;
-    *) fail "unknown argument: $2 (only --dry-run is accepted)" ;;
+shift || true
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run)
+      [ "$DRY_RUN" -eq 0 ] || fail "--dry-run may be supplied only once"
+      DRY_RUN=1
+      ;;
+    --preflight)
+      [ "$PHASE" = "explicit-codex" ] || fail "--preflight is only valid for explicit-codex"
+      [ "$PREFLIGHT_ONLY" -eq 0 ] || fail "--preflight may be supplied only once"
+      PREFLIGHT_ONLY=1
+      ;;
+    --run-id)
+      [ "$PHASE" = "explicit-codex" ] || fail "--run-id is only valid for explicit-codex"
+      [ -z "$RUN_ID" ] || fail "--run-id may be supplied only once"
+      shift
+      [ -n "${1:-}" ] || fail "--run-id requires a value"
+      RUN_ID="$1"
+      ;;
+    *) fail "unknown argument: $1" ;;
   esac
+  shift
+done
+[ "$DRY_RUN" -eq 0 ] || [ "$PREFLIGHT_ONLY" -eq 0 ] \
+  || fail "--dry-run and --preflight cannot be combined"
+[ "$PHASE" != "explicit-codex" ] || [ -n "$RUN_ID" ] \
+  || fail "explicit-codex requires --run-id <lowercase-id>"
+if [ -n "$RUN_ID" ]; then
+  case "$RUN_ID" in
+    *[!a-z0-9-]*|-*|*-) fail "invalid run id: $RUN_ID" ;;
+  esac
+  [ "${#RUN_ID}" -le 40 ] || fail "run id is too long (maximum 40 characters)"
 fi
 
 case "$PHASE" in
   explicit-codex)
-    TITLE="Self-pilot checkpoint 1: explicit Codex on Switchboard (docs-only)"
+    # A new, validated identity avoids a collision with a historical run while
+    # retaining fail-closed duplicate detection for this exact run.
+    TITLE="Self-pilot checkpoint 1 [$RUN_ID]: explicit Codex on Switchboard (docs-only)"
     BODY_FILE="$CHECKPOINT_DIR/01-explicit-codex.md"
     ISSUE_LABELS="status:todo,gate:triage-passed,agent:codex"
     ;;
@@ -97,6 +123,17 @@ gh_clean auth status >/dev/null 2>&1 || fail "gh is not authenticated"
   || fail "checkout must be on main (pilot config is reviewed at HEAD)"
 [ -z "$(git -C "$SB_HOME" status --porcelain)" ] \
   || fail "checkout has uncommitted changes"
+
+# This limited preflight intentionally performs no checkout update, GitHub
+# write, or process launch.  It only establishes title availability.
+if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
+  CURRENT_COUNT="$(CHECKPOINT_TITLE="$TITLE" gh_clean api --paginate --slurp \
+    "repos/$REPO/issues?state=all&per_page=100" --jq \
+    '[.[][] | select(.pull_request | not) | select(.title == env.CHECKPOINT_TITLE)] | length')"
+  [ "$CURRENT_COUNT" = "0" ] || fail "checkpoint already exists: $TITLE"
+  printf 'RESULT: PREFLIGHT TITLE AVAILABLE (run-id=%s; no checkout update, GitHub writes, or process launch).\n' "$RUN_ID"
+  exit 0
+fi
 git -C "$SB_HOME" pull --ff-only origin main
 [ -z "$(git -C "$SB_HOME" status --porcelain)" ] \
   || fail "checkout changed during update"
@@ -133,9 +170,9 @@ for issue in $PREREQ_ISSUES; do
   [ "$STATE" = "CLOSED" ] || fail "prerequisite issue #$issue is $STATE, not CLOSED"
 done
 
-CURRENT_COUNT="$(CHECKPOINT_TITLE="$TITLE" gh_clean issue list --repo "$REPO" \
-  --state all --limit 100 --json title --jq \
-  '[.[] | select(.title == env.CHECKPOINT_TITLE)] | length')"
+CURRENT_COUNT="$(CHECKPOINT_TITLE="$TITLE" gh_clean api --paginate --slurp \
+  "repos/$REPO/issues?state=all&per_page=100" --jq \
+  '[.[][] | select(.pull_request | not) | select(.title == env.CHECKPOINT_TITLE)] | length')"
 [ "$CURRENT_COUNT" = "0" ] || fail "checkpoint already exists: $TITLE"
 
 CODEX_LABELED="$(gh_clean issue list --repo "$REPO" --state open \
@@ -217,11 +254,11 @@ PR_COUNT="$(gh_clean pr list --repo "$REPO" --state open --head "$BRANCH" \
 [ -z "$(git -C "$WORKSPACE" status --porcelain | grep -v '^.. \.run/' || true)" ] \
   || fail "workspace is not clean after handoff"
 
-RECORD="$CHECKPOINT_DIR/RESULT-01-explicit-codex.md"
+RECORD="$CHECKPOINT_DIR/RESULT-01-explicit-codex-$RUN_ID.md"
 {
   printf '# Self-pilot checkpoint 1 result (%s)\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  printf -- '- issue: %s\n- branch: %s\n- workspace: %s\n- log: %s\n' \
-    "$ISSUE_URL" "$BRANCH" "$WORKSPACE" "$LOG"
+  printf -- '- run-id: %s\n- issue: %s\n- branch: %s\n- workspace: %s\n- log: %s\n' \
+    "$RUN_ID" "$ISSUE_URL" "$BRANCH" "$WORKSPACE" "$LOG"
   printf -- '- evidence: %s/.run/handoff-evidence.json\n' "$WORKSPACE"
   printf -- '- pr: %s\n' "$(gh_clean pr list --repo "$REPO" --state open \
       --head "$BRANCH" --json url --jq '.[0].url')"
