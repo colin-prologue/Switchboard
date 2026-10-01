@@ -63,6 +63,20 @@ def stance_of(sb_home: Path, slug: str) -> str:
             return line.split("=", 1)[1].strip()
     raise AssertionError(f"no SB_WORKFLOW_STANCE in {env_file}")
 
+def test_default_workspace_base_persists_a_portable_home_expression(sb_home, tmp_path):
+    env = dict(os.environ)
+    env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
+    env.pop("SB_WORKSPACE_BASE", None)
+    env["HOME"] = str(tmp_path / "home")
+    proc = subprocess.run(
+        ["bash", str(sb_home / "scripts" / "register-project.sh"),
+         "--slug", "portable", "--repo", "acme/api"],
+        env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    project = sb_home / "projects" / "portable"
+    expected = chr(36) + "HOME/Developer/switchboard-workspaces/portable"
+    assert f"SB_WORKSPACE_ROOT={expected}" in (project / "project.env").read_text()
+    assert f'root: "{expected}"' in (project / "WORKFLOW.md").read_text()
 
 def test_self_defaults_to_base_not_prototype(sb_home, tmp_path):
     """The bug: a fresh Stage 4 would hand Switchboard's own workers the right
@@ -144,6 +158,15 @@ TRACKED_PROJECT_BINDINGS = (
 def test_tracked_workspace_root_is_home_relative(binding: Path) -> None:
     """Bindings must be usable on the Linux host that owns dispatch."""
     assert "SB_WORKSPACE_ROOT=" + chr(36) + "HOME/Developer/switchboard-workspaces/" in binding.read_text(encoding="utf-8")
+
+
+PILOT_WORKFLOW = REPO_ROOT / "projects" / "switchboard-self" / "WORKFLOW.pilot-codex.md"
+
+
+def test_codex_pilot_workspace_root_is_home_relative() -> None:
+    """The isolated pilot must be runnable by the WSL host."""
+    expected = "root: " + chr(34) + chr(36) + "HOME/Developer/switchboard-workspaces/switchboard-self" + chr(34)
+    assert expected in PILOT_WORKFLOW.read_text(encoding="utf-8")
 
 @pytest.mark.parametrize(
     "placeholder", ["{{OPERATOR_LOGIN_YAML}}", "{{REVIEW_BOT_YAML}}"]

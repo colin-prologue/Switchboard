@@ -20,7 +20,7 @@ polling:
   interval_ms: 30000
 
 workspace:
-  root: "/Users/colindwan/Developer/switchboard-workspaces/switchboard-self"
+  root: "$HOME/Developer/switchboard-workspaces/switchboard-self"
 
 hooks:
   # Hooks run with cwd == the per-issue workspace dir. They derive the issue
