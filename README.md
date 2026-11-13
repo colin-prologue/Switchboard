@@ -1,5 +1,11 @@
 # Switchboard
 
+> **Retired on 2026-11-13.** The dispatcher no longer runs and no new projects
+> are registered. This repository is kept as a reference. What was kept, what
+> was rejected and how to restart it are in
+> [`self/.decisions/AgDR-2026-11-13-dispatcher-retired.md`](self/.decisions/AgDR-2026-11-13-dispatcher-retired.md).
+> Everything below describes the system as it ran.
+
 Switchboard turns a GitHub issue board into a work queue for Claude agents.
 You file tickets; an orchestrator dispatches each one to a fresh Claude session
 in its own workspace; agents hand finished work back as PRs.
